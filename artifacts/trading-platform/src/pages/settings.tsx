@@ -14,6 +14,7 @@ export default function Settings() {
   const { data: account } = useGetAccount();
   const updateSettings = useUpdateSettings();
 
+  const [loopInterval, setLoopInterval] = useState(30);
   const [formData, setFormData] = useState({
     riskProfile: "moderate",
     maxRiskPerTrade: 2,
@@ -141,6 +142,24 @@ export default function Settings() {
             />
           </div>
           
+              <div className="flex items-center justify-between p-4 border border-border rounded-lg bg-secondary/30">
+            <div>
+              <div className="font-medium">Autonomous Trade Interval</div>
+              <div className="text-sm text-muted-foreground">Seconds between autonomous trade attempts (10–300).</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={10}
+                max={300}
+                value={loopInterval}
+                onChange={(e) => setLoopInterval(Math.max(10, Math.min(300, Number(e.target.value))))}
+                className="w-20 text-center font-mono text-sm bg-secondary border border-border rounded-md px-2 py-1.5 text-foreground"
+              />
+              <span className="text-xs text-muted-foreground">sec</span>
+            </div>
+          </div>
+
           {account && (
             <div className="p-4 border border-border rounded-lg bg-secondary/30">
               <div className="text-sm font-medium mb-2 uppercase tracking-wider text-muted-foreground">Connected Exchange</div>

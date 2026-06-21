@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import {
   useGetDailySummary,
   useGetTopMarket,
@@ -11,9 +12,9 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { Link } from "wouter";
-import { TrendingUp, TrendingDown, Activity, Zap, Shield, AlertTriangle, Target, ChevronRight } from "lucide-react";
+import { TrendingUp, TrendingDown, Activity, Zap, Shield, AlertTriangle, Target, ChevronRight, Clock, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 function ConfidenceRing({ value, size = 56 }: { value: number; size?: number }) {
@@ -39,12 +40,26 @@ function ConfidenceRing({ value, size = 56 }: { value: number; size?: number }) 
 export default function Dashboard() {
   const { data: summary } = useGetDailySummary({ query: { refetchInterval: 5000 } } as { query: any });
   const { data: topMarket } = useGetTopMarket({ query: { refetchInterval: 8000 } } as { query: any });
-  const { data: engine } = useGetAiEngineStatus({ query: { refetchInterval: 5000 } } as { query: any });
+  const { data: engine, refetch: refetchEngine } = useGetAiEngineStatus({ query: { refetchInterval: 3000 } } as { query: any });
   const { data: stats } = useGetTradeStats({ query: { refetchInterval: 10000 } } as { query: any });
   const { data: insights } = useGetAiInsights({ query: { refetchInterval: 30000 } } as { query: any });
   const { data: account } = useGetAccount();
   const executeTrade = useExecuteTrade();
   const toggleEngine = useToggleAutonomousEngine();
+
+  // Live countdown to next autonomous trade
+  const [countdown, setCountdown] = useState<number | null>(null);
+  useEffect(() => {
+    if (!engine?.isRunning || !engine?.nextScanIn) { setCountdown(null); return; }
+    setCountdown(engine.nextScanIn);
+    const iv = setInterval(() => {
+      setCountdown((c) => {
+        if (c === null || c <= 1) { refetchEngine(); return null; }
+        return c - 1;
+      });
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [engine?.isRunning, engine?.nextScanIn]);
 
   const targetPct = summary ? Math.max(0, Math.min(100, (summary.totalProfit / summary.dailyTarget) * 100)) : 0;
   const isProfit = (summary?.totalProfit ?? 0) >= 0;
@@ -235,7 +250,45 @@ export default function Dashboard() {
             </div>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          {/* Autonomous loop status bar */}
+          <AnimatePresence>
+            {engine?.isRunning && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                className="flex items-center gap-4 p-3 rounded-lg bg-green-500/5 border border-green-500/20 overflow-hidden"
+              >
+                <div className="flex items-center gap-2 flex-1">
+                  <RefreshCw className="w-3.5 h-3.5 text-green-500 animate-spin" />
+                  <span className="text-xs text-green-400 font-mono">
+                    {engine.currentMarket ? `Scanning ${engine.currentMarket}` : "Scanning markets…"}
+                  </span>
+                </div>
+                {countdown !== null && (
+                  <div className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground">
+                    <Clock className="w-3 h-3" />
+                    <span>Next trade in <span className="text-foreground font-bold">{countdown}s</span></span>
+                  </div>
+                )}
+                <div className="text-[10px] text-muted-foreground font-mono">
+                  every {engine.loopIntervalSec ?? 30}s
+                </div>
+              </motion.div>
+            )}
+            {!engine?.isRunning && engine?.stopReasons && engine.stopReasons.length > 0 && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="flex items-center gap-2 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
+                <span className="text-xs text-amber-400">{engine.stopReasons[0]}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {engine?.agentStatuses.map((agent) => {
               const conf = agent.confidence;
@@ -245,7 +298,7 @@ export default function Dashboard() {
                 <div key={agent.name} className={`p-3 rounded-lg border ${bg} relative overflow-hidden`}>
                   <div className="flex justify-between items-start mb-1.5">
                     <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide leading-tight pr-2">{agent.name}</div>
-                    <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-0.5 ${agent.isActive ? "bg-green-500" : "bg-zinc-600"}`} />
+                    <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-0.5 ${agent.isActive ? "bg-green-500 animate-pulse" : "bg-zinc-600"}`} />
                   </div>
                   <div className={`text-xl font-mono font-bold ${color}`}>{conf.toFixed(1)}%</div>
                   <div className="mt-1.5 h-0.5 w-full bg-black/20 rounded-full overflow-hidden">
