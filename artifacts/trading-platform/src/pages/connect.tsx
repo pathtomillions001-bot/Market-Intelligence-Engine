@@ -21,8 +21,8 @@ export default function Connect() {
         toast.success("Account connected successfully");
         setToken("");
       },
-      onError: (err) => {
-        toast.error(err.error || "Failed to connect account");
+      onError: (err: any) => {
+        toast.error(err?.error || "Failed to connect account");
       }
     });
   };

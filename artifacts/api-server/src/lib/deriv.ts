@@ -141,7 +141,7 @@ export async function getTickHistory(symbol: string, count: number = 50): Promis
       const timeout = setTimeout(() => {
         ws.close();
         resolve(generateSimulatedPrices(symbol, count));
-      }, 8000);
+      }, 3000);
 
       ws.on("open", () => {
         ws.send(JSON.stringify({

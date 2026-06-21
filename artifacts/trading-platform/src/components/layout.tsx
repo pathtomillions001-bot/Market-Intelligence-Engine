@@ -7,9 +7,7 @@ import { Label } from "./ui/label";
 
 export function Layout({ children }: { children: ReactNode }) {
   const [location] = useLocation();
-  const { data: engineStatus } = useGetAiEngineStatus({
-    query: { refetchInterval: 5000 }
-  });
+  const { data: engineStatus } = useGetAiEngineStatus({ query: { refetchInterval: 5000 } } as { query: any });
   const toggleEngine = useToggleAutonomousEngine();
 
   const navItems = [

@@ -11,10 +11,9 @@ import Dashboard from "./pages/dashboard";
 import Markets from "./pages/markets";
 import MarketDetail from "./pages/market-detail";
 import Trades from "./pages/trades";
+import Analytics from "./pages/analytics";
 import Connect from "./pages/connect";
-// Placeholders for the remaining requested files
-const Analytics = () => <div className="p-8 text-xl font-bold">Analytics - Work in Progress</div>;
-const Settings = () => <div className="p-8 text-xl font-bold">Settings - Work in Progress</div>;
+import Settings from "./pages/settings";
 
 const queryClient = new QueryClient();
 
@@ -46,7 +45,7 @@ function App() {
         <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
           <Router />
         </WouterRouter>
-        <Toaster theme="dark" />
+        <Toaster />
       </TooltipProvider>
     </QueryClientProvider>
   );

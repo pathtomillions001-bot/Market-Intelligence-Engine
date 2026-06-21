@@ -48,7 +48,7 @@ export default function Settings() {
       }
     }, {
       onSuccess: () => toast.success("Settings updated successfully"),
-      onError: (err) => toast.error(err.error || "Failed to update settings")
+      onError: (err: any) => toast.error(err?.error || "Failed to update settings")
     });
   };
 

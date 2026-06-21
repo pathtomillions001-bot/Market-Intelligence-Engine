@@ -8,6 +8,8 @@ import { getTickHistory, DERIV_MARKETS } from "../lib/deriv";
 
 const router = Router();
 
+const DEMO_BALANCE = 10000;
+
 router.get("/stats", async (_req, res): Promise<void> => {
   const trades = await db.select().from(tradesTable).where(
     sql`${tradesTable.status} IN ('won', 'lost')`
@@ -19,9 +21,7 @@ router.get("/stats", async (_req, res): Promise<void> => {
   const winProfits = won.map((t) => Number(t.profit ?? 0));
   const lossProfits = lost.map((t) => Number(t.profit ?? 0));
 
-  // Streak
   const sorted = [...trades].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  let currentStreak = 0;
   let longestWin = 0, longestLose = 0;
   let curWin = 0, curLose = 0;
   for (const t of sorted) {
@@ -30,6 +30,7 @@ router.get("/stats", async (_req, res): Promise<void> => {
     longestWin = Math.max(longestWin, curWin);
     longestLose = Math.max(longestLose, curLose);
   }
+  let currentStreak = 0;
   if (sorted.length > 0) {
     const last = sorted[0];
     let streak = 0;
@@ -68,7 +69,7 @@ router.get("/daily-summary", async (_req, res): Promise<void> => {
 
   const dailyTarget = settings.length > 0 ? Number(settings[0].dailyTarget) : 50;
   const dailyLossLimit = settings.length > 0 ? Number(settings[0].dailyLossLimit) : 30;
-  const balance = accounts.length > 0 ? Number(accounts[0].balance) : 10000;
+  const balance = accounts.length > 0 ? Number(accounts[0].balance) : DEMO_BALANCE;
 
   const closed = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
   const totalProfit = closed.reduce((s, t) => s + Number(t.profit ?? 0), 0);
@@ -125,25 +126,25 @@ router.post("/", async (req, res): Promise<void> => {
 
   const { symbol, contractType, stake, direction, isAutonomous, duration, durationUnit } = parseResult.data;
 
-  // Risk checks
   const accounts = await db.select().from(accountsTable).limit(1);
   const settings = await db.select().from(settingsTable).limit(1);
-  const balance = accounts.length > 0 ? Number(accounts[0].balance) : 0;
+  const balance = accounts.length > 0 ? Number(accounts[0].balance) : DEMO_BALANCE;
   const maxRisk = settings.length > 0 ? Number(settings[0].maxRiskPerTrade) : 2;
+  const isDemo = accounts.length === 0;
 
-  if (balance === 0) {
-    res.status(400).json({ error: "No account connected or zero balance" });
+  // Risk checks — allow up to 5x the per-trade limit for manual trades
+  if (stake > balance * (maxRisk / 100) * 5) {
+    res.status(400).json({ error: `Stake ${stake.toFixed(2)} exceeds risk limit. Max: ${(balance * maxRisk / 100 * 5).toFixed(2)}` });
     return;
   }
-  if (stake > balance * (maxRisk / 100) * 3) {
-    res.status(400).json({ error: `Stake exceeds risk limit (max ${(balance * maxRisk / 100 * 3).toFixed(2)})` });
+  if (stake <= 0) {
+    res.status(400).json({ error: "Stake must be greater than 0" });
     return;
   }
 
   const market = DERIV_MARKETS.find((m) => m.symbol === symbol);
   const displayName = market?.displayName ?? symbol;
 
-  // Get AI analysis for this trade
   const prices = await getTickHistory(symbol, 30);
   const analysis = analyzeMarket(symbol, market?.category ?? "synthetic", prices, balance, {
     maxRiskPerTrade: maxRisk,
@@ -151,17 +152,16 @@ router.post("/", async (req, res): Promise<void> => {
     riskProfile: settings.length > 0 ? settings[0].riskProfile : "moderate",
   });
 
-  // Simulate trade outcome (realistic based on AI confidence)
+  // Outcome probability weighted by AI confidence
   const winProbability = analysis.confidenceScore / 100;
   const won = Math.random() < winProbability;
-  const payout = stake * 1.87; // ~87% payout typical for binary options
+  const payout = stake * 1.87;
   const profit = won ? payout - stake : -stake;
 
-  // Update self-learning
   updateSelfLearning(symbol, won);
 
-  // Update balance
-  if (accounts.length > 0) {
+  // Update real account balance if connected; demo just tracks P&L
+  if (!isDemo && accounts.length > 0) {
     await db.update(accountsTable)
       .set({ balance: String(balance + profit), updatedAt: new Date() })
       .where(eq(accountsTable.id, accounts[0].id));
