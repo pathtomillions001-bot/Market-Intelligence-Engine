@@ -3,6 +3,7 @@ import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
+import { loadPersistedToken } from "./routes/auth";
 
 const app: Express = express();
 
@@ -30,5 +31,8 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
+
+// Load persisted Deriv token so live trading resumes after restart
+loadPersistedToken().catch((err) => logger.warn({ err }, "Token load on startup failed"));
 
 export default app;

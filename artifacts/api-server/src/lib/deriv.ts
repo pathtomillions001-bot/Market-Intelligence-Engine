@@ -24,6 +24,22 @@ export interface DerivAccountInfo {
   country?: string;
 }
 
+export interface LiveTradeResult {
+  contractId: number;
+  buyPrice: number;
+  entrySpot: number;
+  longcode: string;
+}
+
+export interface ContractResult {
+  contractId: number;
+  won: boolean;
+  profit: number;
+  exitSpot: number;
+  sellPrice: number;
+  entrySpot: number;
+}
+
 const DERIV_WS_URL = "wss://ws.binaryws.com/websockets/v3?app_id=1089";
 
 export const DERIV_MARKETS = [
@@ -124,6 +140,173 @@ export async function authorizeWithDeriv(token: string): Promise<DerivAccountInf
         }
       } catch (e) {
         logger.error({ e }, "Failed to parse Deriv message");
+      }
+    });
+
+    ws.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+}
+
+export async function getLiveBalance(token: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    try {
+      const ws = new WebSocket(DERIV_WS_URL);
+      const timeout = setTimeout(() => { ws.close(); resolve(null); }, 8000);
+
+      ws.on("open", () => {
+        ws.send(JSON.stringify({ authorize: token }));
+      });
+
+      ws.on("message", (data) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.msg_type === "authorize" && msg.authorize) {
+            clearTimeout(timeout);
+            ws.close();
+            resolve(Number(msg.authorize.balance));
+          }
+          if (msg.error) {
+            clearTimeout(timeout);
+            ws.close();
+            resolve(null);
+          }
+        } catch { /* ignore */ }
+      });
+
+      ws.on("error", () => { clearTimeout(timeout); ws.close(); resolve(null); });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+export async function executeLiveTrade(token: string, params: {
+  symbol: string;
+  contractType: string;
+  stake: number;
+  duration: number;
+  durationUnit: string;
+  currency: string;
+  barrier?: number;
+}): Promise<LiveTradeResult> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(DERIV_WS_URL);
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("Trade execution timeout"));
+    }, 20000);
+
+    let authorized = false;
+
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ authorize: token }));
+    });
+
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+
+        if (msg.error) {
+          clearTimeout(timeout);
+          ws.close();
+          reject(new Error(msg.error.message || "Trade failed"));
+          return;
+        }
+
+        if (msg.msg_type === "authorize" && !authorized) {
+          authorized = true;
+          const buyParams: Record<string, unknown> = {
+            amount: params.stake,
+            basis: "stake",
+            contract_type: params.contractType,
+            currency: params.currency,
+            duration: params.duration,
+            duration_unit: params.durationUnit,
+            symbol: params.symbol,
+          };
+          if (params.barrier !== undefined) {
+            buyParams.barrier = String(params.barrier);
+          }
+          ws.send(JSON.stringify({ buy: "1", price: params.stake, parameters: buyParams }));
+        }
+
+        if (msg.msg_type === "buy" && msg.buy) {
+          clearTimeout(timeout);
+          ws.close();
+          resolve({
+            contractId: msg.buy.contract_id,
+            buyPrice: Number(msg.buy.buy_price),
+            entrySpot: Number(msg.buy.start_time),
+            longcode: msg.buy.longcode ?? "",
+          });
+        }
+      } catch (e) {
+        logger.error({ e }, "Error parsing Deriv buy response");
+      }
+    });
+
+    ws.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+}
+
+export async function waitForContractResult(token: string, contractId: number, timeoutMs: number = 30000): Promise<ContractResult> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(DERIV_WS_URL);
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("Contract result timeout"));
+    }, timeoutMs + 10000);
+
+    let authorized = false;
+
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ authorize: token }));
+    });
+
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+
+        if (msg.error) {
+          clearTimeout(timeout);
+          ws.close();
+          reject(new Error(msg.error.message || "Contract check failed"));
+          return;
+        }
+
+        if (msg.msg_type === "authorize" && !authorized) {
+          authorized = true;
+          ws.send(JSON.stringify({
+            proposal_open_contracts: 1,
+            contract_id: contractId,
+            subscribe: 1,
+          }));
+        }
+
+        if (msg.msg_type === "proposal_open_contracts" && msg.proposal_open_contracts) {
+          const contract = msg.proposal_open_contracts;
+          if (contract.is_sold || contract.status === "sold") {
+            clearTimeout(timeout);
+            ws.close();
+            const profit = Number(contract.profit ?? 0);
+            resolve({
+              contractId,
+              won: profit > 0,
+              profit,
+              exitSpot: Number(contract.exit_tick ?? contract.current_spot ?? 0),
+              sellPrice: Number(contract.sell_price ?? 0),
+              entrySpot: Number(contract.entry_tick ?? contract.entry_spot ?? 0),
+            });
+          }
+        }
+      } catch (e) {
+        logger.error({ e }, "Error parsing contract result");
       }
     });
 

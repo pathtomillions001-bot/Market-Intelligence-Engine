@@ -758,7 +758,14 @@ export const GetSettingsResponse = zod.object({
   "marketRotationAfter": zod.number().describe('Rotate market after N consecutive trades'),
   "preferredContractTypes": zod.array(zod.string()),
   "preferredCategories": zod.array(zod.string()),
-  "autonomousEnabled": zod.boolean()
+  "autonomousEnabled": zod.boolean(),
+  "loopIntervalSec": zod.number().describe('Seconds between autonomous scan cycles'),
+  "recoveryMode": zod.boolean().describe('Enable conservative stake recovery after losses'),
+  "recoveryMultiplier": zod.number().describe('Stake multiplier after a loss (e.g. 1.2 = 20% increase)'),
+  "maxRecoverySteps": zod.number().describe('Max consecutive recovery multiplications before reset'),
+  "scanAllMarkets": zod.boolean().describe('Scan all available markets in parallel'),
+  "tradeDurationSec": zod.number().describe('Trade contract duration in ticks'),
+  "maxTradeStake": zod.number().describe('Hard cap on stake per trade')
 })
 
 
@@ -776,7 +783,14 @@ export const UpdateSettingsBody = zod.object({
   "marketRotationAfter": zod.number().optional(),
   "preferredContractTypes": zod.array(zod.string()).optional(),
   "preferredCategories": zod.array(zod.string()).optional(),
-  "autonomousEnabled": zod.boolean().optional()
+  "autonomousEnabled": zod.boolean().optional(),
+  "loopIntervalSec": zod.number().optional(),
+  "recoveryMode": zod.boolean().optional(),
+  "recoveryMultiplier": zod.number().optional(),
+  "maxRecoverySteps": zod.number().optional(),
+  "scanAllMarkets": zod.boolean().optional(),
+  "tradeDurationSec": zod.number().optional(),
+  "maxTradeStake": zod.number().optional()
 })
 
 export const UpdateSettingsResponse = zod.object({
@@ -791,7 +805,14 @@ export const UpdateSettingsResponse = zod.object({
   "marketRotationAfter": zod.number().describe('Rotate market after N consecutive trades'),
   "preferredContractTypes": zod.array(zod.string()),
   "preferredCategories": zod.array(zod.string()),
-  "autonomousEnabled": zod.boolean()
+  "autonomousEnabled": zod.boolean(),
+  "loopIntervalSec": zod.number().describe('Seconds between autonomous scan cycles'),
+  "recoveryMode": zod.boolean().describe('Enable conservative stake recovery after losses'),
+  "recoveryMultiplier": zod.number().describe('Stake multiplier after a loss (e.g. 1.2 = 20% increase)'),
+  "maxRecoverySteps": zod.number().describe('Max consecutive recovery multiplications before reset'),
+  "scanAllMarkets": zod.boolean().describe('Scan all available markets in parallel'),
+  "tradeDurationSec": zod.number().describe('Trade contract duration in ticks'),
+  "maxTradeStake": zod.number().describe('Hard cap on stake per trade')
 })
 
 

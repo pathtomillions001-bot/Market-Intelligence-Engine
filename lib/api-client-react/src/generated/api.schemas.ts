@@ -412,6 +412,20 @@ export interface TradingSettings {
   preferredContractTypes: string[];
   preferredCategories: string[];
   autonomousEnabled: boolean;
+  /** Seconds between autonomous scan cycles */
+  loopIntervalSec: number;
+  /** Enable conservative stake recovery after losses */
+  recoveryMode: boolean;
+  /** Stake multiplier after a loss (e.g. 1.2 = 20% increase) */
+  recoveryMultiplier: number;
+  /** Max consecutive recovery multiplications before reset */
+  maxRecoverySteps: number;
+  /** Scan all available markets in parallel */
+  scanAllMarkets: boolean;
+  /** Trade contract duration in ticks */
+  tradeDurationSec: number;
+  /** Hard cap on stake per trade */
+  maxTradeStake: number;
 }
 
 export type TradingSettingsInputRiskProfile = typeof TradingSettingsInputRiskProfile[keyof typeof TradingSettingsInputRiskProfile];
@@ -435,6 +449,13 @@ export interface TradingSettingsInput {
   preferredContractTypes?: string[];
   preferredCategories?: string[];
   autonomousEnabled?: boolean;
+  loopIntervalSec?: number;
+  recoveryMode?: boolean;
+  recoveryMultiplier?: number;
+  maxRecoverySteps?: number;
+  scanAllMarkets?: boolean;
+  tradeDurationSec?: number;
+  maxTradeStake?: number;
 }
 
 export type GetMarketsParams = {

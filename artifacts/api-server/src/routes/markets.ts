@@ -76,7 +76,7 @@ analyzeAllMarkets().catch(() => {});
 
 router.get("/", async (req, res): Promise<void> => {
   const parseResult = GetMarketsQueryParams.safeParse(req.query);
-  const params = parseResult.success ? parseResult.data : {};
+  const params = parseResult.success ? parseResult.data : {} as { category?: string; limit?: number };
   const category = params.category === "all" ? undefined : params.category;
   const limit = params.limit ?? 50;
 

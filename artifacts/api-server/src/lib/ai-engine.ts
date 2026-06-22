@@ -37,6 +37,14 @@ export interface MarketAnalysis {
   shouldTrade: boolean;
   reasoning: string;
   warnings: string[];
+  suggestedContractTypes: ContractTypeOption[];
+}
+
+export interface ContractTypeOption {
+  contractType: string;
+  label: string;
+  description: string;
+  suitable: boolean;
 }
 
 function mean(arr: number[]): number {
@@ -95,7 +103,6 @@ function detectPatterns(prices: number[]): { patternFound: boolean; score: numbe
   const avg = mean(recent);
   const mid = Math.floor(recent.length / 2);
 
-  // Double bottom
   const firstHalf = Math.min(...recent.slice(0, mid));
   const secondHalf = Math.min(...recent.slice(mid));
   const topBetween = Math.max(...recent.slice(2, mid - 1));
@@ -103,18 +110,21 @@ function detectPatterns(prices: number[]): { patternFound: boolean; score: numbe
     return { patternFound: true, score: 78, name: "double bottom" };
   }
 
-  // Breakout
   const range = Math.max(...recent.slice(0, -2)) - Math.min(...recent.slice(0, -2));
   const lastMove = Math.abs(recent[recent.length - 1] - recent[recent.length - 2]);
   if (lastMove > range * 0.6) {
     return { patternFound: true, score: 72, name: "breakout" };
   }
 
-  // Mean reversion
   const zScore = (recent[recent.length - 1] - avg) / (stddev(recent) || 1);
   if (Math.abs(zScore) > 1.5) {
     return { patternFound: true, score: 65, name: "mean reversion setup" };
   }
+
+  // Momentum continuation
+  const last3 = recent.slice(-3);
+  if (last3[0] < last3[1] && last3[1] < last3[2]) return { patternFound: true, score: 68, name: "momentum continuation up" };
+  if (last3[0] > last3[1] && last3[1] > last3[2]) return { patternFound: true, score: 68, name: "momentum continuation down" };
 
   return { patternFound: false, score: 48, name: "no clear pattern" };
 }
@@ -127,7 +137,53 @@ function scoreToSignal(score: number): AgentScore["signal"] {
   return "strong_sell";
 }
 
-// Historical win rate simulation per market (self-learning agent)
+// ── Contract type logic ────────────────────────────────────────────────────────
+
+function getContractTypeOptions(
+  symbol: string,
+  category: string,
+  direction: "up" | "down",
+  rsiVal: number,
+): ContractTypeOption[] {
+  const isSynthetic1s = symbol.startsWith("1HZ") || symbol.startsWith("R_");
+  const isDigitMarket = isSynthetic1s; // Digit contracts available on volatile synthetics
+
+  const callPut: ContractTypeOption[] = [
+    {
+      contractType: direction === "up" ? "CALL" : "PUT",
+      label: direction === "up" ? "CALL" : "PUT",
+      description: `Win if price is ${direction === "up" ? "higher" : "lower"} at expiry`,
+      suitable: true,
+    },
+    {
+      contractType: direction === "up" ? "RISE" : "FALL",
+      label: direction === "up" ? "RISE" : "FALL",
+      description: `Win if price ${direction === "up" ? "rises" : "falls"} from the entry tick`,
+      suitable: true,
+    },
+  ];
+
+  const digitOptions: ContractTypeOption[] = isDigitMarket
+    ? [
+        {
+          contractType: "DIGITOVER",
+          label: "OVER",
+          description: "Win if last digit of exit tick is over 5",
+          suitable: rsiVal < 60,
+        },
+        {
+          contractType: "DIGITUNDER",
+          label: "UNDER",
+          description: "Win if last digit of exit tick is under 5",
+          suitable: rsiVal >= 40,
+        },
+      ]
+    : [];
+
+  return [...callPut, ...digitOptions];
+}
+
+// ── Self-learning per-market win rates ────────────────────────────────────────
 const marketWinRates: Record<string, number> = {};
 const tradeCountPerMarket: Record<string, number> = {};
 
@@ -135,8 +191,11 @@ export function updateSelfLearning(symbol: string, won: boolean) {
   const prev = marketWinRates[symbol] ?? 0.55;
   const count = (tradeCountPerMarket[symbol] ?? 0) + 1;
   tradeCountPerMarket[symbol] = count;
-  // Exponential moving average of win rate
   marketWinRates[symbol] = prev * 0.9 + (won ? 1 : 0) * 0.1;
+}
+
+export function getMarketWinRate(symbol: string): number {
+  return marketWinRates[symbol] ?? 0.55;
 }
 
 export function analyzeMarket(
@@ -148,6 +207,9 @@ export function analyzeMarket(
     maxRiskPerTrade: number;
     minConfidenceThreshold: number;
     riskProfile: string;
+    preferredContractTypes?: string[];
+    tradeDurationSec?: number;
+    maxTradeStake?: number;
   }
 ): MarketAnalysis {
   if (prices.length < 5) {
@@ -159,11 +221,9 @@ export function analyzeMarket(
   const avgPrice = mean(prices);
   const rangeRatio = priceRange / avgPrice;
   let scannerScore = 50;
-  // Good range means tradeable but not chaotic
   if (rangeRatio > 0.001 && rangeRatio < 0.05) scannerScore = 75;
   else if (rangeRatio > 0.0005) scannerScore = 62;
-  else if (rangeRatio > 0.1) scannerScore = 35; // too volatile
-  // Bonus for synthetic indices (always available)
+  else if (rangeRatio > 0.1) scannerScore = 35;
   if (category === "synthetic") scannerScore = Math.min(scannerScore + 8, 100);
   const marketScanner: AgentScore = {
     score: scannerScore,
@@ -212,8 +272,7 @@ export function analyzeMarket(
   // === 5. Risk Management Agent ===
   const rsiVal = rsi(prices);
   let riskScore = 60;
-  // RSI overbought/oversold
-  if (rsiVal > 75 || rsiVal < 25) riskScore = 40; // risky at extremes
+  if (rsiVal > 75 || rsiVal < 25) riskScore = 40;
   else if (rsiVal > 65 || rsiVal < 35) riskScore = 55;
   else riskScore = 72;
   const riskManagement: AgentScore = {
@@ -227,7 +286,8 @@ export function analyzeMarket(
   const maxStake = balance * (settings.maxRiskPerTrade / 100);
   const riskProfileMultiplier = settings.riskProfile === "conservative" ? 0.5
     : settings.riskProfile === "aggressive" ? 1.5 : 1.0;
-  const safeStake = Math.min(maxStake * riskProfileMultiplier, balance * 0.05);
+  let safeStake = Math.min(maxStake * riskProfileMultiplier, balance * 0.05);
+  if (settings.maxTradeStake) safeStake = Math.min(safeStake, settings.maxTradeStake);
   const capScore = safeStake > 0 ? 72 : 30;
   const capitalPreservation: AgentScore = {
     score: capScore,
@@ -287,15 +347,20 @@ export function analyzeMarket(
 
   const overallRiskScore = Math.round(100 - (riskManagement.score * 0.5 + capitalPreservation.score * 0.3 + volatilityAnalysis.score * 0.2));
 
-  // Direction based on trend
   const direction: "up" | "down" = (trend === "strong_up" || trend === "up") ? "up"
     : (trend === "strong_down" || trend === "down") ? "down"
     : rsiVal < 45 ? "up" : "down";
 
-  // Contract type recommendation
-  const contractType = category === "synthetic" || category === "derived"
-    ? (direction === "up" ? "CALL" : "PUT")
-    : (direction === "up" ? "CALL" : "PUT");
+  // ── Smart contract type selection ────────────────────────────────────────
+  const contractTypeOptions = getContractTypeOptions(symbol, category, direction, rsiVal);
+  const preferred = settings.preferredContractTypes ?? ["CALL", "PUT", "RISE", "FALL"];
+
+  // Pick the first preferred contract type that is also marked suitable
+  const chosenType = contractTypeOptions.find(
+    (opt) => preferred.includes(opt.contractType) && opt.suitable
+  ) ?? contractTypeOptions[0];
+
+  const contractType = chosenType?.contractType ?? (direction === "up" ? "CALL" : "PUT");
 
   const profitability = Math.round((confidenceScore * 0.6 + qualityScore * 0.4) * 0.95);
 
@@ -310,7 +375,7 @@ export function analyzeMarket(
     && overallRiskScore < 70
     && volCategory !== "extreme";
 
-  const reasoning = `Market Quality: ${qualityScore}/100. Trend ${trend.replace("_", " ")} with ${(strength * 100).toFixed(0)}% strength. ${patternFound ? `Pattern: ${detectPatterns(prices).name}. ` : ""}RSI at ${rsiVal.toFixed(1)}. AI recommends ${direction.toUpperCase()} ${contractType} with ${(historicalWinRate * 100).toFixed(0)}% historical win rate on this market. ${shouldTrade ? "All risk checks passed." : "Risk threshold not met — skipping."}`;
+  const reasoning = `Market Quality: ${qualityScore}/100. Trend ${trend.replace("_", " ")} with ${(strength * 100).toFixed(0)}% strength. ${patternFound ? `Pattern: ${patName}. ` : ""}RSI at ${rsiVal.toFixed(1)}. AI recommends ${direction.toUpperCase()} ${contractType} with ${(historicalWinRate * 100).toFixed(0)}% historical win rate on this market. ${shouldTrade ? "All risk checks passed." : "Risk threshold not met — skipping."}`;
 
   return {
     symbol,
@@ -321,11 +386,12 @@ export function analyzeMarket(
     volatility: volCategory,
     recommendedContractType: contractType,
     direction,
-    recommendedStake: Math.round(safeStake * 100) / 100,
+    recommendedStake: Math.max(0.35, Math.round(safeStake * 100) / 100),
     profitability,
     agentScores,
     shouldTrade,
     reasoning,
     warnings,
+    suggestedContractTypes: contractTypeOptions,
   };
 }

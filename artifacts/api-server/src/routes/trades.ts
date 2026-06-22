@@ -98,11 +98,12 @@ router.get("/", async (req, res): Promise<void> => {
   let query = db.select().from(tradesTable).$dynamic();
   const conditions = [];
 
-  if (params.status && params.status !== "all") {
-    conditions.push(eq(tradesTable.status, params.status));
+  const p = params as { status?: string; market?: string; limit?: number; offset?: number };
+  if (p.status && p.status !== "all") {
+    conditions.push(eq(tradesTable.status, p.status));
   }
-  if (params.market) {
-    conditions.push(eq(tradesTable.symbol, params.market));
+  if (p.market) {
+    conditions.push(eq(tradesTable.symbol, p.market));
   }
 
   if (conditions.length > 0) {
@@ -111,8 +112,8 @@ router.get("/", async (req, res): Promise<void> => {
 
   const trades = await query
     .orderBy(desc(tradesTable.createdAt))
-    .limit(params.limit ?? 50)
-    .offset(params.offset ?? 0);
+    .limit(p.limit ?? 50)
+    .offset(p.offset ?? 0);
 
   res.json(trades.map(formatTrade));
 });

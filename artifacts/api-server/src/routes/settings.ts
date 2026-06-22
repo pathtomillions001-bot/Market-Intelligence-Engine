@@ -27,6 +27,13 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     preferredContractTypes: s.preferredContractTypes.split(",").filter(Boolean),
     preferredCategories: s.preferredCategories.split(",").filter(Boolean),
     autonomousEnabled: s.autonomousEnabled,
+    loopIntervalSec: s.loopIntervalSec,
+    recoveryMode: s.recoveryMode,
+    recoveryMultiplier: Number(s.recoveryMultiplier),
+    maxRecoverySteps: s.maxRecoverySteps,
+    scanAllMarkets: s.scanAllMarkets,
+    tradeDurationSec: s.tradeDurationSec,
+    maxTradeStake: Number(s.maxTradeStake),
   };
 }
 
@@ -60,6 +67,13 @@ router.put("/", async (req, res): Promise<void> => {
   if (updates.preferredContractTypes !== undefined) updateData.preferredContractTypes = updates.preferredContractTypes.join(",");
   if (updates.preferredCategories !== undefined) updateData.preferredCategories = updates.preferredCategories.join(",");
   if (updates.autonomousEnabled !== undefined) updateData.autonomousEnabled = updates.autonomousEnabled;
+  if ((updates as any).loopIntervalSec !== undefined) updateData.loopIntervalSec = (updates as any).loopIntervalSec;
+  if ((updates as any).recoveryMode !== undefined) updateData.recoveryMode = (updates as any).recoveryMode;
+  if ((updates as any).recoveryMultiplier !== undefined) updateData.recoveryMultiplier = String((updates as any).recoveryMultiplier);
+  if ((updates as any).maxRecoverySteps !== undefined) updateData.maxRecoverySteps = (updates as any).maxRecoverySteps;
+  if ((updates as any).scanAllMarkets !== undefined) updateData.scanAllMarkets = (updates as any).scanAllMarkets;
+  if ((updates as any).tradeDurationSec !== undefined) updateData.tradeDurationSec = (updates as any).tradeDurationSec;
+  if ((updates as any).maxTradeStake !== undefined) updateData.maxTradeStake = String((updates as any).maxTradeStake);
 
   const [updated] = await db.update(settingsTable)
     .set(updateData)

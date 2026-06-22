@@ -2,10 +2,24 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { accountsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { authorizeWithDeriv, setDerivToken, clearDerivToken, getCachedAccountInfo } from "../lib/deriv";
+import { authorizeWithDeriv, setDerivToken, clearDerivToken, getCachedAccountInfo, getLiveBalance } from "../lib/deriv";
 import { ConnectDerivAccountBody } from "@workspace/api-zod";
+import { logger } from "../lib/logger";
 
 const router = Router();
+
+// ── Load persisted token on startup ─────────────────────────────────────────
+export async function loadPersistedToken() {
+  try {
+    const accounts = await db.select().from(accountsTable).limit(1);
+    if (accounts.length > 0 && accounts[0].token) {
+      setDerivToken(accounts[0].token);
+      logger.info({ loginId: accounts[0].loginId }, "Loaded persisted Deriv token from DB");
+    }
+  } catch (err) {
+    logger.warn({ err }, "Failed to load persisted token");
+  }
+}
 
 router.post("/connect", async (req, res): Promise<void> => {
   const parseResult = ConnectDerivAccountBody.safeParse(req.body);
@@ -19,7 +33,6 @@ router.post("/connect", async (req, res): Promise<void> => {
     const accountInfo = await authorizeWithDeriv(token);
     setDerivToken(token);
 
-    // Upsert account
     const existing = await db.select().from(accountsTable).where(eq(accountsTable.loginId, accountInfo.loginid));
     let account;
     if (existing.length > 0) {
@@ -79,6 +92,31 @@ router.get("/account", async (req, res): Promise<void> => {
     return;
   }
   const account = accounts[0];
+
+  // Sync live balance if token is available
+  if (account.token) {
+    try {
+      const liveBalance = await getLiveBalance(account.token);
+      if (liveBalance !== null && Math.abs(liveBalance - Number(account.balance)) > 0.01) {
+        await db.update(accountsTable).set({ balance: String(liveBalance), updatedAt: new Date() }).where(eq(accountsTable.id, account.id));
+        res.json({
+          id: account.id,
+          loginId: account.loginId,
+          currency: account.currency,
+          balance: liveBalance,
+          isVirtual: account.isVirtual,
+          email: account.email,
+          fullName: account.fullName,
+          country: account.country,
+          connectedAt: account.connectedAt.toISOString(),
+        });
+        return;
+      }
+    } catch {
+      // fall through to cached balance
+    }
+  }
+
   res.json({
     id: account.id,
     loginId: account.loginId,

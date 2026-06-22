@@ -938,7 +938,7 @@ components:
 
     TradingSettings:
       type: object
-      required: [id, riskProfile, maxRiskPerTrade, dailyTarget, dailyLossLimit, maxDrawdown, consecutiveLossLimit, minConfidenceThreshold, marketRotationAfter, preferredContractTypes, preferredCategories, autonomousEnabled]
+      required: [id, riskProfile, maxRiskPerTrade, dailyTarget, dailyLossLimit, maxDrawdown, consecutiveLossLimit, minConfidenceThreshold, marketRotationAfter, preferredContractTypes, preferredCategories, autonomousEnabled, loopIntervalSec, recoveryMode, recoveryMultiplier, maxRecoverySteps, scanAllMarkets, tradeDurationSec, maxTradeStake]
       properties:
         id:
           type: integer
@@ -975,6 +975,27 @@ components:
             type: string
         autonomousEnabled:
           type: boolean
+        loopIntervalSec:
+          type: integer
+          description: Seconds between autonomous scan cycles
+        recoveryMode:
+          type: boolean
+          description: Enable conservative stake recovery after losses
+        recoveryMultiplier:
+          type: number
+          description: Stake multiplier after a loss (e.g. 1.2 = 20% increase)
+        maxRecoverySteps:
+          type: integer
+          description: Max consecutive recovery multiplications before reset
+        scanAllMarkets:
+          type: boolean
+          description: Scan all available markets in parallel
+        tradeDurationSec:
+          type: integer
+          description: Trade contract duration in ticks
+        maxTradeStake:
+          type: number
+          description: Hard cap on stake per trade
 
     TradingSettingsInput:
       type: object
@@ -1006,3 +1027,17 @@ components:
             type: string
         autonomousEnabled:
           type: boolean
+        loopIntervalSec:
+          type: integer
+        recoveryMode:
+          type: boolean
+        recoveryMultiplier:
+          type: number
+        maxRecoverySteps:
+          type: integer
+        scanAllMarkets:
+          type: boolean
+        tradeDurationSec:
+          type: integer
+        maxTradeStake:
+          type: number

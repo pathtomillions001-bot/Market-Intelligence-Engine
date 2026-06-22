@@ -273,7 +273,7 @@ export default function Dashboard() {
                   </div>
                 )}
                 <div className="text-[10px] text-muted-foreground font-mono">
-                  every {engine.loopIntervalSec ?? 30}s
+                  every {(engine as any).loopIntervalSec ?? 30}s
                 </div>
               </motion.div>
             )}

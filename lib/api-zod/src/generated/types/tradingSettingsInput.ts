@@ -19,4 +19,11 @@ export interface TradingSettingsInput {
   preferredContractTypes?: string[];
   preferredCategories?: string[];
   autonomousEnabled?: boolean;
+  loopIntervalSec?: number;
+  recoveryMode?: boolean;
+  recoveryMultiplier?: number;
+  maxRecoverySteps?: number;
+  scanAllMarkets?: boolean;
+  tradeDurationSec?: number;
+  maxTradeStake?: number;
 }
