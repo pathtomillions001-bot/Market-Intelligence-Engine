@@ -4,6 +4,7 @@ import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
 import { loadPersistedToken } from "./routes/auth";
+import { tickManager, DERIV_MARKETS } from "./lib/deriv";
 
 const app: Express = express();
 
@@ -12,16 +13,10 @@ app.use(
     logger,
     serializers: {
       req(req) {
-        return {
-          id: req.id,
-          method: req.method,
-          url: req.url?.split("?")[0],
-        };
+        return { id: req.id, method: req.method, url: req.url?.split("?")[0] };
       },
       res(res) {
-        return {
-          statusCode: res.statusCode,
-        };
+        return { statusCode: res.statusCode };
       },
     },
   }),
@@ -32,7 +27,12 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
 
-// Load persisted Deriv token so live trading resumes after restart
+// ── Startup ──────────────────────────────────────────────────────────────────
+// Start persistent Deriv tick subscription for all synthetic markets
+tickManager.start(DERIV_MARKETS.map((m) => m.symbol));
+logger.info({ count: DERIV_MARKETS.length, appId: process.env["DERIV_APP_ID"] ? "custom" : "default" }, "TickManager starting up");
+
+// Load persisted token so live trading resumes after restart
 loadPersistedToken().catch((err) => logger.warn({ err }, "Token load on startup failed"));
 
 export default app;

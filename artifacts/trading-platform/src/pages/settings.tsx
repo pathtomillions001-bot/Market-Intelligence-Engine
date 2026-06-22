@@ -28,11 +28,7 @@ function NumInput({ value, onChange, min, max, step = 1, suffix }: {
   return (
     <div className="flex items-center gap-1.5">
       <Input
-        type="number"
-        value={value}
-        min={min}
-        max={max}
-        step={step}
+        type="number" value={value} min={min} max={max} step={step}
         onChange={(e) => onChange(Number(e.target.value))}
         className="w-24 text-right font-mono text-sm bg-secondary/50"
       />
@@ -41,8 +37,19 @@ function NumInput({ value, onChange, min, max, step = 1, suffix }: {
   );
 }
 
-const CONTRACT_TYPE_OPTIONS = ["CALL", "PUT", "RISE", "FALL", "DIGITOVER", "DIGITUNDER"];
-const CATEGORY_OPTIONS = ["synthetic", "forex", "commodities", "derived"];
+// Synthetics only — no forex/commodities/derived
+const CONTRACT_TYPES = [
+  { id: "RISE", label: "RISE", desc: "Price rises from entry tick" },
+  { id: "FALL", label: "FALL", desc: "Price falls from entry tick" },
+  { id: "CALL", label: "CALL", desc: "Higher at expiry" },
+  { id: "PUT", label: "PUT", desc: "Lower at expiry" },
+  { id: "DIGITOVER", label: "OVER", desc: "Last digit > barrier (1s synthetics)" },
+  { id: "DIGITUNDER", label: "UNDER", desc: "Last digit < barrier (1s synthetics)" },
+];
+
+const SYNTHETIC_CATEGORIES = [
+  { id: "synthetic", label: "All Synthetics" },
+];
 
 export default function Settings() {
   const { data: settings, isLoading } = useGetSettings();
@@ -50,7 +57,7 @@ export default function Settings() {
   const updateSettings = useUpdateSettings();
 
   const [form, setForm] = useState({
-    riskProfile: "moderate",
+    riskProfile: "moderate" as "conservative" | "moderate" | "aggressive",
     maxRiskPerTrade: 2,
     dailyTarget: 50,
     dailyLossLimit: 30,
@@ -58,7 +65,7 @@ export default function Settings() {
     consecutiveLossLimit: 3,
     minConfidenceThreshold: 55,
     marketRotationAfter: 5,
-    loopIntervalSec: 30,
+    loopIntervalSec: 15,
     tradeDurationSec: 5,
     maxTradeStake: 500,
     autonomousEnabled: false,
@@ -66,14 +73,14 @@ export default function Settings() {
     recoveryMultiplier: 1.2,
     maxRecoverySteps: 3,
     scanAllMarkets: true,
-    preferredContractTypes: ["CALL", "PUT", "RISE", "FALL"] as string[],
-    preferredCategories: ["synthetic", "forex"] as string[],
+    preferredContractTypes: ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"],
+    preferredCategories: ["synthetic"],
   });
 
   useEffect(() => {
     if (settings) {
       setForm({
-        riskProfile: settings.riskProfile,
+        riskProfile: settings.riskProfile as any,
         maxRiskPerTrade: settings.maxRiskPerTrade,
         dailyTarget: settings.dailyTarget,
         dailyLossLimit: settings.dailyLossLimit,
@@ -81,7 +88,7 @@ export default function Settings() {
         consecutiveLossLimit: settings.consecutiveLossLimit,
         minConfidenceThreshold: settings.minConfidenceThreshold,
         marketRotationAfter: settings.marketRotationAfter,
-        loopIntervalSec: (settings as any).loopIntervalSec ?? 30,
+        loopIntervalSec: (settings as any).loopIntervalSec ?? 15,
         tradeDurationSec: (settings as any).tradeDurationSec ?? 5,
         maxTradeStake: (settings as any).maxTradeStake ?? 500,
         autonomousEnabled: settings.autonomousEnabled,
@@ -89,39 +96,42 @@ export default function Settings() {
         recoveryMultiplier: (settings as any).recoveryMultiplier ?? 1.2,
         maxRecoverySteps: (settings as any).maxRecoverySteps ?? 3,
         scanAllMarkets: (settings as any).scanAllMarkets ?? true,
-        preferredContractTypes: settings.preferredContractTypes,
-        preferredCategories: settings.preferredCategories,
+        preferredContractTypes: settings.preferredContractTypes.length > 0 ? settings.preferredContractTypes : ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"],
+        preferredCategories: ["synthetic"], // always synthetic
       });
     }
   }, [settings]);
 
   const set = (key: string, val: unknown) => setForm((prev) => ({ ...prev, [key]: val }));
-
-  const toggleArr = (arr: string[], val: string): string[] =>
-    arr.includes(val) ? arr.filter((v) => v !== val) : [...arr, val];
+  const toggleContract = (id: string) => setForm((prev) => ({
+    ...prev,
+    preferredContractTypes: prev.preferredContractTypes.includes(id)
+      ? prev.preferredContractTypes.filter((c) => c !== id)
+      : [...prev.preferredContractTypes, id],
+  }));
 
   const handleSave = () => {
-    updateSettings.mutate({ data: form as any }, {
+    updateSettings.mutate({ data: { ...form, preferredCategories: ["synthetic"] } as any }, {
       onSuccess: () => toast.success("Settings saved"),
       onError: (err: any) => toast.error(err?.error || "Failed to save settings"),
     });
   };
 
-  if (isLoading) {
-    return <div className="p-8 text-muted-foreground text-sm animate-pulse">Loading settings…</div>;
-  }
+  if (isLoading) return <div className="p-8 text-muted-foreground text-sm animate-pulse">Loading settings…</div>;
+
+  const maxRecovery = Math.pow(form.recoveryMultiplier, form.maxRecoverySteps);
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-8 max-w-3xl mx-auto space-y-5 pb-20">
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-8 max-w-3xl mx-auto space-y-5 pb-24">
       <div>
         <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Settings</h1>
-        <p className="text-muted-foreground mt-1 text-sm">Full control over the AI engine and risk parameters.</p>
+        <p className="text-muted-foreground mt-1 text-sm">Full control over the AI engine — Synthetic Indices only.</p>
       </div>
 
       {account && (
         <div className="flex items-center gap-3 p-3 rounded-lg bg-green-500/5 border border-green-500/20">
           <div className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
-          <span className="text-sm text-green-400">Live trading on <span className="font-mono">{account.loginId}</span> — Balance: {account.currency} {account.balance.toFixed(2)}</span>
+          <span className="text-sm text-green-400">Live on <span className="font-mono">{account.loginId}</span> — {account.currency} {account.balance.toFixed(2)}</span>
         </div>
       )}
 
@@ -129,14 +139,12 @@ export default function Settings() {
       <Card className="bg-card">
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Risk Profile</CardTitle>
-          <CardDescription className="text-xs">Global risk configuration for the AI engine.</CardDescription>
+          <CardDescription className="text-xs">Core risk configuration applied to all trades.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-0">
-          <SettingRow label="Profile Preset" description="Conservative trades smaller stakes. Aggressive allows higher risk.">
+        <CardContent>
+          <SettingRow label="Profile Preset" description="Affects stake sizing multiplier.">
             <Select value={form.riskProfile} onValueChange={(v) => set("riskProfile", v)}>
-              <SelectTrigger className="w-36 bg-secondary/50 text-sm">
-                <SelectValue />
-              </SelectTrigger>
+              <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="conservative">Conservative</SelectItem>
                 <SelectItem value="moderate">Moderate</SelectItem>
@@ -144,11 +152,11 @@ export default function Settings() {
               </SelectContent>
             </Select>
           </SettingRow>
-          <SettingRow label="Max Risk Per Trade" description="Maximum % of your balance to risk on a single trade.">
+          <SettingRow label="Max Risk Per Trade" description="% of balance to risk per trade.">
             <NumInput value={form.maxRiskPerTrade} onChange={(v) => set("maxRiskPerTrade", v)} min={0.1} max={10} step={0.1} suffix="%" />
           </SettingRow>
-          <SettingRow label="Max Stake Per Trade" description="Hard cap on stake size per trade, regardless of balance.">
-            <NumInput value={form.maxTradeStake} onChange={(v) => set("maxTradeStake", v)} min={0.35} max={50000} step={1} suffix="$" />
+          <SettingRow label="Max Stake Per Trade" description="Hard cap per trade regardless of balance.">
+            <NumInput value={form.maxTradeStake} onChange={(v) => set("maxTradeStake", v)} min={0.35} max={50000} step={0.5} suffix="$" />
           </SettingRow>
         </CardContent>
       </Card>
@@ -157,20 +165,20 @@ export default function Settings() {
       <Card className="bg-card">
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Daily Limits</CardTitle>
-          <CardDescription className="text-xs">Engine stops automatically when these thresholds are reached.</CardDescription>
+          <CardDescription className="text-xs">Engine auto-stops when these are hit.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-0">
-          <SettingRow label="Daily Profit Target" description="Stop trading for the day once this profit is reached.">
+        <CardContent>
+          <SettingRow label="Daily Profit Target" description="Stop once this daily profit is achieved.">
             <NumInput value={form.dailyTarget} onChange={(v) => set("dailyTarget", v)} min={1} max={100000} step={1} suffix="$" />
           </SettingRow>
-          <SettingRow label="Daily Loss Limit" description="Stop trading for the day if total loss reaches this amount.">
+          <SettingRow label="Daily Loss Limit" description="Stop if total daily loss hits this.">
             <NumInput value={form.dailyLossLimit} onChange={(v) => set("dailyLossLimit", v)} min={1} max={100000} step={1} suffix="$" />
           </SettingRow>
-          <SettingRow label="Max Drawdown" description="Stop if portfolio drawdown exceeds this percentage.">
+          <SettingRow label="Max Drawdown" description="Stop if portfolio drops by this %.">
             <NumInput value={form.maxDrawdown} onChange={(v) => set("maxDrawdown", v)} min={1} max={50} step={0.5} suffix="%" />
           </SettingRow>
-          <SettingRow label="Consecutive Loss Limit" description="Pause engine after this many losses in a row.">
-            <NumInput value={form.consecutiveLossLimit} onChange={(v) => set("consecutiveLossLimit", v)} min={1} max={20} step={1} />
+          <SettingRow label="Consecutive Loss Limit" description="Pause after this many losses in a row.">
+            <NumInput value={form.consecutiveLossLimit} onChange={(v) => set("consecutiveLossLimit", v)} min={1} max={20} />
           </SettingRow>
         </CardContent>
       </Card>
@@ -179,25 +187,25 @@ export default function Settings() {
       <Card className="bg-card">
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Engine Behavior</CardTitle>
-          <CardDescription className="text-xs">How the autonomous AI engine scans and executes trades.</CardDescription>
+          <CardDescription className="text-xs">How the AI scans Deriv markets and executes trades.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-0">
-          <SettingRow label="Min Confidence Threshold" description="AI must be at least this confident before trading.">
+        <CardContent>
+          <SettingRow label="Min Confidence Threshold" description="AI must be at least this confident to trade.">
             <NumInput value={form.minConfidenceThreshold} onChange={(v) => set("minConfidenceThreshold", v)} min={40} max={95} step={1} suffix="%" />
           </SettingRow>
-          <SettingRow label="Scan Interval" description="Seconds between each market scan cycle.">
+          <SettingRow label="Scan Interval" description="Seconds between each autonomous scan.">
             <NumInput value={form.loopIntervalSec} onChange={(v) => set("loopIntervalSec", v)} min={5} max={300} step={5} suffix="s" />
           </SettingRow>
-          <SettingRow label="Trade Duration" description="Contract length in ticks (5t = ~5 seconds on synthetic indices).">
+          <SettingRow label="Trade Duration" description="Contract duration in ticks (5t ≈ 5s on 1s synthetics).">
             <NumInput value={form.tradeDurationSec} onChange={(v) => set("tradeDurationSec", v)} min={1} max={10} step={1} suffix="t" />
           </SettingRow>
-          <SettingRow label="Market Rotation After" description="Stay on the same market for this many trades before rotating.">
+          <SettingRow label="Market Rotation After" description="Exploit hot market for N trades before rotating.">
             <NumInput value={form.marketRotationAfter} onChange={(v) => set("marketRotationAfter", v)} min={1} max={20} step={1} />
           </SettingRow>
-          <SettingRow label="Scan All Markets" description="Analyze all 33+ markets in parallel to find the best opportunity.">
+          <SettingRow label="Scan All 17 Synthetics" description="Analyse all markets in parallel for best opportunity.">
             <Switch checked={form.scanAllMarkets} onCheckedChange={(v) => set("scanAllMarkets", v)} />
           </SettingRow>
-          <SettingRow label="Autonomous Trading" description="Allow AI to execute trades without manual approval.">
+          <SettingRow label="Autonomous Trading" description="Allow AI to execute without manual approval.">
             <Switch checked={form.autonomousEnabled} onCheckedChange={(v) => set("autonomousEnabled", v)} />
           </SettingRow>
         </CardContent>
@@ -207,25 +215,25 @@ export default function Settings() {
       <Card className="bg-card">
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Recovery Mode</CardTitle>
-          <CardDescription className="text-xs">Smart stake adjustment after losses — not martingale.</CardDescription>
+          <CardDescription className="text-xs">Per-market stake recovery — not martingale. Resets on any win.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-0">
-          <SettingRow label="Enable Recovery Mode" description="After a loss, slightly increase stake to recover. Resets on any win.">
+        <CardContent>
+          <SettingRow label="Enable Recovery Mode" description="Increase stake slightly after a loss to recover.">
             <Switch checked={form.recoveryMode} onCheckedChange={(v) => set("recoveryMode", v)} />
           </SettingRow>
           {form.recoveryMode && (
             <>
-              <SettingRow label="Recovery Multiplier" description="Stake multiplier after each loss (e.g. 1.2 = 20% increase).">
-                <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", Math.min(Math.max(v, 1.05), 1.5))} min={1.05} max={1.5} step={0.05} suffix="×" />
+              <SettingRow label="Recovery Multiplier" description="Each loss multiplies stake by this factor.">
+                <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", Math.min(1.5, Math.max(1.05, v)))} min={1.05} max={1.5} step={0.05} suffix="×" />
               </SettingRow>
-              <SettingRow label="Max Recovery Steps" description="Max number of consecutive multiplications before resetting to base stake.">
+              <SettingRow label="Max Recovery Steps" description="Max consecutive multiplications before reset.">
                 <NumInput value={form.maxRecoverySteps} onChange={(v) => set("maxRecoverySteps", v)} min={1} max={5} step={1} />
               </SettingRow>
-              <div className="mt-3 p-3 bg-secondary/30 rounded-lg flex items-start gap-2">
+              <div className="mt-3 p-3 bg-secondary/30 rounded-lg flex gap-2">
                 <Info className="w-4 h-4 text-primary flex-shrink-0 mt-0.5" />
                 <p className="text-xs text-muted-foreground">
-                  Max exposure with current settings: <span className="text-foreground font-mono">{form.recoveryMultiplier}^{form.maxRecoverySteps} = {Math.pow(form.recoveryMultiplier, form.maxRecoverySteps).toFixed(2)}×</span> base stake.
-                  This is safe because it resets on any win and is capped by Max Stake Per Trade.
+                  Max exposure: <span className="text-foreground font-mono">{form.recoveryMultiplier}^{form.maxRecoverySteps} = {maxRecovery.toFixed(3)}×</span> base stake — always capped by Max Stake Per Trade.
+                  {maxRecovery > 1.5 && <span className="text-amber-400"> Warning: high multiplier — reduce steps or multiplier.</span>}
                 </p>
               </div>
             </>
@@ -236,62 +244,45 @@ export default function Settings() {
       {/* Contract Types */}
       <Card className="bg-card">
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Contract Types</CardTitle>
-          <CardDescription className="text-xs">Select which contract types the AI engine will use.</CardDescription>
+          <CardTitle className="text-base">Preferred Contract Types</CardTitle>
+          <CardDescription className="text-xs">AI will prioritise selected contract types when scoring opportunities.</CardDescription>
         </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-2">
-            {CONTRACT_TYPE_OPTIONS.map((type) => {
-              const active = form.preferredContractTypes.includes(type);
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {CONTRACT_TYPES.map((c) => {
+              const active = form.preferredContractTypes.includes(c.id);
               return (
                 <button
-                  key={type}
-                  onClick={() => set("preferredContractTypes", toggleArr(form.preferredContractTypes, type))}
-                  className={`px-3 py-1.5 rounded-md text-xs font-mono font-medium border transition-colors ${
-                    active ? "bg-primary/10 border-primary/40 text-primary" : "bg-secondary/50 border-border text-muted-foreground hover:text-foreground"
-                  }`}
+                  key={c.id}
+                  onClick={() => toggleContract(c.id)}
+                  className={`p-2.5 rounded-lg text-left border transition-colors ${active ? "bg-primary/10 border-primary/40 text-primary" : "bg-secondary/50 border-border text-muted-foreground hover:text-foreground"}`}
                 >
-                  {type}
+                  <div className="font-mono font-bold text-sm">{c.label}</div>
+                  <div className="text-[10px] mt-0.5 opacity-70">{c.desc}</div>
                 </button>
               );
             })}
           </div>
-          <div className="mt-3 text-xs text-muted-foreground space-y-0.5">
-            <p><span className="text-foreground">CALL/PUT</span> — higher/lower at expiry (all markets)</p>
-            <p><span className="text-foreground">RISE/FALL</span> — rises/falls from entry tick (synthetic markets)</p>
-            <p><span className="text-foreground">OVER/UNDER</span> — last digit over/under 5 (1s synthetic indices only)</p>
+          <div className="p-3 bg-secondary/20 rounded-lg text-xs text-muted-foreground space-y-0.5">
+            <p><strong className="text-foreground">RISE/FALL</strong> — best for synthetic momentum, no barrier needed</p>
+            <p><strong className="text-foreground">CALL/PUT</strong> — directional with fixed expiry price comparison</p>
+            <p><strong className="text-foreground">OVER/UNDER</strong> — digit analysis; AI picks optimal barrier based on live digit distribution</p>
           </div>
         </CardContent>
       </Card>
 
-      {/* Market Categories */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Market Categories</CardTitle>
-          <CardDescription className="text-xs">Which categories the engine will scan and trade.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-2">
-            {CATEGORY_OPTIONS.map((cat) => {
-              const active = form.preferredCategories.includes(cat);
-              return (
-                <button
-                  key={cat}
-                  onClick={() => set("preferredCategories", toggleArr(form.preferredCategories, cat))}
-                  className={`px-3 py-1.5 rounded-md text-xs font-medium border capitalize transition-colors ${
-                    active ? "bg-primary/10 border-primary/40 text-primary" : "bg-secondary/50 border-border text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {cat}
-                </button>
-              );
-            })}
+      {/* Markets — synthetics only, just informational */}
+      <Card className="bg-card border-primary/20">
+        <CardContent className="pt-4">
+          <div className="flex items-center gap-2 text-sm">
+            <div className="w-2 h-2 rounded-full bg-green-500" />
+            <span className="text-muted-foreground">Trading exclusively on <strong className="text-foreground">17 Deriv Synthetic Indices</strong> — available 24/7, unaffected by news or market hours.</span>
           </div>
         </CardContent>
       </Card>
 
       <div className="flex justify-end pt-2">
-        <Button onClick={handleSave} disabled={updateSettings.isPending} className="w-full sm:w-40">
+        <Button onClick={handleSave} disabled={updateSettings.isPending} className="w-full sm:w-48">
           {updateSettings.isPending ? "Saving…" : "Save All Settings"}
         </Button>
       </div>

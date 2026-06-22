@@ -30,3 +30,8 @@ externalPort = 8081
 [[ports]]
 localPort = 21210
 externalPort = 80
+
+[userenv]
+
+[userenv.shared]
+DERIV_APP_ID = "3DTg9cQeg27PjDzhWLQHnYqLz1nVxSg99K"
