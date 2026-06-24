@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { tradesTable, settingsTable, accountsTable } from "@workspace/db";
-import { sql } from "drizzle-orm";
+import { sql, desc } from "drizzle-orm";
 import { GetPerformanceAnalyticsQueryParams } from "@workspace/api-zod";
 
 const router = Router();
@@ -144,41 +144,29 @@ router.get("/market-breakdown", async (_req, res): Promise<void> => {
 });
 
 router.get("/agent-scores", async (_req, res): Promise<void> => {
-  // Return mock historical agent score accuracy
   const agents = ["marketScanner", "trendAnalysis", "volatilityAnalysis", "patternRecognition",
     "riskManagement", "capitalPreservation", "tradeExecution", "selfLearning"];
 
   const trades = await db.select().from(tradesTable).where(
     sql`${tradesTable.status} IN ('won', 'lost')`
-  ).limit(20);
+  ).orderBy(desc(tradesTable.createdAt)).limit(50);
 
   const records = [];
-  for (const t of trades.slice(-10)) {
-    for (const agent of agents.slice(0, 3)) {
-      const predicted = Number(t.aiConfidence ?? 60);
+  for (const t of trades) {
+    const predicted = Number(t.aiConfidence ?? 60);
+    const won = t.status === "won";
+    for (const agent of agents) {
       records.push({
         date: t.createdAt.toISOString().split("T")[0],
         agentName: agent,
         predictedScore: predicted,
         actualOutcome: t.status,
-        accuracy: t.status === "won" ? (predicted / 100) : (1 - predicted / 100),
+        accuracy: won ? predicted / 100 : 1 - predicted / 100,
       });
     }
   }
 
-  if (records.length === 0) {
-    // Seed with example data
-    const today = new Date();
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      const date = d.toISOString().split("T")[0];
-      records.push({ date, agentName: "trendAnalysis", predictedScore: 65 + Math.random() * 20, actualOutcome: Math.random() > 0.4 ? "won" : "lost", accuracy: 0.55 + Math.random() * 0.3 });
-      records.push({ date, agentName: "patternRecognition", predictedScore: 60 + Math.random() * 20, actualOutcome: Math.random() > 0.4 ? "won" : "lost", accuracy: 0.52 + Math.random() * 0.3 });
-    }
-  }
-
-  res.json(records);
+  res.json(records.slice(0, 100));
 });
 
 export default router;

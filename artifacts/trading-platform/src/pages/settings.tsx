@@ -73,6 +73,8 @@ export default function Settings() {
     recoveryMultiplier: 1.2,
     maxRecoverySteps: 3,
     scanAllMarkets: true,
+    paperTradeMode: false,
+    requirePositiveEv: true,
     preferredContractTypes: ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"],
     preferredCategories: ["synthetic"],
   });
@@ -96,6 +98,8 @@ export default function Settings() {
         recoveryMultiplier: (settings as any).recoveryMultiplier ?? 1.2,
         maxRecoverySteps: (settings as any).maxRecoverySteps ?? 3,
         scanAllMarkets: (settings as any).scanAllMarkets ?? true,
+        paperTradeMode: (settings as any).paperTradeMode ?? false,
+        requirePositiveEv: (settings as any).requirePositiveEv ?? true,
         preferredContractTypes: settings.preferredContractTypes.length > 0 ? settings.preferredContractTypes : ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"],
         preferredCategories: ["synthetic"], // always synthetic
       });
@@ -208,6 +212,12 @@ export default function Settings() {
           <SettingRow label="Autonomous Trading" description="Allow AI to execute without manual approval.">
             <Switch checked={form.autonomousEnabled} onCheckedChange={(v) => set("autonomousEnabled", v)} />
           </SettingRow>
+          <SettingRow label="Paper Trade Mode" description="Log trades with ML features but do not send live orders to Deriv.">
+            <Switch checked={form.paperTradeMode} onCheckedChange={(v) => set("paperTradeMode", v)} />
+          </SettingRow>
+          <SettingRow label="Require Positive EV" description="Only trade when expected value is positive after Deriv proposal payout.">
+            <Switch checked={form.requirePositiveEv} onCheckedChange={(v) => set("requirePositiveEv", v)} />
+          </SettingRow>
         </CardContent>
       </Card>
 
@@ -215,7 +225,7 @@ export default function Settings() {
       <Card className="bg-card">
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Recovery Mode</CardTitle>
-          <CardDescription className="text-xs">Per-market stake recovery — not martingale. Resets on any win.</CardDescription>
+          <CardDescription className="text-xs">Flat stake after losses — martingale disabled for safety.</CardDescription>
         </CardHeader>
         <CardContent>
           <SettingRow label="Enable Recovery Mode" description="Increase stake slightly after a loss to recover.">

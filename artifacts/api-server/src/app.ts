@@ -5,6 +5,8 @@ import router from "./routes";
 import { logger } from "./lib/logger";
 import { loadPersistedToken } from "./routes/auth";
 import { tickManager, DERIV_MARKETS, APP_ID } from "./lib/deriv";
+import { loadWinRatesFromDb } from "./lib/win-rate-store";
+import { loadCalibrationCache } from "./lib/calibration";
 
 const app: Express = express();
 
@@ -34,5 +36,7 @@ logger.info({ count: DERIV_MARKETS.length, appId: APP_ID }, "TickManager startin
 
 // Load persisted token so live trading resumes after restart
 loadPersistedToken().catch((err) => logger.warn({ err }, "Token load on startup failed"));
+loadWinRatesFromDb().catch((err) => logger.warn({ err }, "Win rate load on startup failed"));
+loadCalibrationCache().catch((err) => logger.warn({ err }, "Calibration load on startup failed"));
 
 export default app;

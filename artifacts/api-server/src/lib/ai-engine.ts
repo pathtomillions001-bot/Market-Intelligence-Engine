@@ -7,13 +7,9 @@
  */
 
 import { analyzeDigits, DigitStats } from "./deriv";
-import {
-  predictDirection,
-  predictDigitContract,
-  detectVolatilityRegime,
-  detectTrendFromML,
-  extractPriceFeatures,
-} from "./ml-engine";
+import { getCachedDirection, getCachedDigitPrediction } from "./ml-cache";
+import { getWinRate, getWinRateCount, updateWinRate } from "./win-rate-store";
+import { detectVolatilityRegime, extractPriceFeatures } from "./ml-engine";
 
 export interface AgentScore {
   score: number;
@@ -61,6 +57,11 @@ export interface MarketAnalysis {
   suggestedContractTypes: ContractTypeOption[];
   digitStats?: DigitStats;
   digitBarrier?: number;
+  digitConfidence?: number;
+  recommendedDuration?: number;
+  tickWindow?: number;
+  winProbability?: number;
+  mlModels?: { randomForest: number; gradientBoosting: number; logistic: number };
 }
 
 function mean(arr: number[]): number {
@@ -78,17 +79,29 @@ function scoreToSignal(score: number): AgentScore["signal"] {
   return "strong_sell";
 }
 
-const marketWinRates: Record<string, number> = {};
-const tradeCountPerMarket: Record<string, number> = {};
-
-export function updateSelfLearning(symbol: string, won: boolean) {
-  const prev = marketWinRates[symbol] ?? 0.55;
-  const count = (tradeCountPerMarket[symbol] ?? 0) + 1;
-  tradeCountPerMarket[symbol] = count;
-  marketWinRates[symbol] = prev * 0.9 + (won ? 1 : 0) * 0.1;
+export async function updateSelfLearning(
+  symbol: string,
+  contractType: string,
+  barrier: number | null | undefined,
+  won: boolean,
+): Promise<void> {
+  await updateWinRate(symbol, contractType, barrier, won);
 }
-export function getMarketWinRate(symbol: string): number {
-  return marketWinRates[symbol] ?? 0.55;
+
+export function getMarketWinRate(symbol: string, contractType?: string): number {
+  return getWinRate(symbol, contractType);
+}
+
+function trendFromDirection(probUp: number): {
+  trend: MarketAnalysis["trend"];
+  strength: number;
+  score: number;
+} {
+  if (probUp > 0.72) return { trend: "strong_up", strength: probUp, score: Math.round(probUp * 100) };
+  if (probUp > 0.58) return { trend: "up", strength: probUp, score: Math.round(probUp * 90) };
+  if (probUp < 0.28) return { trend: "strong_down", strength: 1 - probUp, score: Math.round((1 - probUp) * 100) };
+  if (probUp < 0.42) return { trend: "down", strength: 1 - probUp, score: Math.round((1 - probUp) * 90) };
+  return { trend: "sideways", strength: 0.3, score: 45 };
 }
 
 export function analyzeMarket(
@@ -114,8 +127,8 @@ export function analyzeMarket(
   const priceRange = Math.max(...prices) - Math.min(...prices);
   const rangeRatio = priceRange / avgPrice;
 
-  const mlDirection = predictDirection(prices);
-  const mlTrend = detectTrendFromML(prices);
+  const mlDirection = getCachedDirection(symbol, prices);
+  const mlTrend = trendFromDirection(mlDirection.probUp);
   const volRegime = detectVolatilityRegime(prices);
   const priceFeats = extractPriceFeatures(prices);
 
@@ -204,15 +217,15 @@ export function analyzeMarket(
     reasoning: `Tick velocity: ${(avgMove * 100).toFixed(4)}%. Entry timing: ${execScore > 65 ? "favorable" : "suboptimal"}.`,
   };
 
-  // === 8. Self-Learning (DB-backed win rate EMA) ===
-  const winRate = marketWinRates[symbol] ?? 0.55;
-  const tradeCount = tradeCountPerMarket[symbol] ?? 0;
-  const selfScore = Math.min(Math.round(winRate * 90 + (tradeCount > 10 ? 9 : tradeCount)), 95);
+  // === 8. Self-Learning (persisted DB win rates) ===
+  const persistedWinRate = getWinRate(symbol);
+  const persistedCount = getWinRateCount(symbol, "RISE") + getWinRateCount(symbol, "DIGITOVER");
+  const selfScore = Math.min(Math.round(persistedWinRate * 90 + (persistedCount > 10 ? 9 : persistedCount)), 95);
   const selfLearning: AgentScore = {
     score: selfScore,
     weight: 0.15,
     signal: scoreToSignal(selfScore),
-    reasoning: `Win rate: ${(winRate * 100).toFixed(1)}% over ${tradeCount} trades. ${tradeCount > 20 ? "High confidence" : tradeCount > 5 ? "Moderate" : "Building"}.`,
+    reasoning: `Persisted win rate: ${(persistedWinRate * 100).toFixed(1)}% over ${persistedCount} tracked trades.`,
   };
 
   const agentScores: AgentScores = {
@@ -248,14 +261,18 @@ export function analyzeMarket(
   let digitBarrier: number | undefined;
   let digitContractType: "DIGITOVER" | "DIGITUNDER" | null = null;
   let digitConfidence = 0;
+  let tickWindow: number | undefined;
+  let recommendedDuration = settings.tradeDurationSec ?? 5;
 
   if (digits && digits.length >= 30) {
     digitStats = analyzeDigits(digits);
-    const digitML = predictDigitContract(digits);
+    const digitML = getCachedDigitPrediction(symbol, digits);
     if (digitML) {
       digitContractType = digitML.contractType;
       digitBarrier = digitML.barrier;
       digitConfidence = digitML.confidence;
+      tickWindow = digitML.optimalWindow;
+      recommendedDuration = Math.max(3, Math.min(10, Math.round(digitML.optimalWindow / 15)));
       digitStats.streakInfo = `${digitML.reasoning}. Window: ${digitML.optimalWindow} ticks. Edge: ${(digitML.expectedEdge * 100).toFixed(1)}%`;
     }
   }
@@ -303,10 +320,25 @@ export function analyzeMarket(
   }
 
   const preferred = settings.preferredContractTypes ?? ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
-  const chosen = contractOptions
-    .filter((opt) => preferred.some((p) => opt.contractType.startsWith(p)) && opt.suitable)
-    .sort((a, b) => b.confidence - a.confidence)[0]
-    ?? contractOptions[0];
+
+  // Contract-specific routing: prefer digit model for digit contracts, direction model for rise/fall
+  const digitPreferred = preferred.some((p) => p.startsWith("DIGIT"));
+  const directionPreferred = preferred.some((p) => ["RISE", "FALL", "CALL", "PUT"].includes(p));
+
+  let filteredOptions = contractOptions.filter((opt) => preferred.some((p) => opt.contractType.startsWith(p)) && opt.suitable);
+
+  if (digitPreferred && digitContractType && digitConfidence >= 55 && !directionPreferred) {
+    filteredOptions = filteredOptions.filter((o) => o.contractType.includes("DIGIT"));
+  } else if (directionPreferred && !digitPreferred) {
+    filteredOptions = filteredOptions.filter((o) => !o.contractType.includes("DIGIT"));
+  }
+
+  const chosen = filteredOptions.sort((a, b) => b.confidence - a.confidence)[0] ?? contractOptions[0];
+
+  const contractWinRate = getWinRate(symbol, chosen.contractType, digitBarrier);
+  const winProbability = chosen.contractType.includes("DIGIT")
+    ? digitConfidence
+    : Math.round(mlDirection.probUp >= 0.5 ? mlDirection.probUp * 100 : mlDirection.probDown * 100);
 
   const profitability = Math.round((confidenceScore * 0.6 + qualityScore * 0.4) * 0.95);
 
@@ -320,13 +352,16 @@ export function analyzeMarket(
   const shouldTrade = confidenceScore >= settings.minConfidenceThreshold
     && overallRisk < 70
     && volCat !== "extreme"
-    && mlDirection.confidence >= 20;
+    && (chosen.contractType.includes("DIGIT")
+      ? digitConfidence >= 55
+      : mlDirection.confidence >= 25)
+    && contractWinRate >= 0.42;
 
   const digitNote = digitStats
-    ? ` Digit ML: ${digitContractType ?? "no edge"}${digitBarrier !== undefined ? ` @ ${digitBarrier}` : ""} (${digitConfidence}% conf).`
+    ? ` Digit ML: ${digitContractType ?? "no edge"}${digitBarrier !== undefined ? ` @ ${digitBarrier}` : ""} (${digitConfidence}% conf, ${tickWindow ?? "?"} ticks).`
     : "";
 
-  const reasoning = `Quality: ${qualityScore}/100. ML trend: ${trend.replace("_", " ")} (${(strength * 100).toFixed(0)}%). RF=${(mlDirection.models.randomForest * 100).toFixed(0)}% GBM=${(mlDirection.models.gradientBoosting * 100).toFixed(0)}%.${digitNote} Recommending ${chosen.label ?? chosen.contractType} at $${chosen.recommendedStake}. Win rate: ${(winRate * 100).toFixed(1)}%. ${shouldTrade ? "Risk checks passed." : "Below threshold."}`;
+  const reasoning = `Quality: ${qualityScore}/100. ML trend: ${trend.replace("_", " ")} (${(strength * 100).toFixed(0)}%). RF=${(mlDirection.models.randomForest * 100).toFixed(0)}% GBM=${(mlDirection.models.gradientBoosting * 100).toFixed(0)}%. Win prob: ${winProbability}%.${digitNote} Recommending ${chosen.label ?? chosen.contractType} at $${chosen.recommendedStake} for ${recommendedDuration} ticks. Contract WR: ${(contractWinRate * 100).toFixed(1)}%. ${shouldTrade ? "Risk checks passed." : "Below threshold."}`;
 
   return {
     symbol,
@@ -346,5 +381,10 @@ export function analyzeMarket(
     suggestedContractTypes: contractOptions,
     digitStats,
     digitBarrier,
+    digitConfidence: digitConfidence || undefined,
+    recommendedDuration,
+    tickWindow,
+    winProbability,
+    mlModels: mlDirection.models,
   };
 }

@@ -89,6 +89,8 @@ export default function Dashboard() {
             <div className={`w-1.5 h-1.5 rounded-full ${engine?.isRunning ? "bg-green-500 animate-pulse" : "bg-zinc-600"}`} />
             <p className="text-muted-foreground font-mono text-xs">
               {engine?.isRunning ? "ENGINE ONLINE" : "ENGINE STANDBY"} &bull; {engine?.mode?.toUpperCase() ?? "MANUAL"} MODE
+              {(engine as any)?.paperTradeMode && " &bull; PAPER"}
+              {(engine as any)?.tickHealth?.usingSimulated && " &bull; SIM DATA"}
             </p>
           </div>
         </div>

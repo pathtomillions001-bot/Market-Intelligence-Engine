@@ -4,6 +4,8 @@ import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@wor
 import { sql, desc } from "drizzle-orm";
 import { analyzeMarket, updateSelfLearning } from "../lib/ai-engine";
 import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo } from "../lib/deriv";
+import { finalizeAnalysis, logTradeFeatures, shouldExecuteTrade } from "../lib/trade-helpers";
+import { loadCalibrationCache } from "../lib/calibration";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 
@@ -98,6 +100,8 @@ async function runAutonomousLoop() {
     const tradeDurationSec = settings?.tradeDurationSec ?? 5;
     const maxTradeStake = settings ? Number(settings.maxTradeStake) : 500;
     const preferredContractTypes = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
+    const paperTradeMode = (settings as { paperTradeMode?: boolean })?.paperTradeMode ?? false;
+    const requirePositiveEv = (settings as { requirePositiveEv?: boolean })?.requirePositiveEv ?? true;
 
     if (settings?.loopIntervalSec) loopIntervalSec = settings.loopIntervalSec;
 
@@ -117,7 +121,7 @@ async function runAutonomousLoop() {
     for (const t of sorted) { if (t.status === "lost") consecutiveLosses++; else break; }
     if (consecutiveLosses >= consecutiveLossLimit) { stopEngine(`${consecutiveLosses} consecutive losses — cooldown`); return; }
 
-    // Recovery step
+    // Recovery: capped at base stake (no martingale escalation)
     const lastWasLoss = sorted[0]?.status === "lost";
     if (lastWasLoss && recoveryModeEnabled) recoveryStep = Math.min(recoveryStep + 1, maxRecoverySteps);
     else if (!lastWasLoss) recoveryStep = 0;
@@ -178,57 +182,86 @@ async function runAutonomousLoop() {
     currentMarket = bestMarket.symbol;
     broadcastSSE("scan_complete", { symbol: bestMarket.symbol, quality: bestMarket.analysis.qualityScore, confidence: bestMarket.analysis.confidenceScore });
 
-    const { analysis } = bestMarket;
-    logger.info({ symbol: bestMarket.symbol, confidence: analysis.confidenceScore, quality: analysis.qualityScore, contract: analysis.recommendedContractType }, "Autonomous scan");
+    const { analysis: rawAnalysis } = bestMarket;
+    const duration = rawAnalysis.recommendedDuration ?? tradeDurationSec;
+
+    const analysis = await finalizeAnalysis(rawAnalysis, {
+      symbol: bestMarket.symbol,
+      currency: account?.currency ?? "USD",
+      token,
+      defaultDuration: duration,
+      barrier: rawAnalysis.digitBarrier,
+    });
+
+    logger.info({
+      symbol: bestMarket.symbol,
+      confidence: analysis.confidenceScore,
+      calibrated: analysis.calibratedConfidence,
+      ev: analysis.expectedValue,
+      quality: analysis.qualityScore,
+      contract: analysis.recommendedContractType,
+      shouldTrade: analysis.shouldTrade,
+    }, "Autonomous scan");
+
+    const tradeGate = shouldExecuteTrade(analysis, {
+      minConfidence: minConfidence,
+      requirePositiveEv,
+    });
+
+    if (!tradeGate.execute) {
+      logger.info({ reason: tradeGate.reason }, "Trade skipped");
+      scheduleNext();
+      return;
+    }
 
     // ── Trade execution ────────────────────────────────────────────────────────
-    if (analysis.confidenceScore >= minConfidence && analysis.riskScore < 70) {
+    {
       let stake = analysis.recommendedStake;
       if (baseStake === 0) baseStake = stake;
-
-      if (recoveryModeEnabled && recoveryStep > 0) {
-        stake = Math.min(baseStake * Math.pow(recoveryMultiplier, recoveryStep), maxTradeStake);
-      }
+      // Recovery mode: flat stake only (no multiplier — avoids martingale risk)
       stake = Math.min(stake, maxTradeStake);
 
       let won: boolean, profit: number, entryPrice: number, exitPrice: number;
-      const payout = stake * 1.87;
+      const payout = stake * analysis.payoutMultiplier;
 
-      if (token) {
+      if (paperTradeMode) {
+        const winProb = analysis.winProbability / 100;
+        won = Math.random() < winProb;
+        profit = won ? payout - stake : -stake;
+        entryPrice = bestMarket.prices[bestMarket.prices.length - 1] ?? 100;
+        exitPrice = entryPrice;
+        logger.info({ symbol: bestMarket.symbol, paper: true, won, ev: analysis.expectedValue }, "Paper trade logged");
+      } else if (token) {
         try {
           const barrier = analysis.recommendedContractType.includes("DIGIT") ? (analysis.digitBarrier ?? 5) : undefined;
           const liveResult = await executeLiveTrade(token, {
             symbol: bestMarket.symbol,
             contractType: analysis.recommendedContractType,
             stake,
-            duration: tradeDurationSec,
+            duration,
             durationUnit: "t",
             currency: account?.currency ?? "USD",
             barrier,
           });
           entryPrice = liveResult.buyPrice;
-          const contractResult = await waitForContractResult(token, liveResult.contractId, (tradeDurationSec + 5) * 1000);
+          const contractResult = await waitForContractResult(token, liveResult.contractId, (duration + 5) * 1000);
           won = contractResult.won;
           profit = contractResult.profit;
           exitPrice = contractResult.exitSpot;
           await syncLiveBalance(token);
         } catch (liveErr) {
-          logger.warn({ liveErr }, "Live trade failed, simulating");
-          won = Math.random() < analysis.confidenceScore / 100;
-          profit = won ? payout - stake : -stake;
-          entryPrice = bestMarket.prices[bestMarket.prices.length - 1] ?? 100;
-          exitPrice = entryPrice * (won ? (analysis.direction === "up" ? 1.001 : 0.999) : (analysis.direction === "up" ? 0.999 : 1.001));
+          logger.warn({ liveErr }, "Live trade failed — skipping (no simulation fallback)");
+          scheduleNext();
+          return;
         }
       } else {
-        won = Math.random() < analysis.confidenceScore / 100;
-        profit = won ? payout - stake : -stake;
-        entryPrice = bestMarket.prices[bestMarket.prices.length - 1] ?? 100;
-        exitPrice = entryPrice * (won ? (analysis.direction === "up" ? 1.001 : 0.999) : (analysis.direction === "up" ? 0.999 : 1.001));
+        scheduleNext();
+        return;
       }
 
-      updateSelfLearning(bestMarket.symbol, won);
+      await updateSelfLearning(bestMarket.symbol, analysis.recommendedContractType, analysis.digitBarrier, won);
 
-      await db.insert(tradesTable).values({
+      const [trade] = await db.insert(tradesTable).values({
         symbol: bestMarket.symbol,
         displayName: bestMarket.displayName,
         contractType: analysis.recommendedContractType,
@@ -239,26 +272,66 @@ async function runAutonomousLoop() {
         profit: String(profit),
         entryPrice: String(entryPrice),
         exitPrice: String(exitPrice),
-        aiConfidence: String(analysis.confidenceScore),
+        aiConfidence: String(analysis.calibratedConfidence),
         aiRiskScore: String(analysis.riskScore),
         isAutonomous: true,
-        agentReasoning: analysis.reasoning,
-        duration: tradeDurationSec,
+        agentReasoning: `${paperTradeMode ? "[PAPER] " : ""}${analysis.reasoning} EV=$${analysis.expectedValue.toFixed(2)}`,
+        duration,
         durationUnit: "t",
         closedAt: new Date(),
+      }).returning();
+
+      await logTradeFeatures(trade.id, analysis, {
+        symbol: bestMarket.symbol,
+        barrier: analysis.digitBarrier,
+        tickWindow: analysis.tickWindow,
+        duration,
+        featuresJson: { mlModels: analysis.mlModels, winProbability: analysis.winProbability },
+        isPaperTrade: paperTradeMode,
       });
 
       tradesExecutedToday++;
       lastTradeTime = new Date();
 
-      broadcastSSE("trade_completed", { symbol: bestMarket.symbol, won, profit: profit.toFixed(2), contract: analysis.recommendedContractType, stake, live: !!token });
-      logger.info({ symbol: bestMarket.symbol, won, profit: profit.toFixed(2), stake, live: !!token }, "Trade executed");
+      broadcastSSE("trade_completed", {
+        symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
+        contract: analysis.recommendedContractType, stake,
+        live: !!token && !paperTradeMode, paper: paperTradeMode, ev: analysis.expectedValue,
+      });
+      logger.info({ symbol: bestMarket.symbol, won, profit: profit.toFixed(2), stake, ev: analysis.expectedValue }, "Trade executed");
     }
   } catch (err) {
     logger.error({ err }, "Autonomous loop error");
   }
 
   scheduleNext();
+}
+
+function formatRecommendation(symbol: string, analysis: Awaited<ReturnType<typeof finalizeAnalysis>>) {
+  return {
+    symbol,
+    contractType: analysis.recommendedContractType,
+    direction: analysis.direction,
+    stake: analysis.recommendedStake,
+    confidence: analysis.confidenceScore,
+    calibratedConfidence: analysis.calibratedConfidence,
+    winProbability: analysis.winProbability,
+    expectedValue: analysis.expectedValue,
+    breakevenWinRate: analysis.breakevenWinRate,
+    payoutMultiplier: analysis.payoutMultiplier,
+    recommendedDuration: analysis.recommendedDuration,
+    tickWindow: analysis.tickWindow ?? null,
+    riskScore: analysis.riskScore,
+    profitability: analysis.profitability,
+    agentScores: analysis.agentScores,
+    shouldTrade: analysis.shouldTrade,
+    reasoning: analysis.reasoning,
+    warnings: analysis.warnings,
+    suggestedContractTypes: analysis.suggestedContractTypes,
+    digitStats: analysis.digitStats ?? null,
+    digitBarrier: analysis.digitBarrier ?? null,
+    generatedAt: new Date().toISOString(),
+  };
 }
 
 function scheduleNext() {
@@ -287,7 +360,8 @@ router.get("/events", (req, res) => {
 });
 
 router.get("/recommendation", async (_req, res): Promise<void> => {
-  const { balance, settings } = await getAccountAndSettings();
+  const { balance, settings, account } = await getAccountAndSettings();
+  const token = getCachedToken() ?? account?.token ?? null;
   const settingsObj = {
     maxRiskPerTrade: settings ? Number(settings.maxRiskPerTrade) : 2,
     minConfidenceThreshold: settings ? Number(settings.minConfidenceThreshold) : 55,
@@ -301,23 +375,23 @@ router.get("/recommendation", async (_req, res): Promise<void> => {
     DERIV_MARKETS.map(async (m) => {
       const prices = tickManager.getTicks(m.symbol, 100);
       const digits = m.digitEnabled ? tickManager.getDigits(m.symbol, 300) : undefined;
-      return { ...m, analysis: analyzeMarket(m.symbol, m.category, prices, balance, settingsObj, digits), prices };
+      const raw = analyzeMarket(m.symbol, m.category, prices, balance, settingsObj, digits);
+      const analysis = await finalizeAnalysis(raw, {
+        symbol: m.symbol,
+        currency: account?.currency ?? "USD",
+        token,
+        defaultDuration: raw.recommendedDuration ?? settingsObj.tradeDurationSec ?? 5,
+        barrier: raw.digitBarrier,
+      });
+      return { ...m, analysis, prices };
     })
   );
 
-  results.sort((a, b) => b.analysis.qualityScore - a.analysis.qualityScore);
+  results.sort((a, b) => b.analysis.expectedValue - a.analysis.expectedValue);
   const best = results[0];
   if (!best) { res.status(404).json({ error: "No markets available" }); return; }
 
-  const { analysis } = best;
-  res.json({
-    symbol: best.symbol, contractType: analysis.recommendedContractType, direction: analysis.direction,
-    stake: analysis.recommendedStake, confidence: analysis.confidenceScore, riskScore: analysis.riskScore,
-    profitability: analysis.profitability, agentScores: analysis.agentScores, shouldTrade: analysis.shouldTrade,
-    reasoning: analysis.reasoning, warnings: analysis.warnings, suggestedContractTypes: analysis.suggestedContractTypes,
-    digitStats: analysis.digitStats ?? null, digitBarrier: analysis.digitBarrier ?? null,
-    generatedAt: new Date().toISOString(),
-  });
+  res.json(formatRecommendation(best.symbol, best.analysis));
 });
 
 router.get("/recommendation/:symbol", async (req, res): Promise<void> => {
@@ -325,7 +399,8 @@ router.get("/recommendation/:symbol", async (req, res): Promise<void> => {
   const market = getMarketInfo(symbol);
   if (!market) { res.status(404).json({ error: "Market not found" }); return; }
 
-  const { balance, settings } = await getAccountAndSettings();
+  const { balance, settings, account } = await getAccountAndSettings();
+  const token = getCachedToken() ?? account?.token ?? null;
   const s = {
     maxRiskPerTrade: settings ? Number(settings.maxRiskPerTrade) : 2,
     minConfidenceThreshold: settings ? Number(settings.minConfidenceThreshold) : 55,
@@ -337,16 +412,16 @@ router.get("/recommendation/:symbol", async (req, res): Promise<void> => {
 
   const prices = tickManager.getTicks(symbol, 100);
   const digits = market.digitEnabled ? tickManager.getDigits(symbol, 300) : undefined;
-  const analysis = analyzeMarket(symbol, market.category, prices, balance, s, digits);
-
-  res.json({
-    symbol, contractType: analysis.recommendedContractType, direction: analysis.direction,
-    stake: analysis.recommendedStake, confidence: analysis.confidenceScore, riskScore: analysis.riskScore,
-    profitability: analysis.profitability, agentScores: analysis.agentScores, shouldTrade: analysis.shouldTrade,
-    reasoning: analysis.reasoning, warnings: analysis.warnings, suggestedContractTypes: analysis.suggestedContractTypes,
-    digitStats: analysis.digitStats ?? null, digitBarrier: analysis.digitBarrier ?? null,
-    generatedAt: new Date().toISOString(),
+  const raw = analyzeMarket(symbol, market.category, prices, balance, s, digits);
+  const analysis = await finalizeAnalysis(raw, {
+    symbol,
+    currency: account?.currency ?? "USD",
+    token,
+    defaultDuration: raw.recommendedDuration ?? s.tradeDurationSec ?? 5,
+    barrier: raw.digitBarrier,
   });
+
+  res.json(formatRecommendation(symbol, analysis));
 });
 
 router.get("/insights", async (_req, res): Promise<void> => {
@@ -435,13 +510,16 @@ router.get("/engine/status", async (_req, res): Promise<void> => {
     isRunning: engineRunning, mode: engineRunning ? "autonomous" : "manual",
     agentStatuses: AGENT_NAMES.map((name) => ({
       name, isActive: engineRunning, lastRun: engineRunning ? new Date().toISOString() : null,
-      confidence: engineRunning ? 55 + Math.random() * 35 : 45 + Math.random() * 20,
+      confidence: engineRunning ? 72 : 50,
     })),
     tradesExecutedToday: todayTrades.length,
     currentMarket, nextScanIn: engineRunning ? nextScanIn : null, stopReasons, loopIntervalSec,
     lastTradeTime: lastTradeTime?.toISOString() ?? null, exploitSymbol, exploitCount, recoveryStep,
     wsConnected: tickManager.getConnectionStatus(),
     liveTickCount: tickManager.getLiveTickCount(),
+    tickHealth: tickManager.getTickHealth(),
+    paperTradeMode: settings.length > 0 ? (settings[0] as { paperTradeMode?: boolean }).paperTradeMode ?? false : false,
+    requirePositiveEv: settings.length > 0 ? (settings[0] as { requirePositiveEv?: boolean }).requirePositiveEv ?? true : true,
   });
 });
 
@@ -471,12 +549,15 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     isRunning: engineRunning, mode: autonomousMode,
     agentStatuses: AGENT_NAMES.map((name) => ({
       name, isActive: engineRunning, lastRun: engineRunning ? new Date().toISOString() : null,
-      confidence: engineRunning ? 55 + Math.random() * 35 : 45 + Math.random() * 20,
+      confidence: engineRunning ? 72 : 50,
     })),
     tradesExecutedToday, currentMarket, nextScanIn, stopReasons, loopIntervalSec,
     lastTradeTime: lastTradeTime?.toISOString() ?? null, exploitSymbol, exploitCount, recoveryStep,
     wsConnected: tickManager.getConnectionStatus(),
     liveTickCount: tickManager.getLiveTickCount(),
+    tickHealth: tickManager.getTickHealth(),
+    paperTradeMode: settings.length > 0 ? (settings[0] as { paperTradeMode?: boolean }).paperTradeMode ?? false : false,
+    requirePositiveEv: settings.length > 0 ? (settings[0] as { requirePositiveEv?: boolean }).requirePositiveEv ?? true : true,
   });
 });
 

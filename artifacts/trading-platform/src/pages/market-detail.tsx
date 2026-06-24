@@ -302,6 +302,28 @@ export default function MarketDetail() {
           <CardContent className="space-y-4">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <div className="bg-secondary/30 rounded-lg p-3">
+                <div className="text-[10px] text-muted-foreground uppercase mb-1">Calibrated</div>
+                <div className={`text-xl font-mono font-bold ${(recommendation as any).calibratedConfidence >= 65 ? "text-green-400" : "text-amber-400"}`}>
+                  {(recommendation as any).calibratedConfidence ?? recommendation.confidence}%
+                </div>
+              </div>
+              <div className="bg-secondary/30 rounded-lg p-3">
+                <div className="text-[10px] text-muted-foreground uppercase mb-1">Expected Value</div>
+                <div className={`text-xl font-mono font-bold ${((recommendation as any).expectedValue ?? 0) > 0 ? "text-green-400" : "text-red-400"}`}>
+                  ${((recommendation as any).expectedValue ?? 0).toFixed(2)}
+                </div>
+              </div>
+              <div className="bg-secondary/30 rounded-lg p-3">
+                <div className="text-[10px] text-muted-foreground uppercase mb-1">Breakeven WR</div>
+                <div className="text-xl font-mono font-bold">{(recommendation as any).breakevenWinRate ?? "—"}%</div>
+              </div>
+              <div className="bg-secondary/30 rounded-lg p-3">
+                <div className="text-[10px] text-muted-foreground uppercase mb-1">Win Prob</div>
+                <div className="text-xl font-mono font-bold">{(recommendation as any).winProbability ?? recommendation.confidence}%</div>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="bg-secondary/30 rounded-lg p-3">
                 <div className="text-[10px] text-muted-foreground uppercase mb-1">Confidence</div>
                 <div className={`text-xl font-mono font-bold ${recommendation.confidence >= 65 ? "text-green-400" : recommendation.confidence >= 50 ? "text-amber-400" : "text-red-400"}`}>{recommendation.confidence}%</div>
               </div>

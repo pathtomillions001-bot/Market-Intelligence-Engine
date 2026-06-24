@@ -870,6 +870,20 @@ components:
             type: string
         generatedAt:
           type: string
+        calibratedConfidence:
+          type: number
+        winProbability:
+          type: number
+        expectedValue:
+          type: number
+        breakevenWinRate:
+          type: number
+        payoutMultiplier:
+          type: number
+        recommendedDuration:
+          type: integer
+        tickWindow:
+          type: ["integer", "null"]
 
     AiInsight:
       type: object
@@ -995,7 +1009,17 @@ components:
           description: Trade contract duration in ticks
         maxTradeStake:
           type: number
+        paperTradeMode:
+          type: boolean
+        requirePositiveEv:
+          type: boolean
           description: Hard cap on stake per trade
+        paperTradeMode:
+          type: boolean
+          description: Log trades without sending live orders to Deriv
+        requirePositiveEv:
+          type: boolean
+          description: Only execute when expected value is positive
 
     TradingSettingsInput:
       type: object
@@ -1041,3 +1065,7 @@ components:
           type: integer
         maxTradeStake:
           type: number
+        paperTradeMode:
+          type: boolean
+        requirePositiveEv:
+          type: boolean

@@ -2,7 +2,8 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { accountsTable, settingsTable } from "@workspace/db";
 import { analyzeMarket } from "../lib/ai-engine";
-import { tickManager, DERIV_MARKETS, getMarketInfo } from "../lib/deriv";
+import { tickManager, DERIV_MARKETS, getMarketInfo, getCachedToken } from "../lib/deriv";
+import { finalizeAnalysis } from "../lib/trade-helpers";
 import { GetMarketsQueryParams } from "@workspace/api-zod";
 
 const router = Router();
@@ -161,16 +162,25 @@ router.get("/:symbol", async (req, res): Promise<void> => {
     return;
   }
 
+  const accounts = await db.select().from(accountsTable).limit(1);
   const { balance, settings } = await getAccountAndSettings();
   const prices = tickManager.getTicks(symbol, 100);
   const digits = market.digitEnabled ? tickManager.getDigits(symbol, 300) : undefined;
-  const analysis = analyzeMarket(symbol, market.category, prices, balance, settings, digits);
-  analysisCache.set(symbol, { symbol, displayName: market.displayName, category: market.category, analysis, prices, lastUpdated: new Date() });
+  const raw = analyzeMarket(symbol, market.category, prices, balance, settings, digits);
+  const token = getCachedToken();
+  const analysis = await finalizeAnalysis(raw, {
+    symbol,
+    currency: accounts[0]?.currency ?? "USD",
+    token,
+    defaultDuration: raw.recommendedDuration ?? settings.tradeDurationSec ?? 5,
+    barrier: raw.digitBarrier,
+  });
+  analysisCache.set(symbol, { symbol, displayName: market.displayName, category: market.category, analysis: raw, prices, lastUpdated: new Date() });
 
   res.json(buildMarketDetail(symbol, market.displayName, market.category, analysis, prices));
 });
 
-function buildMarketDetail(symbol: string, displayName: string, category: string, analysis: ReturnType<typeof analyzeMarket>, prices: number[]) {
+function buildMarketDetail(symbol: string, displayName: string, category: string, analysis: Awaited<ReturnType<typeof finalizeAnalysis>>, prices: number[]) {
   const now = new Date();
   const priceHistory = prices.slice(-60).map((p, i) => ({
     timestamp: new Date(now.getTime() - (59 - i) * 1000).toISOString(),
@@ -191,6 +201,13 @@ function buildMarketDetail(symbol: string, displayName: string, category: string
       direction: analysis.direction,
       stake: analysis.recommendedStake,
       confidence: analysis.confidenceScore,
+      calibratedConfidence: analysis.calibratedConfidence,
+      winProbability: analysis.winProbability,
+      expectedValue: analysis.expectedValue,
+      breakevenWinRate: analysis.breakevenWinRate,
+      payoutMultiplier: analysis.payoutMultiplier,
+      recommendedDuration: analysis.recommendedDuration,
+      tickWindow: analysis.tickWindow ?? null,
       riskScore: analysis.riskScore,
       profitability: analysis.profitability,
       agentScores: analysis.agentScores,

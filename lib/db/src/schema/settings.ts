@@ -22,6 +22,8 @@ export const settingsTable = pgTable("settings", {
   scanAllMarkets: boolean("scan_all_markets").notNull().default(true),
   tradeDurationSec: integer("trade_duration_sec").notNull().default(5),
   maxTradeStake: numeric("max_trade_stake", { precision: 20, scale: 2 }).notNull().default("500"),
+  paperTradeMode: boolean("paper_trade_mode").notNull().default(false),
+  requirePositiveEv: boolean("require_positive_ev").notNull().default(true),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

@@ -307,6 +307,23 @@ class DerivTickManager extends EventEmitter {
     for (const [, v] of this.tickBuffers) total += v.length;
     return total;
   }
+
+  isLiveData(symbol: string): boolean {
+    return (this.tickBuffers.get(symbol) ?? []).length >= 5;
+  }
+
+  getTickHealth(): { connected: boolean; liveSymbols: number; totalSymbols: number; usingSimulated: boolean } {
+    let liveSymbols = 0;
+    for (const m of DERIV_MARKETS) {
+      if (this.isLiveData(m.symbol)) liveSymbols++;
+    }
+    return {
+      connected: this.isConnected,
+      liveSymbols,
+      totalSymbols: DERIV_MARKETS.length,
+      usingSimulated: liveSymbols < DERIV_MARKETS.length / 2,
+    };
+  }
 }
 
 export const tickManager = new DerivTickManager();
@@ -406,6 +423,16 @@ export interface ContractResult {
   entrySpot: number;
 }
 
+export interface ContractProposal {
+  payout: number;
+  stake: number;
+  payoutMultiplier: number;
+  spot: number;
+  longcode: string;
+  proposalId: string;
+  askPrice: number;
+}
+
 let cachedToken: string | null = null;
 let cachedAccountInfo: DerivAccountInfo | null = null;
 
@@ -413,6 +440,77 @@ export function setDerivToken(token: string) { cachedToken = token; }
 export function clearDerivToken() { cachedToken = null; cachedAccountInfo = null; }
 export function getCachedAccountInfo() { return cachedAccountInfo; }
 export function getCachedToken() { return cachedToken; }
+
+export async function getContractProposal(
+  token: string | null,
+  params: {
+    symbol: string;
+    contractType: string;
+    stake: number;
+    duration: number;
+    durationUnit: string;
+    currency: string;
+    barrier?: number | string;
+  },
+): Promise<ContractProposal | null> {
+  return new Promise((resolve) => {
+    try {
+      const ws = new WebSocket(DERIV_WS_URL);
+      const timeout = setTimeout(() => { ws.close(); resolve(null); }, 12000);
+      let authorized = !token;
+
+      const sendProposal = () => {
+        const proposalParams: Record<string, unknown> = {
+          amount: params.stake,
+          basis: "stake",
+          contract_type: params.contractType,
+          currency: params.currency,
+          duration: params.duration,
+          duration_unit: params.durationUnit,
+          symbol: params.symbol,
+        };
+        if (params.barrier !== undefined) proposalParams.barrier = String(params.barrier);
+        ws.send(JSON.stringify({ proposal: 1, ...proposalParams }));
+      };
+
+      ws.on("open", () => {
+        if (token) ws.send(JSON.stringify({ authorize: token }));
+        else sendProposal();
+      });
+
+      ws.on("message", (data) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.error) { clearTimeout(timeout); ws.close(); resolve(null); return; }
+
+          if (msg.msg_type === "authorize" && !authorized) {
+            authorized = true;
+            sendProposal();
+          }
+
+          if (msg.msg_type === "proposal" && msg.proposal) {
+            clearTimeout(timeout);
+            ws.close();
+            const askPrice = Number(msg.proposal.ask_price ?? params.stake);
+            const payout = Number(msg.proposal.payout ?? askPrice * 1.87);
+            resolve({
+              payout,
+              stake: askPrice,
+              payoutMultiplier: askPrice > 0 ? payout / askPrice : 1.87,
+              spot: Number(msg.proposal.spot ?? 0),
+              longcode: msg.proposal.longcode ?? "",
+              proposalId: String(msg.proposal.id ?? ""),
+              askPrice,
+            });
+          }
+        } catch { /* ignore */ }
+      });
+      ws.on("error", () => { clearTimeout(timeout); ws.close(); resolve(null); });
+    } catch {
+      resolve(null);
+    }
+  });
+}
 
 export async function authorizeWithDeriv(token: string): Promise<DerivAccountInfo> {
   return new Promise((resolve, reject) => {

@@ -4,7 +4,8 @@ import { tradesTable, accountsTable, settingsTable } from "@workspace/db";
 import { eq, desc, and, sql } from "drizzle-orm";
 import { ExecuteTradeBody, GetTradesQueryParams, GetTradeParams } from "@workspace/api-zod";
 import { analyzeMarket, updateSelfLearning } from "../lib/ai-engine";
-import { getTickHistory, DERIV_MARKETS } from "../lib/deriv";
+import { getTickHistory, DERIV_MARKETS, getCachedToken } from "../lib/deriv";
+import { finalizeAnalysis, logTradeFeatures, shouldExecuteTrade } from "../lib/trade-helpers";
 
 const router = Router();
 
@@ -151,15 +152,37 @@ router.post("/", async (req, res): Promise<void> => {
     maxRiskPerTrade: maxRisk,
     minConfidenceThreshold: settings.length > 0 ? Number(settings[0].minConfidenceThreshold) : 65,
     riskProfile: settings.length > 0 ? settings[0].riskProfile : "moderate",
+    preferredContractTypes: settings.length > 0 ? settings[0].preferredContractTypes.split(",").filter(Boolean) : undefined,
+    tradeDurationSec: settings.length > 0 ? settings[0].tradeDurationSec : 5,
   });
 
-  // Outcome probability weighted by AI confidence
-  const winProbability = analysis.confidenceScore / 100;
+  const token = getCachedToken();
+  const finalized = await finalizeAnalysis(analysis, {
+    symbol,
+    currency: accounts.length > 0 ? accounts[0].currency : "USD",
+    token,
+    defaultDuration: analysis.recommendedDuration ?? (settings.length > 0 ? settings[0].tradeDurationSec : 5),
+    barrier: analysis.digitBarrier,
+  });
+
+  const paperTradeMode = settings.length > 0 ? (settings[0] as { paperTradeMode?: boolean }).paperTradeMode ?? false : false;
+  const requirePositiveEv = settings.length > 0 ? (settings[0] as { requirePositiveEv?: boolean }).requirePositiveEv ?? true : true;
+
+  const gate = shouldExecuteTrade(finalized, {
+    minConfidence: settings.length > 0 ? Number(settings[0].minConfidenceThreshold) : 65,
+    requirePositiveEv,
+  });
+  if (!gate.execute && !paperTradeMode) {
+    res.status(400).json({ error: gate.reason ?? "Trade does not meet EV/confidence requirements" });
+    return;
+  }
+
+  const winProbability = finalized.winProbability / 100;
   const won = Math.random() < winProbability;
-  const payout = stake * 1.87;
+  const payout = stake * finalized.payoutMultiplier;
   const profit = won ? payout - stake : -stake;
 
-  updateSelfLearning(symbol, won);
+  await updateSelfLearning(symbol, contractType, analysis.digitBarrier, won);
 
   // Update real account balance if connected; demo just tracks P&L
   if (!isDemo && accounts.length > 0) {
@@ -184,14 +207,22 @@ router.post("/", async (req, res): Promise<void> => {
     profit: String(profit),
     entryPrice: String(entryPrice),
     exitPrice: String(exitPrice),
-    aiConfidence: String(analysis.confidenceScore),
-    aiRiskScore: String(analysis.riskScore),
+    aiConfidence: String(finalized.calibratedConfidence),
+    aiRiskScore: String(finalized.riskScore),
     isAutonomous: isAutonomous ?? false,
-    agentReasoning: analysis.reasoning,
-    duration: duration ?? 5,
+    agentReasoning: `${analysis.reasoning} EV=$${finalized.expectedValue.toFixed(2)} (breakeven ${finalized.breakevenWinRate}%)`,
+    duration: duration ?? finalized.recommendedDuration ?? 5,
     durationUnit: durationUnit ?? "t",
     closedAt: new Date(),
   }).returning();
+
+  await logTradeFeatures(trade.id, finalized, {
+    symbol,
+    barrier: analysis.digitBarrier,
+    tickWindow: analysis.tickWindow,
+    duration: trade.duration ?? finalized.recommendedDuration ?? 5,
+    isPaperTrade: isDemo || paperTradeMode,
+  });
 
   res.status(201).json(formatTrade(trade));
 });

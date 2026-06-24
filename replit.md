@@ -38,7 +38,9 @@ AI-driven trading platform connected to Deriv's WebSocket API with 8-agent auton
 - **AI engine in TypeScript**: 8-agent ML ensemble (Random Forest, Gradient Boosting, Logistic Regression for direction; Markov + Multinomial for digits). No EMA/RSI — avoids crowd indicators. Adaptive tick windows (30–200) for digit contracts.
 - **Simulated trade outcomes**: When Deriv token is connected, prices come from real WebSocket ticks; without token, realistic price simulation is used; trade outcomes are probability-weighted by AI confidence score
 - **Market rotation cache**: Market analyses cached for 30s per symbol, background refresh on demand
-- **Self-learning**: Per-market win rates tracked in-memory using EMA (10% update weight), influencing future confidence scores
+- **Self-learning**: Per-market win rates persisted in Postgres (`market_win_rates`); trade features logged for calibration
+- **EV gating**: Deriv `proposal` API fetches live payout; trades require positive expected value when enabled
+- **Paper trade mode**: Log decisions without live Deriv orders for validation
 
 ## Product
 
