@@ -1,4 +1,5 @@
 import { useConnectDerivAccount, useGetAccount, useDisconnectAccount } from "@workspace/api-client-react";
+import { ApiError } from "@workspace/api-client-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,7 +12,14 @@ import { CheckCircle, ExternalLink, ShieldCheck, Unlink, Wifi } from "lucide-rea
 import { useQueryClient } from "@tanstack/react-query";
 
 export default function Connect() {
-  const { data: account, refetch } = useGetAccount();
+  const { data: account } = useGetAccount({
+    query: {
+      retry: (failureCount, error) => {
+        if (error instanceof ApiError && error.status === 404) return false;
+        return failureCount < 1;
+      },
+    },
+  });
   const connect = useConnectDerivAccount();
   const disconnect = useDisconnectAccount();
   const queryClient = useQueryClient();
@@ -27,8 +35,13 @@ export default function Connect() {
         setToken("");
         queryClient.invalidateQueries();
       },
-      onError: (err: any) => {
-        toast.error(err?.error || "Failed to connect account");
+      onError: (err: unknown) => {
+        const msg = err instanceof ApiError
+          ? (typeof err.data === "object" && err.data && "error" in (err.data as object)
+            ? String((err.data as { error: string }).error)
+            : err.message)
+          : "Failed to connect account";
+        toast.error(msg);
       }
     });
   };

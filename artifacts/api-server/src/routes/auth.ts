@@ -27,7 +27,11 @@ router.post("/connect", async (req, res): Promise<void> => {
     res.status(400).json({ error: "Invalid request body" });
     return;
   }
-  const { token } = parseResult.data;
+  const token = parseResult.data.token.trim();
+  if (!token) {
+    res.status(400).json({ error: "API token cannot be empty" });
+    return;
+  }
 
   try {
     const accountInfo = await authorizeWithDeriv(token);

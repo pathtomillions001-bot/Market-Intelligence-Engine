@@ -14,7 +14,12 @@ import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { logger } from "./logger";
 
-const APP_ID = process.env["DERIV_APP_ID"] ?? "1089";
+// Deriv public tester app_id=1089 — required for demo API tokens
+const rawAppId = process.env["DERIV_APP_ID"] ?? "1089";
+export const APP_ID = /^\d+$/.test(rawAppId) ? rawAppId : "1089";
+if (APP_ID !== rawAppId) {
+  logger.warn({ rawAppId }, "DERIV_APP_ID must be numeric — using 1089");
+}
 const DERIV_WS_URL = `wss://ws.binaryws.com/websockets/v3?app_id=${APP_ID}`;
 
 // ── Market definitions (synthetics only) ──────────────────────────────────────
