@@ -16,6 +16,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Link } from "wouter";
 import { TrendingUp, TrendingDown, Activity, Zap, Shield, AlertTriangle, Target, ChevronRight, Clock, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
+import { MarketOpportunityFlashCard } from "@/components/flash-card-3d";
 
 function ConfidenceRing({ value, size = 56 }: { value: number; size?: number }) {
   const r = size / 2 - 6;
@@ -184,49 +185,13 @@ export default function Dashboard() {
           </CardContent>
         </Card>
 
-        <Card className="md:col-span-2 bg-card border-primary/20">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
-              <Zap className="w-3.5 h-3.5 text-primary" /> Best Opportunity Now
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {topMarket ? (
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-4">
-                  <ConfidenceRing value={topMarket.recommendation?.confidence ?? 0} size={64} />
-                  <div>
-                    <div className="font-bold text-lg">{topMarket.displayName}</div>
-                    <div className="text-xs text-muted-foreground font-mono">{topMarket.symbol}</div>
-                    <div className="flex gap-2 mt-1">
-                      <Badge variant="outline" className={`text-[10px] px-2 ${topMarket.recommendation?.direction === "up" ? "text-green-500 border-green-500/30" : "text-red-500 border-red-500/30"}`}>
-                        {topMarket.recommendation?.direction?.toUpperCase()} {topMarket.recommendation?.contractType}
-                      </Badge>
-                      <Badge variant="outline" className="text-[10px] px-2 text-muted-foreground border-border">
-                        {topMarket.category}
-                      </Badge>
-                    </div>
-                  </div>
-                </div>
-                <div className="flex flex-col items-end gap-2">
-                  <div className="text-right">
-                    <div className="text-xs text-muted-foreground">Stake</div>
-                    <div className="font-mono font-bold">${topMarket.recommendation?.stake?.toFixed(2) ?? "—"}</div>
-                  </div>
-                  <Button size="sm" onClick={handleQuickTrade} disabled={executeTrade.isPending || !topMarket.recommendation?.shouldTrade}
-                    className="bg-primary/20 text-primary border border-primary/40 hover:bg-primary/30 text-xs px-4">
-                    {executeTrade.isPending ? "Executing..." : topMarket.recommendation?.shouldTrade ? "Execute Trade" : "Low Confidence"}
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2 text-muted-foreground py-4">
-                <Activity className="w-4 h-4 animate-pulse" />
-                <span className="text-sm">Scanning markets for best opportunity...</span>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+        <div className="md:col-span-2">
+          <MarketOpportunityFlashCard
+            topMarket={topMarket as any}
+            onTrade={handleQuickTrade}
+            isTradePending={executeTrade.isPending}
+          />
+        </div>
       </div>
 
       {/* Engine toggle + Agent grid */}
@@ -292,7 +257,7 @@ export default function Dashboard() {
           </AnimatePresence>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {engine?.agentStatuses.map((agent) => {
+            {(engine?.agentStatuses ?? []).map((agent) => {
               const conf = agent.confidence;
               const color = conf >= 70 ? "text-green-500" : conf >= 50 ? "text-amber-500" : "text-red-500";
               const bg = conf >= 70 ? "bg-green-500/10 border-green-500/20" : conf >= 50 ? "bg-amber-500/10 border-amber-500/20" : "bg-red-500/10 border-red-500/20";
