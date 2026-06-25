@@ -14,6 +14,7 @@ export const settingsTable = pgTable("settings", {
   marketRotationAfter: integer("market_rotation_after").notNull().default(5),
   preferredContractTypes: text("preferred_contract_types").notNull().default("CALL,PUT,RISE,FALL"),
   preferredCategories: text("preferred_categories").notNull().default("synthetic,forex"),
+  allowedMarkets: text("allowed_markets").default(""),
   autonomousEnabled: boolean("autonomous_enabled").notNull().default(false),
   loopIntervalSec: integer("loop_interval_sec").notNull().default(30),
   recoveryMode: boolean("recovery_mode").notNull().default(false),

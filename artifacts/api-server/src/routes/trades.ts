@@ -4,8 +4,9 @@ import { tradesTable, accountsTable, settingsTable } from "@workspace/db";
 import { eq, desc, and, sql } from "drizzle-orm";
 import { ExecuteTradeBody, GetTradesQueryParams, GetTradeParams } from "@workspace/api-zod";
 import { analyzeMarket, updateSelfLearning } from "../lib/ai-engine";
-import { getTickHistory, DERIV_MARKETS, getCachedToken } from "../lib/deriv";
+import { getTickHistory, DERIV_MARKETS, getCachedToken, executeLiveTrade, waitForContractResult, getLiveBalance } from "../lib/deriv";
 import { finalizeAnalysis, logTradeFeatures, shouldExecuteTrade } from "../lib/trade-helpers";
+import { logger } from "../lib/logger";
 
 const router = Router();
 
@@ -133,8 +134,9 @@ router.post("/", async (req, res): Promise<void> => {
   const balance = accounts.length > 0 ? Number(accounts[0].balance) : DEMO_BALANCE;
   const maxRisk = settings.length > 0 ? Number(settings[0].maxRiskPerTrade) : 2;
   const isDemo = accounts.length === 0;
+  const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
+  const requirePositiveEv = settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true;
 
-  // Risk checks — allow up to 5x the per-trade limit for manual trades
   if (stake > balance * (maxRisk / 100) * 5) {
     res.status(400).json({ error: `Stake ${stake.toFixed(2)} exceeds risk limit. Max: ${(balance * maxRisk / 100 * 5).toFixed(2)}` });
     return;
@@ -148,7 +150,7 @@ router.post("/", async (req, res): Promise<void> => {
   const displayName = market?.displayName ?? symbol;
 
   const prices = await getTickHistory(symbol, 30);
-  const analysis = analyzeMarket(symbol, market?.category ?? "synthetic", prices, balance, {
+  const rawAnalysis = analyzeMarket(symbol, market?.category ?? "synthetic", prices, balance, {
     maxRiskPerTrade: maxRisk,
     minConfidenceThreshold: settings.length > 0 ? Number(settings[0].minConfidenceThreshold) : 65,
     riskProfile: settings.length > 0 ? settings[0].riskProfile : "moderate",
@@ -156,17 +158,15 @@ router.post("/", async (req, res): Promise<void> => {
     tradeDurationSec: settings.length > 0 ? settings[0].tradeDurationSec : 5,
   });
 
-  const token = getCachedToken();
-  const finalized = await finalizeAnalysis(analysis, {
+  const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
+  const finalized = await finalizeAnalysis(rawAnalysis, {
     symbol,
     currency: accounts.length > 0 ? accounts[0].currency : "USD",
     token,
-    defaultDuration: analysis.recommendedDuration ?? (settings.length > 0 ? settings[0].tradeDurationSec : 5),
-    barrier: analysis.digitBarrier,
+    defaultDuration: rawAnalysis.recommendedDuration ?? (settings.length > 0 ? settings[0].tradeDurationSec : 5),
+    barrier: rawAnalysis.digitBarrier,
+    skipProposal: paperTradeMode || isDemo,
   });
-
-  const paperTradeMode = settings.length > 0 ? (settings[0] as { paperTradeMode?: boolean }).paperTradeMode ?? false : false;
-  const requirePositiveEv = settings.length > 0 ? (settings[0] as { requirePositiveEv?: boolean }).requirePositiveEv ?? true : true;
 
   const gate = shouldExecuteTrade(finalized, {
     minConfidence: settings.length > 0 ? Number(settings[0].minConfidenceThreshold) : 65,
@@ -177,29 +177,106 @@ router.post("/", async (req, res): Promise<void> => {
     return;
   }
 
-  const winProbability = finalized.winProbability / 100;
-  const won = Math.random() < winProbability;
-  const payout = stake * finalized.payoutMultiplier;
-  const profit = won ? payout - stake : -stake;
+  const tradeDuration = duration ?? finalized.recommendedDuration ?? 5;
+  const isDigit = contractType.includes("DIGIT");
+  const barrier = isDigit ? (rawAnalysis.digitBarrier ?? undefined) : undefined;
+  const currency = accounts.length > 0 ? accounts[0].currency : "USD";
 
-  await updateSelfLearning(symbol, contractType, analysis.digitBarrier, won);
+  const isLiveTrade = !isDemo && !paperTradeMode && !!token;
 
-  // Update real account balance if connected; demo just tracks P&L
-  if (!isDemo && accounts.length > 0) {
-    await db.update(accountsTable)
-      .set({ balance: String(balance + profit), updatedAt: new Date() })
-      .where(eq(accountsTable.id, accounts[0].id));
+  let won: boolean, profit: number, payout: number, entryPrice: number, exitPrice: number;
+
+  if (isLiveTrade) {
+    // Insert as "open" immediately so the journal shows it in-progress
+    const [openTrade] = await db.insert(tradesTable).values({
+      symbol,
+      displayName,
+      contractType,
+      barrier: barrier ?? null,
+      stake: String(stake),
+      direction,
+      status: "open",
+      aiConfidence: String(finalized.calibratedConfidence),
+      aiRiskScore: String(finalized.riskScore),
+      isAutonomous: isAutonomous ?? false,
+      agentReasoning: `${rawAnalysis.reasoning} EV=$${finalized.expectedValue.toFixed(2)} (breakeven ${finalized.breakevenWinRate}%)`,
+      duration: tradeDuration,
+      durationUnit: durationUnit ?? "t",
+    }).returning();
+
+    try {
+      logger.info({ symbol, contractType, stake, barrier }, "Executing live trade");
+      const liveResult = await executeLiveTrade(token!, {
+        symbol,
+        contractType,
+        stake,
+        duration: tradeDuration,
+        durationUnit: durationUnit ?? "t",
+        currency,
+        barrier,
+      });
+      entryPrice = liveResult.buyPrice;
+
+      const contractResult = await waitForContractResult(token!, liveResult.contractId, (tradeDuration + 10) * 1000);
+      won = contractResult.won;
+      profit = contractResult.profit;
+      exitPrice = contractResult.exitSpot;
+      payout = stake + Math.max(profit, 0);
+    } catch (liveErr) {
+      logger.warn({ liveErr }, "Live trade failed — cancelling open trade");
+      await db.update(tradesTable)
+        .set({ status: "lost", profit: "0", closedAt: new Date() })
+        .where(eq(tradesTable.id, openTrade.id));
+      res.status(500).json({ error: "Live trade execution failed. Deriv may be unavailable." });
+      return;
+    }
+
+    await updateSelfLearning(symbol, contractType, rawAnalysis.digitBarrier, won);
+
+    const [closedTrade] = await db.update(tradesTable).set({
+      status: won ? "won" : "lost",
+      payout: String(payout),
+      profit: String(profit),
+      entryPrice: String(entryPrice),
+      exitPrice: String(exitPrice),
+      closedAt: new Date(),
+    }).where(eq(tradesTable.id, openTrade.id)).returning();
+
+    // Sync live balance
+    try {
+      const newBalance = await getLiveBalance(token!);
+      if (newBalance !== null && accounts.length > 0) {
+        await db.update(accountsTable).set({ balance: String(newBalance), updatedAt: new Date() });
+      }
+    } catch { /* ignore */ }
+
+    await logTradeFeatures(closedTrade.id, finalized, {
+      symbol, barrier: rawAnalysis.digitBarrier, tickWindow: rawAnalysis.tickWindow,
+      duration: tradeDuration, isPaperTrade: false,
+    });
+
+    res.status(201).json(formatTrade(closedTrade));
+    return;
   }
 
-  const entryPrice = prices[prices.length - 1];
-  const exitPrice = won
+  // Paper / demo trade simulation
+  const winProbability = finalized.winProbability / 100;
+  won = Math.random() < winProbability;
+  payout = stake * finalized.payoutMultiplier;
+  profit = won ? payout - stake : -stake;
+
+  entryPrice = prices[prices.length - 1];
+  exitPrice = won
     ? direction === "up" ? entryPrice * 1.001 : entryPrice * 0.999
     : direction === "up" ? entryPrice * 0.999 : entryPrice * 1.001;
+
+  await updateSelfLearning(symbol, contractType, rawAnalysis.digitBarrier, won);
 
   const [trade] = await db.insert(tradesTable).values({
     symbol,
     displayName,
     contractType,
+    barrier: barrier ?? null,
     stake: String(stake),
     direction,
     status: won ? "won" : "lost",
@@ -210,18 +287,15 @@ router.post("/", async (req, res): Promise<void> => {
     aiConfidence: String(finalized.calibratedConfidence),
     aiRiskScore: String(finalized.riskScore),
     isAutonomous: isAutonomous ?? false,
-    agentReasoning: `${analysis.reasoning} EV=$${finalized.expectedValue.toFixed(2)} (breakeven ${finalized.breakevenWinRate}%)`,
-    duration: duration ?? finalized.recommendedDuration ?? 5,
+    agentReasoning: `[${isDemo ? "DEMO" : "PAPER"}] ${rawAnalysis.reasoning} EV=$${finalized.expectedValue.toFixed(2)}`,
+    duration: tradeDuration,
     durationUnit: durationUnit ?? "t",
     closedAt: new Date(),
   }).returning();
 
   await logTradeFeatures(trade.id, finalized, {
-    symbol,
-    barrier: analysis.digitBarrier,
-    tickWindow: analysis.tickWindow,
-    duration: trade.duration ?? finalized.recommendedDuration ?? 5,
-    isPaperTrade: isDemo || paperTradeMode,
+    symbol, barrier: rawAnalysis.digitBarrier, tickWindow: rawAnalysis.tickWindow,
+    duration: tradeDuration, isPaperTrade: true,
   });
 
   res.status(201).json(formatTrade(trade));
@@ -245,7 +319,9 @@ function formatTrade(trade: typeof tradesTable.$inferSelect) {
   return {
     id: trade.id,
     symbol: trade.symbol,
+    displayName: trade.displayName,
     contractType: trade.contractType,
+    barrier: trade.barrier ?? null,
     stake: Number(trade.stake),
     direction: trade.direction,
     status: trade.status,

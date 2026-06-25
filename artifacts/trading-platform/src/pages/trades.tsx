@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useGetTrades, useGetTradeStats } from "@workspace/api-client-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { motion } from "framer-motion";
 import { format } from "date-fns";
@@ -15,11 +15,19 @@ const STATUS_FILTERS: { key: StatusFilter; label: string }[] = [
   { key: "open", label: "Open" },
 ];
 
+function formatContractLabel(contractType: string, barrier: number | null): string {
+  if (contractType === "DIGITOVER" && barrier !== null) return `OVER ${barrier}`;
+  if (contractType === "DIGITUNDER" && barrier !== null) return `UNDER ${barrier}`;
+  if (contractType === "DIGITOVER") return "OVER";
+  if (contractType === "DIGITUNDER") return "UNDER";
+  return contractType;
+}
+
 export default function Trades() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const { data: trades } = useGetTrades(
     { status: statusFilter },
-    { query: { refetchInterval: 8000 } } as { query: any }
+    { query: { refetchInterval: statusFilter === "open" ? 3000 : 8000 } } as { query: any }
   );
   const { data: stats } = useGetTradeStats({ query: { refetchInterval: 10000 } } as { query: any });
 
@@ -104,11 +112,11 @@ export default function Trades() {
         <div className="col-span-2">Time</div>
         <div className="col-span-2">Market</div>
         <div className="col-span-1">Dir</div>
-        <div className="col-span-1">Type</div>
+        <div className="col-span-2">Contract</div>
         <div className="col-span-1">Stake</div>
         <div className="col-span-2">AI Conf</div>
         <div className="col-span-1">Mode</div>
-        <div className="col-span-2">Result</div>
+        <div className="col-span-1">P/L</div>
       </div>
 
       <div className="space-y-1">
@@ -118,9 +126,10 @@ export default function Trades() {
           const profitColor = isWon ? "text-green-500" : isOpen ? "text-amber-500" : "text-red-500";
           const confVal = trade.aiConfidence ?? 0;
           const confColor = confVal >= 70 ? "text-green-500" : confVal >= 50 ? "text-amber-500" : "text-red-500";
+          const contractLabel = formatContractLabel(trade.contractType, (trade as any).barrier ?? null);
 
           return (
-            <Card key={trade.id} className={`bg-card hover:bg-secondary/20 transition-colors border ${isWon ? "border-green-500/10" : isOpen ? "border-amber-500/10" : "border-red-500/10"}`}>
+            <Card key={trade.id} className={`bg-card hover:bg-secondary/20 transition-colors border ${isWon ? "border-green-500/10" : isOpen ? "border-amber-500/10 animate-pulse" : "border-red-500/10"}`}>
               <CardContent className="p-2.5 grid grid-cols-12 gap-3 items-center">
                 <div className="col-span-2">
                   <div className="text-[11px] font-mono text-muted-foreground">{format(new Date(trade.createdAt), "HH:mm:ss")}</div>
@@ -128,7 +137,8 @@ export default function Trades() {
                 </div>
 
                 <div className="col-span-2">
-                  <div className="text-xs font-bold">{trade.symbol}</div>
+                  <div className="text-xs font-bold truncate">{(trade as any).displayName ?? trade.symbol}</div>
+                  <div className="text-[10px] text-zinc-600 font-mono">{trade.symbol}</div>
                 </div>
 
                 <div className="col-span-1">
@@ -138,8 +148,14 @@ export default function Trades() {
                   </div>
                 </div>
 
-                <div className="col-span-1">
-                  <span className="text-[10px] text-muted-foreground font-mono">{trade.contractType}</span>
+                <div className="col-span-2">
+                  <span className={`text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded ${
+                    trade.contractType.includes("DIGIT")
+                      ? "bg-purple-500/10 text-purple-400"
+                      : "bg-blue-500/10 text-blue-400"
+                  }`}>
+                    {contractLabel}
+                  </span>
                 </div>
 
                 <div className="col-span-1">
@@ -162,18 +178,15 @@ export default function Trades() {
                   </Badge>
                 </div>
 
-                <div className="col-span-2">
+                <div className="col-span-1">
                   {isOpen ? (
-                    <div className="flex items-center gap-1 text-amber-500">
+                    <div className="flex items-center gap-0.5 text-amber-500">
                       <Activity className="w-3 h-3 animate-pulse" />
-                      <span className="text-xs font-mono">Open</span>
+                      <span className="text-[10px] font-mono">Live</span>
                     </div>
                   ) : (
-                    <div className={`text-sm font-mono font-bold ${profitColor}`}>
+                    <div className={`text-xs font-mono font-bold ${profitColor}`}>
                       {isWon ? "+" : ""}{trade.profit?.toFixed(2) ?? "—"}
-                      <div className={`text-[9px] font-normal ${isWon ? "text-green-500/60" : "text-red-500/60"}`}>
-                        {isWon ? "WON" : "LOST"}
-                      </div>
                     </div>
                   )}
                 </div>

@@ -37,7 +37,6 @@ function NumInput({ value, onChange, min, max, step = 1, suffix }: {
   );
 }
 
-// Synthetics only — no forex/commodities/derived
 const CONTRACT_TYPES = [
   { id: "RISE", label: "RISE", desc: "Price rises from entry tick" },
   { id: "FALL", label: "FALL", desc: "Price falls from entry tick" },
@@ -47,9 +46,28 @@ const CONTRACT_TYPES = [
   { id: "DIGITUNDER", label: "UNDER", desc: "Last digit < barrier (1s synthetics)" },
 ];
 
-const SYNTHETIC_CATEGORIES = [
-  { id: "synthetic", label: "All Synthetics" },
+// All 17 Deriv Synthetic Indices
+const ALL_MARKETS = [
+  { symbol: "R_10", label: "Volatility 10", group: "Volatility" },
+  { symbol: "R_25", label: "Volatility 25", group: "Volatility" },
+  { symbol: "R_50", label: "Volatility 50", group: "Volatility" },
+  { symbol: "R_75", label: "Volatility 75", group: "Volatility" },
+  { symbol: "R_100", label: "Volatility 100", group: "Volatility" },
+  { symbol: "1HZ10V", label: "Volatility 10 (1s)", group: "Step" },
+  { symbol: "1HZ25V", label: "Volatility 25 (1s)", group: "Step" },
+  { symbol: "1HZ50V", label: "Volatility 50 (1s)", group: "Step" },
+  { symbol: "1HZ75V", label: "Volatility 75 (1s)", group: "Step" },
+  { symbol: "1HZ100V", label: "Volatility 100 (1s)", group: "Step" },
+  { symbol: "STPRNG", label: "Step Index", group: "Step" },
+  { symbol: "JD10", label: "Jump 10", group: "Jump" },
+  { symbol: "JD25", label: "Jump 25", group: "Jump" },
+  { symbol: "JD50", label: "Jump 50", group: "Jump" },
+  { symbol: "JD75", label: "Jump 75", group: "Jump" },
+  { symbol: "JD100", label: "Jump 100", group: "Jump" },
+  { symbol: "BOOM300N", label: "Boom 300", group: "Crash/Boom" },
 ];
+
+const MARKET_GROUPS = ["Volatility", "Step", "Jump", "Crash/Boom"];
 
 export default function Settings() {
   const { data: settings, isLoading } = useGetSettings();
@@ -77,6 +95,7 @@ export default function Settings() {
     requirePositiveEv: true,
     preferredContractTypes: ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"],
     preferredCategories: ["synthetic"],
+    allowedMarkets: [] as string[],
   });
 
   useEffect(() => {
@@ -101,7 +120,8 @@ export default function Settings() {
         paperTradeMode: (settings as any).paperTradeMode ?? false,
         requirePositiveEv: (settings as any).requirePositiveEv ?? true,
         preferredContractTypes: settings.preferredContractTypes.length > 0 ? settings.preferredContractTypes : ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"],
-        preferredCategories: ["synthetic"], // always synthetic
+        preferredCategories: ["synthetic"],
+        allowedMarkets: (settings as any).allowedMarkets ?? [],
       });
     }
   }, [settings]);
@@ -113,6 +133,17 @@ export default function Settings() {
       ? prev.preferredContractTypes.filter((c) => c !== id)
       : [...prev.preferredContractTypes, id],
   }));
+  const toggleMarket = (symbol: string) => setForm((prev) => {
+    const allowed = prev.allowedMarkets.includes(symbol)
+      ? prev.allowedMarkets.filter(s => s !== symbol)
+      : [...prev.allowedMarkets, symbol];
+    return { ...prev, allowedMarkets: allowed };
+  });
+  const selectAllMarkets = () => setForm((prev) => ({ ...prev, allowedMarkets: [] }));
+  const selectGroup = (group: string) => {
+    const groupSymbols = ALL_MARKETS.filter(m => m.group === group).map(m => m.symbol);
+    setForm((prev) => ({ ...prev, allowedMarkets: groupSymbols }));
+  };
 
   const handleSave = () => {
     updateSettings.mutate({ data: { ...form, preferredCategories: ["synthetic"] } as any }, {
@@ -124,6 +155,8 @@ export default function Settings() {
   if (isLoading) return <div className="p-8 text-muted-foreground text-sm animate-pulse">Loading settings…</div>;
 
   const maxRecovery = Math.pow(form.recoveryMultiplier, form.maxRecoverySteps);
+  const isAllMarkets = form.allowedMarkets.length === 0;
+  const selectedCount = form.allowedMarkets.length;
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-8 max-w-3xl mx-auto space-y-5 pb-24">
@@ -206,9 +239,6 @@ export default function Settings() {
           <SettingRow label="Market Rotation After" description="Exploit hot market for N trades before rotating.">
             <NumInput value={form.marketRotationAfter} onChange={(v) => set("marketRotationAfter", v)} min={1} max={20} step={1} />
           </SettingRow>
-          <SettingRow label="Scan All 17 Synthetics" description="Analyse all markets in parallel for best opportunity.">
-            <Switch checked={form.scanAllMarkets} onCheckedChange={(v) => set("scanAllMarkets", v)} />
-          </SettingRow>
           <SettingRow label="Autonomous Trading" description="Allow AI to execute without manual approval.">
             <Switch checked={form.autonomousEnabled} onCheckedChange={(v) => set("autonomousEnabled", v)} />
           </SettingRow>
@@ -225,24 +255,24 @@ export default function Settings() {
       <Card className="bg-card">
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Recovery Mode</CardTitle>
-          <CardDescription className="text-xs">Flat stake after losses — martingale disabled for safety.</CardDescription>
+          <CardDescription className="text-xs">After a loss, the AI switches contract type and calculates a recovery stake to cover the loss.</CardDescription>
         </CardHeader>
         <CardContent>
-          <SettingRow label="Enable Recovery Mode" description="Increase stake slightly after a loss to recover.">
+          <SettingRow label="Enable Recovery Mode" description="AI switches contract type/market and adjusts stake after a loss.">
             <Switch checked={form.recoveryMode} onCheckedChange={(v) => set("recoveryMode", v)} />
           </SettingRow>
           {form.recoveryMode && (
             <>
-              <SettingRow label="Recovery Multiplier" description="Each loss multiplies stake by this factor.">
+              <SettingRow label="Recovery Multiplier" description="Fallback multiplier if loss amount is small.">
                 <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", Math.min(1.5, Math.max(1.05, v)))} min={1.05} max={1.5} step={0.05} suffix="×" />
               </SettingRow>
-              <SettingRow label="Max Recovery Steps" description="Max consecutive multiplications before reset.">
+              <SettingRow label="Max Recovery Steps" description="Max consecutive recovery attempts before reset.">
                 <NumInput value={form.maxRecoverySteps} onChange={(v) => set("maxRecoverySteps", v)} min={1} max={5} step={1} />
               </SettingRow>
               <div className="mt-3 p-3 bg-secondary/30 rounded-lg flex gap-2">
                 <Info className="w-4 h-4 text-primary flex-shrink-0 mt-0.5" />
                 <p className="text-xs text-muted-foreground">
-                  Max exposure: <span className="text-foreground font-mono">{form.recoveryMultiplier}^{form.maxRecoverySteps} = {maxRecovery.toFixed(3)}×</span> base stake — always capped by Max Stake Per Trade.
+                  On a loss: agent switches to an alternative contract type (e.g. OVER→UNDER, RISE→FALL or DIGIT) and calculates a stake that covers the loss + margin. Max: <span className="text-foreground font-mono">{form.recoveryMultiplier}^{form.maxRecoverySteps} = {maxRecovery.toFixed(3)}×</span> base stake.
                   {maxRecovery > 1.5 && <span className="text-amber-400"> Warning: high multiplier — reduce steps or multiplier.</span>}
                 </p>
               </div>
@@ -255,7 +285,7 @@ export default function Settings() {
       <Card className="bg-card">
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Preferred Contract Types</CardTitle>
-          <CardDescription className="text-xs">AI will prioritise selected contract types when scoring opportunities.</CardDescription>
+          <CardDescription className="text-xs">AI prioritises selected types. Also determines recovery alternatives.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
@@ -281,12 +311,69 @@ export default function Settings() {
         </CardContent>
       </Card>
 
-      {/* Markets — synthetics only, just informational */}
-      <Card className="bg-card border-primary/20">
-        <CardContent className="pt-4">
-          <div className="flex items-center gap-2 text-sm">
-            <div className="w-2 h-2 rounded-full bg-green-500" />
-            <span className="text-muted-foreground">Trading exclusively on <strong className="text-foreground">17 Deriv Synthetic Indices</strong> — available 24/7, unaffected by news or market hours.</span>
+      {/* Market Selection */}
+      <Card className="bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Market Selection</CardTitle>
+          <CardDescription className="text-xs">
+            Restrict the engine to specific markets. All 17 are scanned by default.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {/* Quick select */}
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={selectAllMarkets}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${isAllMarkets ? "bg-primary/10 border-primary/40 text-primary" : "bg-secondary/50 border-border text-muted-foreground hover:text-foreground"}`}
+            >
+              All Markets (17)
+            </button>
+            {MARKET_GROUPS.map(group => {
+              const groupSymbols = ALL_MARKETS.filter(m => m.group === group).map(m => m.symbol);
+              const isGroupSelected = !isAllMarkets && groupSymbols.every(s => form.allowedMarkets.includes(s)) && form.allowedMarkets.length === groupSymbols.length;
+              return (
+                <button
+                  key={group}
+                  onClick={() => selectGroup(group)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${isGroupSelected ? "bg-primary/10 border-primary/40 text-primary" : "bg-secondary/50 border-border text-muted-foreground hover:text-foreground"}`}
+                >
+                  {group} Only
+                </button>
+              );
+            })}
+          </div>
+
+          {!isAllMarkets && (
+            <div className="text-xs text-amber-400 flex items-center gap-1.5">
+              <Info className="w-3.5 h-3.5 flex-shrink-0" />
+              <span>{selectedCount} of {ALL_MARKETS.length} markets selected. Engine scans only these.</span>
+            </div>
+          )}
+
+          {/* Market grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+            {MARKET_GROUPS.map(group => (
+              <div key={group}>
+                <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1 mt-2">{group}</div>
+                {ALL_MARKETS.filter(m => m.group === group).map(m => {
+                  const isSelected = isAllMarkets || form.allowedMarkets.includes(m.symbol);
+                  return (
+                    <button
+                      key={m.symbol}
+                      onClick={() => toggleMarket(m.symbol)}
+                      className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md text-left transition-colors mb-0.5 border ${
+                        isSelected
+                          ? "bg-green-500/5 border-green-500/20 text-green-400"
+                          : "bg-secondary/30 border-transparent text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <span className="text-xs font-medium">{m.label}</span>
+                      <span className="text-[10px] font-mono opacity-50">{m.symbol}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
           </div>
         </CardContent>
       </Card>

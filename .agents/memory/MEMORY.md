@@ -1,0 +1,4 @@
+- [NeuroTrade Architecture](neurotrade-arch.md) — pnpm monorepo: trading-platform (Vite/React, port 21210) + api-server (Express, port 8080). DB push via `pnpm --filter db push`.
+- [Payout multiplier cache](payout-cache.md) — finalizeAnalysis calls Deriv WS per market scan (slow); cache payout multipliers 20min in-memory, use skipProposal for paper/demo trades.
+- [Live trade execution](live-trade-exec.md) — manual trades route now uses executeLiveTrade+waitForContractResult when token exists and not paperTradeMode; inserts as "open" then updates to won/lost.
+- [Recovery cross-contract logic](recovery-logic.md) — on loss: engine switches contract type (OVER→UNDER/RISE, FALL→RISE, etc.) and calculates stake to cover loss; tracked via lastLossContractType/barrier/amount.

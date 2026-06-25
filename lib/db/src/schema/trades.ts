@@ -7,6 +7,7 @@ export const tradesTable = pgTable("trades", {
   symbol: text("symbol").notNull(),
   displayName: text("display_name").notNull(),
   contractType: text("contract_type").notNull(),
+  barrier: integer("barrier"),
   stake: numeric("stake", { precision: 20, scale: 2 }).notNull(),
   direction: text("direction").notNull(),
   status: text("status").notNull().default("open"),

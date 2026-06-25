@@ -26,6 +26,7 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     marketRotationAfter: s.marketRotationAfter,
     preferredContractTypes: s.preferredContractTypes.split(",").filter(Boolean),
     preferredCategories: s.preferredCategories.split(",").filter(Boolean),
+    allowedMarkets: s.allowedMarkets ? s.allowedMarkets.split(",").filter(Boolean) : [],
     autonomousEnabled: s.autonomousEnabled,
     loopIntervalSec: s.loopIntervalSec,
     recoveryMode: s.recoveryMode,
@@ -69,6 +70,10 @@ router.put("/", async (req, res): Promise<void> => {
   if (updates.preferredContractTypes !== undefined) updateData.preferredContractTypes = updates.preferredContractTypes.join(",");
   if (updates.preferredCategories !== undefined) updateData.preferredCategories = updates.preferredCategories.join(",");
   if (updates.autonomousEnabled !== undefined) updateData.autonomousEnabled = updates.autonomousEnabled;
+  if ((updates as any).allowedMarkets !== undefined) {
+    const am = (updates as any).allowedMarkets;
+    updateData.allowedMarkets = Array.isArray(am) ? am.join(",") : (am ?? "");
+  }
   if ((updates as any).loopIntervalSec !== undefined) updateData.loopIntervalSec = (updates as any).loopIntervalSec;
   if ((updates as any).recoveryMode !== undefined) updateData.recoveryMode = (updates as any).recoveryMode;
   if ((updates as any).recoveryMultiplier !== undefined) updateData.recoveryMultiplier = String((updates as any).recoveryMultiplier);

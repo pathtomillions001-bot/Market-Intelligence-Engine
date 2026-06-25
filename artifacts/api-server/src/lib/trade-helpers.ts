@@ -3,6 +3,7 @@ import { tradeFeaturesTable } from "@workspace/db";
 import type { MarketAnalysis } from "./ai-engine";
 import { getContractProposal } from "./deriv";
 import { calibrateConfidence, computeBreakevenWinRate, computeExpectedValue } from "./calibration";
+import { logger } from "./logger";
 
 export interface FinalizedAnalysis extends MarketAnalysis {
   calibratedConfidence: number;
@@ -13,6 +14,30 @@ export interface FinalizedAnalysis extends MarketAnalysis {
   recommendedDuration: number;
 }
 
+// ── Payout multiplier cache (avoids slow WS round-trip on every scan) ─────────
+const payoutCache = new Map<string, { value: number; ts: number }>();
+const PAYOUT_TTL_MS = 20 * 60 * 1000;
+
+const DEFAULT_PAYOUT: Record<string, number> = {
+  RISE: 1.87, FALL: 1.87, CALL: 1.87, PUT: 1.87,
+  DIGITOVER: 9.4, DIGITUNDER: 9.4,
+};
+
+function payoutKey(symbol: string, contractType: string, barrier?: number): string {
+  return `${symbol}:${contractType}:${barrier ?? ""}`;
+}
+
+function getCachedPayout(symbol: string, contractType: string, barrier?: number): number | null {
+  const key = payoutKey(symbol, contractType, barrier);
+  const hit = payoutCache.get(key);
+  if (hit && Date.now() - hit.ts < PAYOUT_TTL_MS) return hit.value;
+  return null;
+}
+
+function setCachedPayout(symbol: string, contractType: string, barrier: number | undefined, value: number) {
+  payoutCache.set(payoutKey(symbol, contractType, barrier), { value, ts: Date.now() });
+}
+
 export async function finalizeAnalysis(
   analysis: MarketAnalysis,
   opts: {
@@ -21,24 +46,43 @@ export async function finalizeAnalysis(
     token: string | null;
     defaultDuration: number;
     barrier?: number;
+    skipProposal?: boolean;
   },
 ): Promise<FinalizedAnalysis> {
   const duration = analysis.recommendedDuration ?? opts.defaultDuration;
   const barrier = analysis.digitBarrier ?? opts.barrier;
+  const isDigit = analysis.recommendedContractType.includes("DIGIT");
 
-  const proposal = await getContractProposal(opts.token, {
-    symbol: opts.symbol,
-    contractType: analysis.recommendedContractType,
-    stake: analysis.recommendedStake,
-    duration,
-    durationUnit: "t",
-    currency: opts.currency,
-    barrier: analysis.recommendedContractType.includes("DIGIT") ? barrier : undefined,
-  });
+  let payoutMultiplier: number;
+  const cached = getCachedPayout(opts.symbol, analysis.recommendedContractType, isDigit ? barrier : undefined);
 
-  const payoutMultiplier = proposal?.payoutMultiplier ?? 1.87;
+  if (cached !== null) {
+    payoutMultiplier = cached;
+  } else if (opts.skipProposal) {
+    payoutMultiplier = DEFAULT_PAYOUT[analysis.recommendedContractType] ?? 1.87;
+  } else {
+    try {
+      const proposal = await Promise.race([
+        getContractProposal(opts.token, {
+          symbol: opts.symbol,
+          contractType: analysis.recommendedContractType,
+          stake: analysis.recommendedStake,
+          duration,
+          durationUnit: "t",
+          currency: opts.currency,
+          barrier: isDigit ? barrier : undefined,
+        }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
+      ]);
+      payoutMultiplier = proposal?.payoutMultiplier ?? DEFAULT_PAYOUT[analysis.recommendedContractType] ?? 1.87;
+      setCachedPayout(opts.symbol, analysis.recommendedContractType, isDigit ? barrier : undefined, payoutMultiplier);
+    } catch {
+      payoutMultiplier = DEFAULT_PAYOUT[analysis.recommendedContractType] ?? 1.87;
+    }
+  }
+
   const calibratedConfidence = await calibrateConfidence(analysis.confidenceScore, analysis.recommendedContractType);
-  const winProbability = analysis.recommendedContractType.includes("DIGIT")
+  const winProbability = isDigit
     ? (analysis.digitConfidence ?? calibratedConfidence)
     : Math.round(analysis.winProbability ?? calibratedConfidence);
 

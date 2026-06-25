@@ -1,12 +1,12 @@
-import { Switch, Route, Router as WouterRouter } from "wouter";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Switch, Route, Router as WouterRouter, useLocation } from "wouter";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import NotFound from "@/pages/not-found";
 import { Layout } from "@/components/layout";
+import LandingPage from "./pages/landing";
 
-// Lazy imports would be better, but direct imports for simplicity in this sandbox
 import Dashboard from "./pages/dashboard";
 import Markets from "./pages/markets";
 import MarketDetail from "./pages/market-detail";
@@ -15,9 +15,47 @@ import Analytics from "./pages/analytics";
 import Connect from "./pages/connect";
 import Settings from "./pages/settings";
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: 1, staleTime: 30000 } },
+});
+
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+function getApiUrl(path: string) {
+  return `${BASE}/api${path}`;
+}
+
+function useLandingGate() {
+  const [dismissed, setDismissed] = useState(() => localStorage.getItem("nt_visited") === "1");
+  const { data: account } = useQuery({
+    queryKey: ["account-gate"],
+    queryFn: async () => {
+      const r = await fetch(getApiUrl("/auth/account"));
+      if (!r.ok) return null;
+      const data = await r.json();
+      return data?.loginId ? data : null;
+    },
+    staleTime: 10000,
+  });
+
+  const hasAccount = !!account;
+
+  const dismiss = () => {
+    localStorage.setItem("nt_visited", "1");
+    setDismissed(true);
+  };
+
+  return { showLanding: !dismissed && !hasAccount, dismiss };
+}
 
 function Router() {
+  const { showLanding, dismiss } = useLandingGate();
+  const [, setLocation] = useLocation();
+
+  if (showLanding) {
+    return <LandingPage onEnter={() => { dismiss(); setLocation("/"); }} />;
+  }
+
   return (
     <Layout>
       <Switch>
@@ -42,7 +80,7 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+        <WouterRouter base={BASE}>
           <Router />
         </WouterRouter>
         <Toaster />
