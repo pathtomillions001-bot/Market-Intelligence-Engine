@@ -168,15 +168,6 @@ router.post("/", async (req, res): Promise<void> => {
     skipProposal: paperTradeMode || isDemo,
   });
 
-  const gate = shouldExecuteTrade(finalized, {
-    minConfidence: settings.length > 0 ? Number(settings[0].minConfidenceThreshold) : 65,
-    requirePositiveEv,
-  });
-  if (!gate.execute && !paperTradeMode) {
-    res.status(400).json({ error: gate.reason ?? "Trade does not meet EV/confidence requirements" });
-    return;
-  }
-
   const tradeDuration = duration ?? finalized.recommendedDuration ?? 5;
   const isDigit = contractType.includes("DIGIT");
   const barrier = isDigit ? (rawAnalysis.digitBarrier ?? undefined) : undefined;
@@ -223,7 +214,7 @@ router.post("/", async (req, res): Promise<void> => {
       exitPrice = contractResult.exitSpot;
       payout = stake + Math.max(profit, 0);
     } catch (liveErr) {
-      logger.warn({ liveErr }, "Live trade failed — cancelling open trade");
+      logger.warn({ liveErrMsg: liveErr instanceof Error ? liveErr.message : String(liveErr) }, "Live trade failed — cancelling open trade");
       await db.update(tradesTable)
         .set({ status: "lost", profit: "0", closedAt: new Date() })
         .where(eq(tradesTable.id, openTrade.id));

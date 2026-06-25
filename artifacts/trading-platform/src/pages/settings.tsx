@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { motion } from "framer-motion";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
-import { Info } from "lucide-react";
+import { Info, TrendingUp, TrendingDown, Hash } from "lucide-react";
 
 function SettingRow({ label, description, children }: { label: string; description?: string; children: React.ReactNode }) {
   return (
@@ -37,37 +37,33 @@ function NumInput({ value, onChange, min, max, step = 1, suffix }: {
   );
 }
 
-const CONTRACT_TYPES = [
-  { id: "RISE", label: "RISE", desc: "Price rises from entry tick" },
-  { id: "FALL", label: "FALL", desc: "Price falls from entry tick" },
-  { id: "CALL", label: "CALL", desc: "Higher at expiry" },
-  { id: "PUT", label: "PUT", desc: "Lower at expiry" },
-  { id: "DIGITOVER", label: "OVER", desc: "Last digit > barrier (1s synthetics)" },
-  { id: "DIGITUNDER", label: "UNDER", desc: "Last digit < barrier (1s synthetics)" },
+// Contract type groups — what the AI engine trades
+const CONTRACT_GROUPS = [
+  {
+    id: "riseFall",
+    label: "Rise & Fall",
+    icon: <TrendingUp className="w-4 h-4" />,
+    desc: "Tick-to-tick momentum. Price rises or falls from entry.",
+    types: ["RISE", "FALL"],
+    color: "indigo",
+  },
+  {
+    id: "putCall",
+    label: "Put & Call",
+    icon: <TrendingDown className="w-4 h-4" />,
+    desc: "Direction at expiry. Higher or lower than entry at contract end.",
+    types: ["CALL", "PUT"],
+    color: "violet",
+  },
+  {
+    id: "overUnder",
+    label: "Over & Under (Digits)",
+    icon: <Hash className="w-4 h-4" />,
+    desc: "Last digit of price. AI picks optimal barrier from live digit analysis.",
+    types: ["DIGITOVER", "DIGITUNDER"],
+    color: "emerald",
+  },
 ];
-
-// All 17 Deriv Synthetic Indices
-const ALL_MARKETS = [
-  { symbol: "R_10", label: "Volatility 10", group: "Volatility" },
-  { symbol: "R_25", label: "Volatility 25", group: "Volatility" },
-  { symbol: "R_50", label: "Volatility 50", group: "Volatility" },
-  { symbol: "R_75", label: "Volatility 75", group: "Volatility" },
-  { symbol: "R_100", label: "Volatility 100", group: "Volatility" },
-  { symbol: "1HZ10V", label: "Volatility 10 (1s)", group: "Step" },
-  { symbol: "1HZ25V", label: "Volatility 25 (1s)", group: "Step" },
-  { symbol: "1HZ50V", label: "Volatility 50 (1s)", group: "Step" },
-  { symbol: "1HZ75V", label: "Volatility 75 (1s)", group: "Step" },
-  { symbol: "1HZ100V", label: "Volatility 100 (1s)", group: "Step" },
-  { symbol: "STPRNG", label: "Step Index", group: "Step" },
-  { symbol: "JD10", label: "Jump 10", group: "Jump" },
-  { symbol: "JD25", label: "Jump 25", group: "Jump" },
-  { symbol: "JD50", label: "Jump 50", group: "Jump" },
-  { symbol: "JD75", label: "Jump 75", group: "Jump" },
-  { symbol: "JD100", label: "Jump 100", group: "Jump" },
-  { symbol: "BOOM300N", label: "Boom 300", group: "Crash/Boom" },
-];
-
-const MARKET_GROUPS = ["Volatility", "Step", "Jump", "Crash/Boom"];
 
 export default function Settings() {
   const { data: settings, isLoading } = useGetSettings();
@@ -81,9 +77,7 @@ export default function Settings() {
     dailyLossLimit: 30,
     maxDrawdown: 10,
     consecutiveLossLimit: 3,
-    minConfidenceThreshold: 55,
     marketRotationAfter: 5,
-    loopIntervalSec: 15,
     tradeDurationSec: 5,
     maxTradeStake: 500,
     autonomousEnabled: false,
@@ -107,9 +101,7 @@ export default function Settings() {
         dailyLossLimit: settings.dailyLossLimit,
         maxDrawdown: settings.maxDrawdown,
         consecutiveLossLimit: settings.consecutiveLossLimit,
-        minConfidenceThreshold: settings.minConfidenceThreshold,
         marketRotationAfter: settings.marketRotationAfter,
-        loopIntervalSec: (settings as any).loopIntervalSec ?? 15,
         tradeDurationSec: (settings as any).tradeDurationSec ?? 5,
         maxTradeStake: (settings as any).maxTradeStake ?? 500,
         autonomousEnabled: settings.autonomousEnabled,
@@ -119,34 +111,36 @@ export default function Settings() {
         scanAllMarkets: (settings as any).scanAllMarkets ?? true,
         paperTradeMode: (settings as any).paperTradeMode ?? false,
         requirePositiveEv: (settings as any).requirePositiveEv ?? true,
-        preferredContractTypes: settings.preferredContractTypes.length > 0 ? settings.preferredContractTypes : ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"],
+        preferredContractTypes: settings.preferredContractTypes.length > 0
+          ? settings.preferredContractTypes
+          : ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"],
         preferredCategories: ["synthetic"],
-        allowedMarkets: (settings as any).allowedMarkets ?? [],
+        allowedMarkets: [],
       });
     }
   }, [settings]);
 
   const set = (key: string, val: unknown) => setForm((prev) => ({ ...prev, [key]: val }));
-  const toggleContract = (id: string) => setForm((prev) => ({
-    ...prev,
-    preferredContractTypes: prev.preferredContractTypes.includes(id)
-      ? prev.preferredContractTypes.filter((c) => c !== id)
-      : [...prev.preferredContractTypes, id],
-  }));
-  const toggleMarket = (symbol: string) => setForm((prev) => {
-    const allowed = prev.allowedMarkets.includes(symbol)
-      ? prev.allowedMarkets.filter(s => s !== symbol)
-      : [...prev.allowedMarkets, symbol];
-    return { ...prev, allowedMarkets: allowed };
-  });
-  const selectAllMarkets = () => setForm((prev) => ({ ...prev, allowedMarkets: [] }));
-  const selectGroup = (group: string) => {
-    const groupSymbols = ALL_MARKETS.filter(m => m.group === group).map(m => m.symbol);
-    setForm((prev) => ({ ...prev, allowedMarkets: groupSymbols }));
+
+  // Toggle entire contract group
+  const toggleGroup = (types: string[]) => {
+    setForm((prev) => {
+      const allActive = types.every(t => prev.preferredContractTypes.includes(t));
+      if (allActive) {
+        // Deactivate group — but don't allow empty
+        const next = prev.preferredContractTypes.filter(t => !types.includes(t));
+        return { ...prev, preferredContractTypes: next.length > 0 ? next : prev.preferredContractTypes };
+      } else {
+        return {
+          ...prev,
+          preferredContractTypes: [...new Set([...prev.preferredContractTypes, ...types])],
+        };
+      }
+    });
   };
 
   const handleSave = () => {
-    updateSettings.mutate({ data: { ...form, preferredCategories: ["synthetic"] } as any }, {
+    updateSettings.mutate({ data: { ...form, preferredCategories: ["synthetic"], allowedMarkets: [] } as any }, {
       onSuccess: () => toast.success("Settings saved"),
       onError: (err: any) => toast.error(err?.error || "Failed to save settings"),
     });
@@ -155,14 +149,12 @@ export default function Settings() {
   if (isLoading) return <div className="p-8 text-muted-foreground text-sm animate-pulse">Loading settings…</div>;
 
   const maxRecovery = Math.pow(form.recoveryMultiplier, form.maxRecoverySteps);
-  const isAllMarkets = form.allowedMarkets.length === 0;
-  const selectedCount = form.allowedMarkets.length;
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-8 max-w-3xl mx-auto space-y-5 pb-24">
       <div>
         <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Settings</h1>
-        <p className="text-muted-foreground mt-1 text-sm">Full control over the AI engine — Synthetic Indices only.</p>
+        <p className="text-muted-foreground mt-1 text-sm">The AI engine learns autonomously — configure risk and trade mode only.</p>
       </div>
 
       {account && (
@@ -224,30 +216,78 @@ export default function Settings() {
       <Card className="bg-card">
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Engine Behavior</CardTitle>
-          <CardDescription className="text-xs">How the AI scans Deriv markets and executes trades.</CardDescription>
+          <CardDescription className="text-xs">The AI scans all markets in milliseconds from live tick buffers. Confidence and scan speed are self-managed.</CardDescription>
         </CardHeader>
         <CardContent>
-          <SettingRow label="Min Confidence Threshold" description="AI must be at least this confident to trade.">
-            <NumInput value={form.minConfidenceThreshold} onChange={(v) => set("minConfidenceThreshold", v)} min={40} max={95} step={1} suffix="%" />
-          </SettingRow>
-          <SettingRow label="Scan Interval" description="Seconds between each autonomous scan.">
-            <NumInput value={form.loopIntervalSec} onChange={(v) => set("loopIntervalSec", v)} min={5} max={300} step={5} suffix="s" />
-          </SettingRow>
           <SettingRow label="Trade Duration" description="Contract duration in ticks (5t ≈ 5s on 1s synthetics).">
             <NumInput value={form.tradeDurationSec} onChange={(v) => set("tradeDurationSec", v)} min={1} max={10} step={1} suffix="t" />
           </SettingRow>
           <SettingRow label="Market Rotation After" description="Exploit hot market for N trades before rotating.">
             <NumInput value={form.marketRotationAfter} onChange={(v) => set("marketRotationAfter", v)} min={1} max={20} step={1} />
           </SettingRow>
-          <SettingRow label="Autonomous Trading" description="Allow AI to execute without manual approval.">
-            <Switch checked={form.autonomousEnabled} onCheckedChange={(v) => set("autonomousEnabled", v)} />
-          </SettingRow>
           <SettingRow label="Paper Trade Mode" description="Log trades with ML features but do not send live orders to Deriv.">
             <Switch checked={form.paperTradeMode} onCheckedChange={(v) => set("paperTradeMode", v)} />
           </SettingRow>
-          <SettingRow label="Require Positive EV" description="Only trade when expected value is positive after Deriv proposal payout.">
-            <Switch checked={form.requirePositiveEv} onCheckedChange={(v) => set("requirePositiveEv", v)} />
-          </SettingRow>
+          <div className="pt-2 pb-1 flex gap-2 text-xs text-muted-foreground bg-secondary/20 rounded-lg px-3 py-2">
+            <Info className="w-3.5 h-3.5 text-primary flex-shrink-0 mt-0.5" />
+            <span>The AI engine scans all 17 markets every 2–3 seconds from live tick buffers. Confidence thresholds, scan intervals, and trade timing are determined autonomously by the ML ensemble — not user settings.</span>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* AI Engine Contract Mode */}
+      <Card className="bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">AI Engine Contract Mode</CardTitle>
+          <CardDescription className="text-xs">
+            Choose which contract types the engine trades. The AI picks the best market and optimal parameters for each selected type — no manual barriers or directions needed.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-1 gap-3">
+            {CONTRACT_GROUPS.map((group) => {
+              const active = group.types.every(t => form.preferredContractTypes.includes(t));
+              const partial = !active && group.types.some(t => form.preferredContractTypes.includes(t));
+              return (
+                <button
+                  key={group.id}
+                  onClick={() => toggleGroup(group.types)}
+                  className={`w-full flex items-start gap-3 p-4 rounded-xl text-left border transition-all ${
+                    active
+                      ? "bg-primary/10 border-primary/40"
+                      : partial
+                      ? "bg-amber-500/5 border-amber-500/30"
+                      : "bg-secondary/30 border-border hover:border-border/80"
+                  }`}
+                >
+                  <div className={`p-2 rounded-lg mt-0.5 ${active ? "bg-primary/20 text-primary" : "bg-secondary text-muted-foreground"}`}>
+                    {group.icon}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className={`font-semibold text-sm ${active ? "text-primary" : "text-foreground"}`}>{group.label}</span>
+                      {active && <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/20 text-primary font-medium">Active</span>}
+                      {partial && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 font-medium">Partial</span>}
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{group.desc}</p>
+                    <div className="flex gap-1.5 mt-2">
+                      {group.types.map(t => (
+                        <span key={t} className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${form.preferredContractTypes.includes(t) ? "bg-primary/10 border-primary/30 text-primary" : "bg-secondary border-border text-muted-foreground"}`}>{t.replace("DIGIT", "").replace("OVER", "OVER").replace("UNDER", "UNDER")}</span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className={`w-5 h-5 rounded-full border-2 flex-shrink-0 flex items-center justify-center mt-1 ${active ? "bg-primary border-primary" : "border-border"}`}>
+                    {active && <div className="w-2 h-2 rounded-full bg-white" />}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="p-3 bg-secondary/20 rounded-lg text-xs text-muted-foreground space-y-1">
+            <p><strong className="text-foreground">All selected (recommended)</strong> — AI picks the best contract type for each opportunity across all categories</p>
+            <p><strong className="text-foreground">Selective mode</strong> — restricts the engine to your chosen contract categories only</p>
+            <p><strong className="text-foreground">OVER/UNDER</strong> — AI analyses live digit distribution per tick and selects the most favourable barrier automatically</p>
+          </div>
         </CardContent>
       </Card>
 
@@ -272,109 +312,12 @@ export default function Settings() {
               <div className="mt-3 p-3 bg-secondary/30 rounded-lg flex gap-2">
                 <Info className="w-4 h-4 text-primary flex-shrink-0 mt-0.5" />
                 <p className="text-xs text-muted-foreground">
-                  On a loss: agent switches to an alternative contract type (e.g. OVER→UNDER, RISE→FALL or DIGIT) and calculates a stake that covers the loss + margin. Max: <span className="text-foreground font-mono">{form.recoveryMultiplier}^{form.maxRecoverySteps} = {maxRecovery.toFixed(3)}×</span> base stake.
-                  {maxRecovery > 1.5 && <span className="text-amber-400"> Warning: high multiplier — reduce steps or multiplier.</span>}
+                  On a loss: agent switches contract type (OVER→UNDER, RISE→FALL, etc.) and calculates a stake that covers the loss + margin. Max: <span className="text-foreground font-mono">{form.recoveryMultiplier}^{form.maxRecoverySteps} = {maxRecovery.toFixed(3)}×</span> base stake.
+                  {maxRecovery > 1.5 && <span className="text-amber-400"> Warning: high multiplier.</span>}
                 </p>
               </div>
             </>
           )}
-        </CardContent>
-      </Card>
-
-      {/* Contract Types */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Preferred Contract Types</CardTitle>
-          <CardDescription className="text-xs">AI prioritises selected types. Also determines recovery alternatives.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-            {CONTRACT_TYPES.map((c) => {
-              const active = form.preferredContractTypes.includes(c.id);
-              return (
-                <button
-                  key={c.id}
-                  onClick={() => toggleContract(c.id)}
-                  className={`p-2.5 rounded-lg text-left border transition-colors ${active ? "bg-primary/10 border-primary/40 text-primary" : "bg-secondary/50 border-border text-muted-foreground hover:text-foreground"}`}
-                >
-                  <div className="font-mono font-bold text-sm">{c.label}</div>
-                  <div className="text-[10px] mt-0.5 opacity-70">{c.desc}</div>
-                </button>
-              );
-            })}
-          </div>
-          <div className="p-3 bg-secondary/20 rounded-lg text-xs text-muted-foreground space-y-0.5">
-            <p><strong className="text-foreground">RISE/FALL</strong> — best for synthetic momentum, no barrier needed</p>
-            <p><strong className="text-foreground">CALL/PUT</strong> — directional with fixed expiry price comparison</p>
-            <p><strong className="text-foreground">OVER/UNDER</strong> — digit analysis; AI picks optimal barrier based on live digit distribution</p>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Market Selection */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Market Selection</CardTitle>
-          <CardDescription className="text-xs">
-            Restrict the engine to specific markets. All 17 are scanned by default.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {/* Quick select */}
-          <div className="flex flex-wrap gap-2">
-            <button
-              onClick={selectAllMarkets}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${isAllMarkets ? "bg-primary/10 border-primary/40 text-primary" : "bg-secondary/50 border-border text-muted-foreground hover:text-foreground"}`}
-            >
-              All Markets (17)
-            </button>
-            {MARKET_GROUPS.map(group => {
-              const groupSymbols = ALL_MARKETS.filter(m => m.group === group).map(m => m.symbol);
-              const isGroupSelected = !isAllMarkets && groupSymbols.every(s => form.allowedMarkets.includes(s)) && form.allowedMarkets.length === groupSymbols.length;
-              return (
-                <button
-                  key={group}
-                  onClick={() => selectGroup(group)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${isGroupSelected ? "bg-primary/10 border-primary/40 text-primary" : "bg-secondary/50 border-border text-muted-foreground hover:text-foreground"}`}
-                >
-                  {group} Only
-                </button>
-              );
-            })}
-          </div>
-
-          {!isAllMarkets && (
-            <div className="text-xs text-amber-400 flex items-center gap-1.5">
-              <Info className="w-3.5 h-3.5 flex-shrink-0" />
-              <span>{selectedCount} of {ALL_MARKETS.length} markets selected. Engine scans only these.</span>
-            </div>
-          )}
-
-          {/* Market grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-            {MARKET_GROUPS.map(group => (
-              <div key={group}>
-                <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1 mt-2">{group}</div>
-                {ALL_MARKETS.filter(m => m.group === group).map(m => {
-                  const isSelected = isAllMarkets || form.allowedMarkets.includes(m.symbol);
-                  return (
-                    <button
-                      key={m.symbol}
-                      onClick={() => toggleMarket(m.symbol)}
-                      className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md text-left transition-colors mb-0.5 border ${
-                        isSelected
-                          ? "bg-green-500/5 border-green-500/20 text-green-400"
-                          : "bg-secondary/30 border-transparent text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      <span className="text-xs font-medium">{m.label}</span>
-                      <span className="text-[10px] font-mono opacity-50">{m.symbol}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            ))}
-          </div>
         </CardContent>
       </Card>
 

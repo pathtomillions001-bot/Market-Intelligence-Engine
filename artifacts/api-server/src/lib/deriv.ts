@@ -142,6 +142,84 @@ export function analyzeDigits(digits: number[]): DigitStats {
   return { distribution, overPct, underPct, fivePct, recommendOver, recommendUnder, streakInfo, hotDigits, coldDigits, bias };
 }
 
+// ── Trend / Rise-Fall analysis (directional contracts) ───────────────────────
+export interface TrendStats {
+  risePct: number;      // % of recent ticks that went up
+  fallPct: number;      // % of recent ticks that went down
+  flatPct: number;      // % of ticks that were flat
+  strength: number;     // momentum strength 0-100
+  bias: "rise" | "fall" | "neutral";
+  recommendRise: boolean;
+  recommendFall: boolean;
+  recentRisePct: number;   // last 20 ticks rise %
+  recentFallPct: number;   // last 20 ticks fall %
+  streakInfo: string;
+  hotStreak: number;       // consecutive same-direction ticks
+  hotDirection: "rise" | "fall" | "none";
+}
+
+export function analyzeTrend(prices: number[]): TrendStats {
+  const window = prices.slice(-100);
+  const recent = prices.slice(-20);
+
+  // Count directional moves
+  let rises = 0, falls = 0, flats = 0;
+  for (let i = 1; i < window.length; i++) {
+    if (window[i] > window[i - 1]) rises++;
+    else if (window[i] < window[i - 1]) falls++;
+    else flats++;
+  }
+  const total = Math.max(window.length - 1, 1);
+  const risePct = Math.round((rises / total) * 100);
+  const fallPct = Math.round((falls / total) * 100);
+  const flatPct = 100 - risePct - fallPct;
+
+  // Recent moves (last 20 ticks)
+  let recentRises = 0, recentFalls = 0;
+  for (let i = 1; i < recent.length; i++) {
+    if (recent[i] > recent[i - 1]) recentRises++;
+    else if (recent[i] < recent[i - 1]) recentFalls++;
+  }
+  const recentTotal = Math.max(recent.length - 1, 1);
+  const recentRisePct = Math.round((recentRises / recentTotal) * 100);
+  const recentFallPct = Math.round((recentFalls / recentTotal) * 100);
+
+  // Momentum strength: difference from 50% (random baseline)
+  const strength = Math.min(100, Math.abs(recentRisePct - 50) * 2);
+
+  // Determine bias (mean-reversion logic — if one side is over-extended, bet opposite)
+  let bias: "rise" | "fall" | "neutral" = "neutral";
+  let recommendRise = false;
+  let recommendFall = false;
+
+  if (recentRisePct > 65) {
+    bias = "fall"; recommendFall = true; // over-extended upward, expect reversion
+  } else if (recentFallPct > 65) {
+    bias = "rise"; recommendRise = true; // over-extended downward, expect reversion
+  } else if (risePct > 55) {
+    bias = "rise"; recommendRise = true;
+  } else if (fallPct > 55) {
+    bias = "fall"; recommendFall = true;
+  }
+
+  // Current streak
+  let hotStreak = 0;
+  let hotDirection: "rise" | "fall" | "none" = "none";
+  for (let i = window.length - 1; i > 0; i--) {
+    const dir = window[i] > window[i - 1] ? "rise" : window[i] < window[i - 1] ? "fall" : null;
+    if (!dir) break;
+    if (hotStreak === 0) { hotDirection = dir; hotStreak = 1; }
+    else if (dir === hotDirection) hotStreak++;
+    else break;
+  }
+
+  const streakInfo = hotStreak >= 3
+    ? `${hotDirection.toUpperCase()} streak: ${hotStreak} consecutive`
+    : "No significant streak";
+
+  return { risePct, fallPct, flatPct, strength, bias, recommendRise, recommendFall, recentRisePct, recentFallPct, streakInfo, hotStreak, hotDirection };
+}
+
 // ── Persistent Tick Manager ───────────────────────────────────────────────────
 const TICK_BUFFER_SIZE = 500;
 const DIGIT_BUFFER_SIZE = 300;
@@ -215,10 +293,15 @@ class DerivTickManager extends EventEmitter {
 
   private subscribeAll() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    for (const symbol of this.subscribedSymbols) {
-      this.ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
-    }
-    logger.info({ count: this.subscribedSymbols.length }, "TickManager: subscribed to all markets");
+    // Stagger subscriptions 120ms apart to avoid Deriv rate-limiting
+    this.subscribedSymbols.forEach((symbol, i) => {
+      setTimeout(() => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
+        }
+      }, i * 120);
+    });
+    logger.info({ count: this.subscribedSymbols.length }, "TickManager: subscribing to all markets (staggered)");
   }
 
   private handleMessage(msg: any) {

@@ -3,7 +3,7 @@ import { db } from "@workspace/db";
 import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@workspace/db";
 import { sql, desc } from "drizzle-orm";
 import { analyzeMarket, updateSelfLearning, getMarketWinRate } from "../lib/ai-engine";
-import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo } from "../lib/deriv";
+import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo, analyzeDigits, analyzeTrend } from "../lib/deriv";
 import { finalizeAnalysis, logTradeFeatures, shouldExecuteTrade } from "../lib/trade-helpers";
 import { loadCalibrationCache } from "../lib/calibration";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
@@ -68,9 +68,17 @@ export function broadcastSSE(event: string, data: unknown) {
   }
 }
 
-// ── Wire up TickManager → SSE for live prices ─────────────────────────────────
+// ── Wire up TickManager → SSE for live prices + live analysis ─────────────────
 tickManager.on("tick", (tick) => {
   broadcastSSE("tick", tick);
+  // Broadcast live digit + trend analysis on every tick for the symbol
+  const market = getMarketInfo(tick.symbol);
+  if (market) {
+    const prices = tickManager.getTicks(tick.symbol, 100);
+    const trendStats = analyzeTrend(prices);
+    const digitStats = market.digitEnabled ? analyzeDigits(tickManager.getDigits(tick.symbol, 100)) : null;
+    broadcastSSE("market_analysis", { symbol: tick.symbol, trendStats, digitStats, price: tick.price, epoch: tick.epoch });
+  }
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -146,7 +154,6 @@ async function runAutonomousLoop() {
     const { balance, settings, account } = await getAccountAndSettings();
     const token = getCachedToken() ?? account?.token ?? null;
 
-    const minConfidence = settings ? Number(settings.minConfidenceThreshold) : 50;
     const dailyLossLimit = settings ? Number(settings.dailyLossLimit) : 30;
     const dailyTarget = settings ? Number(settings.dailyTarget) : 50;
     const consecutiveLossLimit = settings?.consecutiveLossLimit ?? 3;
@@ -227,7 +234,7 @@ async function runAutonomousLoop() {
         const prices = tickManager.getTicks(market.symbol, 100);
         const digits = market.digitEnabled ? tickManager.getDigits(market.symbol, 300) : undefined;
         const analysis = analyzeMarket(market.symbol, market.category, prices, balance, settingsObj, digits);
-        if (analysis.qualityScore >= exploitQualityThreshold - 10 && analysis.confidenceScore >= minConfidence) {
+        if (analysis.qualityScore >= exploitQualityThreshold - 10 && analysis.shouldTrade) {
           bestMarket = { ...market, analysis, prices };
           exploitCount++;
         } else {
@@ -263,13 +270,13 @@ async function runAutonomousLoop() {
       }
 
       const top = scanResults[0];
-      if (top && top.analysis.confidenceScore >= minConfidence) {
+      if (top) {
         bestMarket = top;
-        exploitSymbol = top.symbol;
-        exploitQualityThreshold = top.analysis.qualityScore;
-        exploitCount = 1;
-      } else if (top) {
-        bestMarket = top;
+        if (top.analysis.shouldTrade) {
+          exploitSymbol = top.symbol;
+          exploitQualityThreshold = top.analysis.qualityScore;
+          exploitCount = 1;
+        }
       }
     }
 
@@ -332,14 +339,12 @@ async function runAutonomousLoop() {
       recovery: recoveryStep > 0,
     }, "Autonomous scan");
 
-    const tradeGate = shouldExecuteTrade(analysis, {
-      minConfidence: minConfidence,
-      requirePositiveEv,
-    });
+    // Agent's own intelligence decides if conditions are favourable enough to trade
+    const canTrade = analysis.shouldTrade && (analysis.expectedValue > 0 || (recoveryModeEnabled && recoveryStep > 0));
 
-    if (!tradeGate.execute) {
-      logger.info({ reason: tradeGate.reason }, "Trade skipped");
-      scheduleNext();
+    if (!canTrade) {
+      logger.info({ quality: analysis.qualityScore, ev: analysis.expectedValue, shouldTrade: analysis.shouldTrade }, "Conditions not favourable — scanning next");
+      scheduleNext(false);
       return;
     }
 
@@ -384,8 +389,8 @@ async function runAutonomousLoop() {
           exitPrice = contractResult.exitSpot;
           await syncLiveBalance(token);
         } catch (liveErr) {
-          logger.warn({ liveErr }, "Live trade failed — skipping");
-          scheduleNext();
+          logger.warn({ liveErrMsg: liveErr instanceof Error ? liveErr.message : String(liveErr) }, "Live trade failed — skipping");
+          scheduleNext(false);
           return;
         }
       }
@@ -441,10 +446,16 @@ async function runAutonomousLoop() {
     logger.error({ err }, "Autonomous loop error");
   }
 
-  scheduleNext();
+  scheduleNext(true);
 }
 
 function formatRecommendation(symbol: string, analysis: Awaited<ReturnType<typeof finalizeAnalysis>>) {
+  const market = getMarketInfo(symbol);
+  const prices = tickManager.getTicks(symbol, 100);
+  const trendStats = analyzeTrend(prices);
+  const digits = market?.digitEnabled ? tickManager.getDigits(symbol, 100) : [];
+  const liveDigitStats = digits.length > 10 ? analyzeDigits(digits) : null;
+
   return {
     symbol,
     contractType: analysis.recommendedContractType,
@@ -465,16 +476,20 @@ function formatRecommendation(symbol: string, analysis: Awaited<ReturnType<typeo
     reasoning: analysis.reasoning,
     warnings: analysis.warnings,
     suggestedContractTypes: analysis.suggestedContractTypes,
-    digitStats: analysis.digitStats ?? null,
+    digitStats: liveDigitStats ?? analysis.digitStats ?? null,
     digitBarrier: analysis.digitBarrier ?? null,
+    trendStats,
     generatedAt: new Date().toISOString(),
   };
 }
 
-function scheduleNext() {
+function scheduleNext(tradeExecuted = false) {
   if (!engineRunning) return;
-  nextScanIn = loopIntervalSec;
-  autonomousTimer = setTimeout(runAutonomousLoop, loopIntervalSec * 1000);
+  // Fast adaptive scanning: 2s after a trade settles, 3s when scanning for opportunities
+  const delayMs = tradeExecuted ? 2000 : 3000;
+  nextScanIn = Math.ceil(delayMs / 1000);
+  loopIntervalSec = nextScanIn;
+  autonomousTimer = setTimeout(runAutonomousLoop, delayMs);
 }
 
 // ── Routes ─────────────────────────────────────────────────────────────────────
