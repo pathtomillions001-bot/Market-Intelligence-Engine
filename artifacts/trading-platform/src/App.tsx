@@ -26,7 +26,7 @@ function getApiUrl(path: string) {
 }
 
 function useLandingGate() {
-  const [dismissed, setDismissed] = useState(() => localStorage.getItem("nt_visited") === "1");
+  const [dismissed, setDismissed] = useState(false);
   const { data: account } = useQuery({
     queryKey: ["account-gate"],
     queryFn: async () => {
@@ -41,7 +41,6 @@ function useLandingGate() {
   const hasAccount = !!account;
 
   const dismiss = () => {
-    localStorage.setItem("nt_visited", "1");
     setDismissed(true);
   };
 

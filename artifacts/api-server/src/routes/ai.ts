@@ -214,7 +214,7 @@ async function runAutonomousLoop() {
 
     const settingsObj = {
       maxRiskPerTrade: settings ? Number(settings.maxRiskPerTrade) : 2,
-      minConfidenceThreshold: minConfidence,
+      minConfidenceThreshold: settings ? Math.min(Number(settings.minConfidenceThreshold), 38) : 30,
       riskProfile: settings?.riskProfile ?? "moderate",
       preferredContractTypes,
       tradeDurationSec,

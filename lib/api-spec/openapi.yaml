@@ -676,6 +676,9 @@ components:
         direction:
           type: string
           enum: [up, down]
+        barrier:
+          type: number
+          nullable: true
         isAutonomous:
           type: boolean
         duration:

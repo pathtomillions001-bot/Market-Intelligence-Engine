@@ -212,6 +212,7 @@ export default function MarketDetail() {
   const [tradeDir, setTradeDir] = useState<"up" | "down">("up");
   const [tradeContract, setTradeContract] = useState("");
   const [stake, setStake] = useState("");
+  const [tradeBarrier, setTradeBarrier] = useState<number | undefined>(undefined);
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [priceHistory, setPriceHistory] = useState<{ timestamp: string; price: number }[]>([]);
   const [sseConnected, setSseConnected] = useState(false);
@@ -314,9 +315,10 @@ export default function MarketDetail() {
 
   const pipSize = symbol?.includes("R_100") || symbol?.includes("1HZ100") ? 2 : symbol?.startsWith("1HZ") || symbol?.startsWith("R_") ? 3 : 4;
 
-  function openTradeDialog(contractType: string, direction: "up" | "down") {
+  function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number) {
     setTradeContract(contractType);
     setTradeDir(direction);
+    setTradeBarrier(barrier);
     setStake(String(recommendation?.stake ?? 1));
     setTradeDialog(true);
   }
@@ -324,7 +326,7 @@ export default function MarketDetail() {
   function handleExecuteTrade() {
     if (!symbol || !stake) return;
     executeTrade.mutate({
-      data: { symbol, contractType: tradeContract || (tradeDir === "up" ? "RISE" : "FALL"), direction: tradeDir, stake: Number(stake), duration: 5, durationUnit: "t" }
+      data: { symbol, contractType: tradeContract || (tradeDir === "up" ? "RISE" : "FALL"), direction: tradeDir, stake: Number(stake), duration: 5, durationUnit: "t", barrier: tradeBarrier }
     }, {
       onSuccess: (result: any) => {
         toast.success(`Trade ${result.status === "won" ? "WON 🎉" : "LOST"} — ${result.status === "won" ? "+" : ""}$${Number(result.profit ?? 0).toFixed(2)}`);
@@ -336,7 +338,7 @@ export default function MarketDetail() {
     });
   }
 
-  const isDigitMarket = symbol?.includes("R_") || symbol?.includes("1HZ");
+  const isDigitMarket = symbol?.includes("R_") || symbol?.includes("1HZ") || symbol?.startsWith("JD");
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-6 max-w-7xl mx-auto space-y-5 pb-10">
@@ -434,36 +436,35 @@ export default function MarketDetail() {
 
             {/* Clickable OVER/UNDER trade buttons for each barrier */}
             <div className="grid grid-cols-5 gap-1.5">
-              {[0, 1, 2, 3, 4].map((barrier) => {
+              {[0, 1, 2, 3, 4].map((b) => {
                 const overPct = digitStats.distribution
-                  .filter((d: any) => d.digit > barrier)
+                  .filter((d: any) => d.digit > b)
                   .reduce((s: number, d: any) => s + d.pct, 0);
                 const isHot = overPct > 60;
-                const isCold = overPct < 35;
                 return (
                   <button
-                    key={barrier}
-                    onClick={() => openTradeDialog("DIGITOVER", "up")}
+                    key={b}
+                    onClick={() => openTradeDialog("DIGITOVER", "up", b)}
                     className={`flex flex-col items-center p-2 rounded-lg border text-center transition-all hover:scale-[1.02] ${isHot ? "border-green-500/40 bg-green-500/8" : "border-border bg-secondary/20"}`}
                   >
-                    <div className="text-[9px] text-muted-foreground">OVER {barrier}</div>
+                    <div className="text-[9px] text-muted-foreground">OVER {b}</div>
                     <div className={`text-sm font-mono font-bold ${isHot ? "text-green-400" : "text-foreground"}`}>{overPct.toFixed(0)}%</div>
                     {isHot && <div className="text-[8px] text-green-500 mt-0.5">HOT</div>}
                   </button>
                 );
               })}
-              {[5, 6, 7, 8, 9].map((barrier) => {
+              {[5, 6, 7, 8, 9].map((b) => {
                 const underPct = digitStats.distribution
-                  .filter((d: any) => d.digit < barrier)
+                  .filter((d: any) => d.digit < b)
                   .reduce((s: number, d: any) => s + d.pct, 0);
                 const isHot = underPct > 60;
                 return (
                   <button
-                    key={barrier}
-                    onClick={() => openTradeDialog("DIGITUNDER", "down")}
+                    key={b}
+                    onClick={() => openTradeDialog("DIGITUNDER", "down", b)}
                     className={`flex flex-col items-center p-2 rounded-lg border text-center transition-all hover:scale-[1.02] ${isHot ? "border-blue-500/40 bg-blue-500/8" : "border-border bg-secondary/20"}`}
                   >
-                    <div className="text-[9px] text-muted-foreground">UNDER {barrier}</div>
+                    <div className="text-[9px] text-muted-foreground">UNDER {b}</div>
                     <div className={`text-sm font-mono font-bold ${isHot ? "text-blue-400" : "text-foreground"}`}>{underPct.toFixed(0)}%</div>
                     {isHot && <div className="text-[8px] text-blue-500 mt-0.5">HOT</div>}
                   </button>

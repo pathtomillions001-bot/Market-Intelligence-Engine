@@ -436,27 +436,44 @@ export function predictDigitContract(digits: number[]): DigitPrediction | null {
   for (let barrier = 0; barrier <= 8; barrier++) {
     const pOver = digitProbs.slice(barrier + 1).reduce((a, b) => a + b, 0);
     const pUnder = digitProbs.slice(0, barrier).reduce((a, b) => a + b, 0);
-    const expectedOver = barrier <= 4 ? 0.50 : barrier === 5 ? 0.40 : 0.30;
-    const expectedUnder = barrier >= 5 ? 0.50 : barrier === 4 ? 0.40 : 0.30;
+    // True theoretical probabilities — P(digit > barrier) and P(digit < barrier)
+    // assuming a perfectly uniform digit distribution (each digit 0-9 equally likely)
+    const expectedOver = (9 - barrier) / 10;
+    const expectedUnder = barrier / 10;
 
+    // Approximate Deriv payout multipliers per barrier (stake-based)
+    const OVER_PAYOUTS = [1.05, 1.10, 1.18, 1.28, 1.45, 1.95, 2.60, 4.20, 9.40];
+    const UNDER_PAYOUTS = [9.40, 4.20, 2.60, 1.95, 1.45, 1.28, 1.18, 1.10, 1.05];
+    const overPayout = OVER_PAYOUTS[barrier] ?? 1.1;
+    const underPayout = UNDER_PAYOUTS[barrier] ?? 1.1;
+
+    // Edge = deviation from theoretical + EV weighting
     const overEdge = pOver - expectedOver;
     const underEdge = pUnder - expectedUnder;
 
-    if (overEdge > bestEdge) {
-      bestEdge = overEdge;
+    // Expected value = win_prob * payout - (1 - win_prob) * stake, normalised to 0-1
+    const overEV = pOver * overPayout - (1 - pOver);
+    const underEV = pUnder * underPayout - (1 - pUnder);
+
+    // Score = edge weighted by EV (avoid recommending barriers with negative EV)
+    const overScore = overEdge > 0 && overEV > 0 ? overEdge * (1 + overEV) : -1;
+    const underScore = underEdge > 0 && underEV > 0 ? underEdge * (1 + underEV) : -1;
+
+    if (overScore > bestEdge) {
+      bestEdge = overScore;
       bestContract = "DIGITOVER";
       bestBarrier = barrier;
       bestConf = Math.round(pOver * 100);
     }
-    if (underEdge > bestEdge) {
-      bestEdge = underEdge;
+    if (underScore > bestEdge) {
+      bestEdge = underScore;
       bestContract = "DIGITUNDER";
       bestBarrier = barrier;
       bestConf = Math.round(pUnder * 100);
     }
   }
 
-  if (bestEdge < 0.03) return null;
+  if (bestEdge < 0.01) return null;
 
   const chi2 = chiSquareDeviation(window);
   const reasoning = [

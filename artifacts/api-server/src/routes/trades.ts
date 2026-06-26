@@ -128,6 +128,8 @@ router.post("/", async (req, res): Promise<void> => {
   }
 
   const { symbol, contractType, stake, direction, isAutonomous, duration, durationUnit } = parseResult.data;
+  // barrier may be sent from the frontend but not in the Zod schema — read directly from body
+  const requestBarrier = typeof (req.body as any).barrier === "number" ? (req.body as any).barrier as number : undefined;
 
   const accounts = await db.select().from(accountsTable).limit(1);
   const settings = await db.select().from(settingsTable).limit(1);
@@ -164,13 +166,14 @@ router.post("/", async (req, res): Promise<void> => {
     currency: accounts.length > 0 ? accounts[0].currency : "USD",
     token,
     defaultDuration: rawAnalysis.recommendedDuration ?? (settings.length > 0 ? settings[0].tradeDurationSec : 5),
-    barrier: rawAnalysis.digitBarrier,
+    barrier: requestBarrier ?? rawAnalysis.digitBarrier,
     skipProposal: paperTradeMode || isDemo,
   });
 
   const tradeDuration = duration ?? finalized.recommendedDuration ?? 5;
   const isDigit = contractType.includes("DIGIT");
-  const barrier = isDigit ? (rawAnalysis.digitBarrier ?? undefined) : undefined;
+  // Use user-selected barrier if provided, fall back to AI-recommended barrier
+  const barrier = isDigit ? (requestBarrier ?? rawAnalysis.digitBarrier ?? undefined) : undefined;
   const currency = accounts.length > 0 ? accounts[0].currency : "USD";
 
   const isLiveTrade = !isDemo && !paperTradeMode && !!token;
@@ -288,6 +291,14 @@ router.post("/", async (req, res): Promise<void> => {
     symbol, barrier: rawAnalysis.digitBarrier, tickWindow: rawAnalysis.tickWindow,
     duration: tradeDuration, isPaperTrade: true,
   });
+
+  // Update simulated balance for paper/demo trades
+  try {
+    if (accounts.length > 0) {
+      const newBalance = Math.max(0, balance + profit);
+      await db.update(accountsTable).set({ balance: String(newBalance.toFixed(2)), updatedAt: new Date() });
+    }
+  } catch { /* ignore */ }
 
   res.status(201).json(formatTrade(trade));
 });
