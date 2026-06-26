@@ -158,11 +158,16 @@ export interface TrendStats {
   hotDirection: "rise" | "fall" | "none";
 }
 
-export function analyzeTrend(prices: number[]): TrendStats {
+export function analyzeTrend(prices: number[]) {
+  if (prices.length < 5) {
+    return { direction: "up", strength: 0, winProb: { rise: 50, fall: 50, call: 50, put: 50 }, streak: 0, streakDir: "up" as const, momentum: 0, sma: prices[prices.length - 1] ?? 0, ema: prices[prices.length - 1] ?? 0, rsi: 50, samples: prices.length, risePct: 50, fallPct: 50, flatPct: 0, bias: "neutral" as const, recommendRise: false, recommendFall: false, recentRisePct: 50, recentFallPct: 50, streakInfo: "Insufficient data", hotStreak: 0, hotDirection: "none" as const };
+  }
+
   const window = prices.slice(-100);
   const recent = prices.slice(-20);
+  const samples = window.length;
 
-  // Count directional moves
+  // ── Directional move counts ───────────────────────────────────────────────
   let rises = 0, falls = 0, flats = 0;
   for (let i = 1; i < window.length; i++) {
     if (window[i] > window[i - 1]) rises++;
@@ -184,25 +189,55 @@ export function analyzeTrend(prices: number[]): TrendStats {
   const recentRisePct = Math.round((recentRises / recentTotal) * 100);
   const recentFallPct = Math.round((recentFalls / recentTotal) * 100);
 
-  // Momentum strength: difference from 50% (random baseline)
+  // ── Momentum (normalised price change over last 10 ticks) ─────────────────
+  const last10 = prices.slice(-10);
+  const momentum = last10.length >= 2
+    ? (last10[last10.length - 1] - last10[0]) / (Math.abs(last10[0]) || 1)
+    : 0;
+
+  // ── SMA / EMA ─────────────────────────────────────────────────────────────
+  const sma = window.reduce((a, b) => a + b, 0) / window.length;
+  let ema = window[0];
+  const k = 2 / (window.length + 1);
+  for (let i = 1; i < window.length; i++) ema = window[i] * k + ema * (1 - k);
+
+  // ── RSI (14-period) ───────────────────────────────────────────────────────
+  const rsiPeriod = Math.min(14, window.length - 1);
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 1; i <= rsiPeriod; i++) {
+    const diff = window[window.length - i] - window[window.length - i - 1];
+    if (diff > 0) avgGain += diff;
+    else avgLoss += Math.abs(diff);
+  }
+  avgGain /= rsiPeriod; avgLoss /= rsiPeriod;
+  const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+  const rsi = Math.round(100 - 100 / (1 + rs));
+
+  // ── Strength (how far from 50% baseline) ─────────────────────────────────
   const strength = Math.min(100, Math.abs(recentRisePct - 50) * 2);
 
-  // Determine bias (mean-reversion logic — if one side is over-extended, bet opposite)
+  // ── Direction bias with mean-reversion logic ──────────────────────────────
   let bias: "rise" | "fall" | "neutral" = "neutral";
-  let recommendRise = false;
-  let recommendFall = false;
+  let recommendRise = false, recommendFall = false;
+  // Over-extended in one direction → expect reversion
+  if (recentRisePct > 65) { bias = "fall"; recommendFall = true; }
+  else if (recentFallPct > 65) { bias = "rise"; recommendRise = true; }
+  else if (risePct > 55) { bias = "rise"; recommendRise = true; }
+  else if (fallPct > 55) { bias = "fall"; recommendFall = true; }
 
-  if (recentRisePct > 65) {
-    bias = "fall"; recommendFall = true; // over-extended upward, expect reversion
-  } else if (recentFallPct > 65) {
-    bias = "rise"; recommendRise = true; // over-extended downward, expect reversion
-  } else if (risePct > 55) {
-    bias = "rise"; recommendRise = true;
-  } else if (fallPct > 55) {
-    bias = "fall"; recommendFall = true;
-  }
+  // RSI overbought/oversold reinforcement
+  if (rsi > 70) { bias = "fall"; recommendFall = true; }
+  else if (rsi < 30) { bias = "rise"; recommendRise = true; }
 
-  // Current streak
+  const direction = bias === "rise" ? "up" : bias === "fall" ? "down" : recentRisePct >= recentFallPct ? "up" : "down";
+
+  // ── Win probability estimates ──────────────────────────────────────────────
+  const riseWinProb = Math.round(50 + (recentFallPct - 50) * 0.4 + (rsi > 70 ? 10 : rsi < 30 ? -10 : 0));
+  const fallWinProb = 100 - riseWinProb;
+  const callWinProb = Math.round(50 + (sma > ema ? 5 : -5) + (momentum > 0 ? 8 : -8));
+  const putWinProb = 100 - callWinProb;
+
+  // ── Current consecutive streak ────────────────────────────────────────────
   let hotStreak = 0;
   let hotDirection: "rise" | "fall" | "none" = "none";
   for (let i = window.length - 1; i > 0; i--) {
@@ -217,7 +252,22 @@ export function analyzeTrend(prices: number[]): TrendStats {
     ? `${hotDirection.toUpperCase()} streak: ${hotStreak} consecutive`
     : "No significant streak";
 
-  return { risePct, fallPct, flatPct, strength, bias, recommendRise, recommendFall, recentRisePct, recentFallPct, streakInfo, hotStreak, hotDirection };
+  return {
+    // Frontend panel fields
+    direction,
+    strength,
+    winProb: { rise: Math.max(20, Math.min(80, riseWinProb)), fall: Math.max(20, Math.min(80, fallWinProb)), call: Math.max(20, Math.min(80, callWinProb)), put: Math.max(20, Math.min(80, putWinProb)) },
+    streak: hotStreak,
+    streakDir: hotDirection === "rise" ? "up" as const : hotDirection === "fall" ? "down" as const : "up" as const,
+    momentum,
+    sma,
+    ema,
+    rsi,
+    samples,
+    // Legacy fields (used elsewhere)
+    risePct, fallPct, flatPct, bias, recommendRise, recommendFall,
+    recentRisePct, recentFallPct, streakInfo, hotStreak, hotDirection,
+  };
 }
 
 // ── Persistent Tick Manager ───────────────────────────────────────────────────
@@ -676,7 +726,7 @@ export async function executeLiveTrade(token: string, params: {
             symbol: params.symbol,
           };
           if (params.barrier !== undefined) buyParams.barrier = String(params.barrier);
-          ws.send(JSON.stringify({ buy: "1", price: params.stake, parameters: buyParams }));
+          ws.send(JSON.stringify({ buy: 1, price: params.stake, parameters: buyParams }));
         }
 
         if (msg.msg_type === "buy" && msg.buy) {

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { toast } from "sonner";
-import { ArrowLeft, TrendingUp, TrendingDown, AlertTriangle, Wifi, WifiOff, Activity } from "lucide-react";
+import { ArrowLeft, TrendingUp, TrendingDown, AlertTriangle, Wifi, WifiOff, Activity, ArrowUp, ArrowDown } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -63,6 +63,148 @@ function DigitBar({ digit, count, pct, hot, cold, barrier, contractType }: {
   );
 }
 
+// ── Rise/Fall trend analysis panel ────────────────────────────────────────────
+function RiseFallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (type: string, dir: "up" | "down") => void }) {
+  if (!trendStats) return null;
+  const { direction, strength, winProb, streak, streakDir, momentum, samples } = trendStats;
+  const isRising = direction === "up";
+  const isStrong = strength > 60;
+  const risingPct = winProb?.rise ?? 50;
+  const fallingPct = winProb?.fall ?? 50;
+
+  return (
+    <Card className="bg-card">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <TrendingUp className="w-4 h-4 text-indigo-400" />
+          Rise & Fall Analysis
+          {samples > 0 && <span className="text-[10px] text-muted-foreground font-normal">({samples} ticks)</span>}
+          <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {/* Main direction indicators */}
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => onTrade("RISE", "up")}
+            className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${isRising && isStrong ? "border-green-500/60 bg-green-500/10" : "border-border bg-secondary/30 hover:border-green-500/30"}`}
+          >
+            <ArrowUp className={`w-6 h-6 mb-1.5 ${isRising && isStrong ? "text-green-400" : "text-muted-foreground"}`} />
+            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">RISE</div>
+            <div className={`text-2xl font-mono font-bold mt-1 ${isRising ? "text-green-400" : "text-foreground"}`}>{risingPct.toFixed(0)}%</div>
+            <div className="text-[10px] text-muted-foreground mt-0.5">win probability</div>
+            {isRising && isStrong && <Badge className="mt-2 text-[9px] bg-green-500/20 text-green-400 border-green-500/30">AI Favours</Badge>}
+          </button>
+          <button
+            onClick={() => onTrade("FALL", "down")}
+            className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${!isRising && isStrong ? "border-red-500/60 bg-red-500/10" : "border-border bg-secondary/30 hover:border-red-500/30"}`}
+          >
+            <ArrowDown className={`w-6 h-6 mb-1.5 ${!isRising && isStrong ? "text-red-400" : "text-muted-foreground"}`} />
+            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">FALL</div>
+            <div className={`text-2xl font-mono font-bold mt-1 ${!isRising ? "text-red-400" : "text-foreground"}`}>{fallingPct.toFixed(0)}%</div>
+            <div className="text-[10px] text-muted-foreground mt-0.5">win probability</div>
+            {!isRising && isStrong && <Badge className="mt-2 text-[9px] bg-red-500/20 text-red-400 border-red-500/30">AI Favours</Badge>}
+          </button>
+        </div>
+
+        {/* Trend stats row */}
+        <div className="grid grid-cols-3 gap-2">
+          <div className="text-center p-2 rounded-lg bg-secondary/30">
+            <div className="text-[10px] text-muted-foreground">Strength</div>
+            <div className={`text-base font-mono font-bold ${strength > 60 ? "text-green-400" : strength > 40 ? "text-amber-400" : "text-red-400"}`}>{strength.toFixed(0)}%</div>
+          </div>
+          <div className="text-center p-2 rounded-lg bg-secondary/30">
+            <div className="text-[10px] text-muted-foreground">Momentum</div>
+            <div className={`text-base font-mono font-bold ${momentum > 0 ? "text-green-400" : "text-red-400"}`}>{momentum > 0 ? "+" : ""}{(momentum * 100).toFixed(2)}</div>
+          </div>
+          <div className="text-center p-2 rounded-lg bg-secondary/30">
+            <div className="text-[10px] text-muted-foreground">Streak</div>
+            <div className={`text-base font-mono font-bold ${streakDir === "up" ? "text-green-400" : "text-red-400"}`}>{streak > 0 ? `${streak} ${streakDir === "up" ? "↑" : "↓"}` : "—"}</div>
+          </div>
+        </div>
+
+        <div className="p-2 rounded-lg bg-secondary/20 border border-border text-xs text-muted-foreground">
+          <span className="text-foreground font-medium">Signal: </span>
+          {isRising
+            ? `📈 Upward momentum detected (${strength.toFixed(0)}% strength) — RISE favoured`
+            : `📉 Downward momentum detected (${strength.toFixed(0)}% strength) — FALL favoured`}
+          {streak >= 3 && <span className="ml-2 text-amber-400">· {streak}-tick {streakDir === "up" ? "↑" : "↓"} streak</span>}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Put/Call analysis panel ───────────────────────────────────────────────────
+function PutCallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (type: string, dir: "up" | "down") => void }) {
+  if (!trendStats) return null;
+  const { direction, strength, winProb, sma, ema, rsi, samples } = trendStats;
+  const isCallFavoured = direction === "up";
+  const callPct = winProb?.call ?? (isCallFavoured ? winProb?.rise ?? 50 : 100 - (winProb?.rise ?? 50));
+  const putPct = 100 - callPct;
+
+  return (
+    <Card className="bg-card">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <TrendingDown className="w-4 h-4 text-violet-400" />
+          Put & Call Analysis
+          {samples > 0 && <span className="text-[10px] text-muted-foreground font-normal">({samples} ticks)</span>}
+          <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => onTrade("CALL", "up")}
+            className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${isCallFavoured && strength > 55 ? "border-violet-500/60 bg-violet-500/10" : "border-border bg-secondary/30 hover:border-violet-500/30"}`}
+          >
+            <ArrowUp className={`w-6 h-6 mb-1.5 ${isCallFavoured && strength > 55 ? "text-violet-400" : "text-muted-foreground"}`} />
+            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">CALL</div>
+            <div className={`text-2xl font-mono font-bold mt-1 ${isCallFavoured ? "text-violet-400" : "text-foreground"}`}>{callPct.toFixed(0)}%</div>
+            <div className="text-[10px] text-muted-foreground mt-0.5">above entry</div>
+            {isCallFavoured && strength > 55 && <Badge className="mt-2 text-[9px] bg-violet-500/20 text-violet-400 border-violet-500/30">AI Favours</Badge>}
+          </button>
+          <button
+            onClick={() => onTrade("PUT", "down")}
+            className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${!isCallFavoured && strength > 55 ? "border-rose-500/60 bg-rose-500/10" : "border-border bg-secondary/30 hover:border-rose-500/30"}`}
+          >
+            <ArrowDown className={`w-6 h-6 mb-1.5 ${!isCallFavoured && strength > 55 ? "text-rose-400" : "text-muted-foreground"}`} />
+            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">PUT</div>
+            <div className={`text-2xl font-mono font-bold mt-1 ${!isCallFavoured ? "text-rose-400" : "text-foreground"}`}>{putPct.toFixed(0)}%</div>
+            <div className="text-[10px] text-muted-foreground mt-0.5">below entry</div>
+            {!isCallFavoured && strength > 55 && <Badge className="mt-2 text-[9px] bg-rose-500/20 text-rose-400 border-rose-500/30">AI Favours</Badge>}
+          </button>
+        </div>
+
+        {/* Indicator row */}
+        <div className="grid grid-cols-3 gap-2">
+          <div className="text-center p-2 rounded-lg bg-secondary/30">
+            <div className="text-[10px] text-muted-foreground">RSI</div>
+            <div className={`text-base font-mono font-bold ${rsi > 70 ? "text-red-400" : rsi < 30 ? "text-green-400" : "text-foreground"}`}>{rsi?.toFixed(0) ?? "—"}</div>
+          </div>
+          <div className="text-center p-2 rounded-lg bg-secondary/30">
+            <div className="text-[10px] text-muted-foreground">SMA vs EMA</div>
+            <div className={`text-base font-mono font-bold ${sma > ema ? "text-green-400" : "text-red-400"}`}>{sma > ema ? "Bull" : "Bear"}</div>
+          </div>
+          <div className="text-center p-2 rounded-lg bg-secondary/30">
+            <div className="text-[10px] text-muted-foreground">Trend</div>
+            <div className={`text-base font-mono font-bold ${isCallFavoured ? "text-violet-400" : "text-rose-400"}`}>{isCallFavoured ? "↑ CALL" : "↓ PUT"}</div>
+          </div>
+        </div>
+
+        <div className="p-2 rounded-lg bg-secondary/20 border border-border text-xs text-muted-foreground">
+          <span className="text-foreground font-medium">Signal: </span>
+          {isCallFavoured
+            ? `📊 Bullish structure — price likely above entry at expiry (CALL favoured, ${strength.toFixed(0)}% strength)`
+            : `📊 Bearish structure — price likely below entry at expiry (PUT favoured, ${strength.toFixed(0)}% strength)`}
+          {rsi && (rsi > 70 || rsi < 30) && <span className="ml-2 text-amber-400">· RSI {rsi > 70 ? "overbought" : "oversold"}</span>}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function MarketDetail() {
   const { symbol } = useParams();
   const queryClient = useQueryClient();
@@ -74,23 +216,24 @@ export default function MarketDetail() {
   const [priceHistory, setPriceHistory] = useState<{ timestamp: string; price: number }[]>([]);
   const [sseConnected, setSseConnected] = useState(false);
   const [lastTickAge, setLastTickAge] = useState<number>(0);
+  // Live analysis state — updated via SSE on every tick
+  const [liveDigitStats, setLiveDigitStats] = useState<any | null>(null);
+  const [liveTrendStats, setLiveTrendStats] = useState<any | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const lastTickTimeRef = useRef<number>(Date.now());
 
   const { data: market, isLoading, refetch } = useGetMarketDetail(symbol || "", { query: { refetchInterval: 8000, enabled: !!symbol } } as { query: any });
-  const { data: rec, refetch: refetchRec } = useGetAiRecommendationForMarket(symbol || "", { query: { refetchInterval: 10000, enabled: !!symbol } } as { query: any });
+  const { data: rec, refetch: refetchRec } = useGetAiRecommendationForMarket(symbol || "", { query: { refetchInterval: 12000, enabled: !!symbol } } as { query: any });
   const executeTrade = useExecuteTrade();
 
-  // ── SSE live tick subscription ──────────────────────────────────────────────
+  // ── SSE: live ticks + live market analysis ───────────────────────────────────
   useEffect(() => {
     if (!symbol) return;
 
     const es = new EventSource("/api/ai/events");
     eventSourceRef.current = es;
 
-    es.addEventListener("connected", () => {
-      setSseConnected(true);
-    });
+    es.addEventListener("connected", () => setSseConnected(true));
 
     es.addEventListener("tick", (e) => {
       try {
@@ -100,20 +243,25 @@ export default function MarketDetail() {
         setLivePrice(tick.price);
         setPriceHistory((prev) => {
           const next = [...prev, { timestamp: new Date().toISOString(), price: tick.price }];
-          return next.slice(-120); // keep last 120 ticks (~2min at 1s intervals)
+          return next.slice(-120);
         });
       } catch { /* ignore */ }
     });
 
-    es.addEventListener("scan_complete", () => {
-      refetchRec();
+    // Live digit + trend analysis from the backend on every tick
+    es.addEventListener("market_analysis", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.symbol !== symbol) return;
+        if (data.digitStats) setLiveDigitStats(data.digitStats);
+        if (data.trendStats) setLiveTrendStats(data.trendStats);
+      } catch { /* ignore */ }
     });
 
-    es.onerror = () => {
-      setSseConnected(false);
-    };
+    es.addEventListener("scan_complete", () => refetchRec());
 
-    // Tick age indicator
+    es.onerror = () => setSseConnected(false);
+
     const tickAgeTimer = setInterval(() => {
       setLastTickAge(Math.round((Date.now() - lastTickTimeRef.current) / 1000));
     }, 1000);
@@ -125,14 +273,24 @@ export default function MarketDetail() {
     };
   }, [symbol, refetchRec]);
 
-  // Seed price history from market data on load
+  // Seed price history + initial stats from market data
   useEffect(() => {
     if (market?.priceHistory && priceHistory.length === 0) {
       setPriceHistory(market.priceHistory);
       const lastPrice = market.priceHistory[market.priceHistory.length - 1]?.price;
       if (lastPrice) setLivePrice(lastPrice);
     }
-  }, [market?.priceHistory]);
+    if (market && !liveDigitStats && (market as any).digitStats) setLiveDigitStats((market as any).digitStats);
+    if (market && !liveTrendStats && (market as any).trendStats) setLiveTrendStats((market as any).trendStats);
+  }, [market]);
+
+  // Populate from rec on first load too
+  useEffect(() => {
+    if (rec) {
+      if ((rec as any).digitStats && !liveDigitStats) setLiveDigitStats((rec as any).digitStats);
+      if ((rec as any).trendStats && !liveTrendStats) setLiveTrendStats((rec as any).trendStats);
+    }
+  }, [rec]);
 
   if (isLoading || !market) {
     return (
@@ -144,13 +302,17 @@ export default function MarketDetail() {
   }
 
   const recommendation = rec ?? market.recommendation;
-  const digitStats = (rec as any)?.digitStats ?? (market as any)?.digitStats;
+  // Use live stats (SSE) first, fallback to rec/market data
+  const digitStats = liveDigitStats ?? (rec as any)?.digitStats ?? (market as any)?.digitStats;
+  const trendStats = liveTrendStats ?? (rec as any)?.trendStats ?? null;
   const digitBarrier = (rec as any)?.digitBarrier ?? (market as any)?.digitBarrier;
   const suggestedContracts = (rec as any)?.suggestedContractTypes ?? (recommendation as any)?.suggestedContractTypes ?? [];
   const chartData = priceHistory.length > 0 ? priceHistory : market.priceHistory;
   const currentPrice = livePrice ?? chartData[chartData.length - 1]?.price ?? 0;
   const startPrice = chartData[0]?.price ?? currentPrice;
   const priceChange = startPrice > 0 ? ((currentPrice - startPrice) / startPrice) * 100 : 0;
+
+  const pipSize = symbol?.includes("R_100") || symbol?.includes("1HZ100") ? 2 : symbol?.startsWith("1HZ") || symbol?.startsWith("R_") ? 3 : 4;
 
   function openTradeDialog(contractType: string, direction: "up" | "down") {
     setTradeContract(contractType);
@@ -165,7 +327,7 @@ export default function MarketDetail() {
       data: { symbol, contractType: tradeContract || (tradeDir === "up" ? "RISE" : "FALL"), direction: tradeDir, stake: Number(stake), duration: 5, durationUnit: "t" }
     }, {
       onSuccess: (result: any) => {
-        toast.success(`Trade ${result.status === "won" ? "WON" : "LOST"} — ${result.status === "won" ? "+" : ""}$${Number(result.profit ?? 0).toFixed(2)}`);
+        toast.success(`Trade ${result.status === "won" ? "WON 🎉" : "LOST"} — ${result.status === "won" ? "+" : ""}$${Number(result.profit ?? 0).toFixed(2)}`);
         setTradeDialog(false);
         queryClient.invalidateQueries();
         refetch();
@@ -174,7 +336,7 @@ export default function MarketDetail() {
     });
   }
 
-  const pipSize = symbol?.includes("R_100") || symbol?.includes("1HZ100") ? 2 : symbol?.startsWith("1HZ") || symbol?.startsWith("R_") ? 3 : 4;
+  const isDigitMarket = symbol?.includes("R_") || symbol?.includes("1HZ");
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-6 max-w-7xl mx-auto space-y-5 pb-10">
@@ -238,13 +400,20 @@ export default function MarketDetail() {
         </CardContent>
       </Card>
 
-      {/* Digit Analysis (OVER/UNDER) */}
-      {digitStats && (
+      {/* Rise & Fall Analysis — clickable trade buttons */}
+      <RiseFallPanel trendStats={trendStats} onTrade={openTradeDialog} />
+
+      {/* Put & Call Analysis — clickable trade buttons */}
+      <PutCallPanel trendStats={trendStats} onTrade={openTradeDialog} />
+
+      {/* Digit Analysis (OVER/UNDER) — only for digit markets */}
+      {isDigitMarket && digitStats && (
         <Card className="bg-card">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm flex items-center gap-2">
               <Activity className="w-4 h-4 text-primary" />
               Digit Analysis — OVER/UNDER Intelligence
+              <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -262,6 +431,46 @@ export default function MarketDetail() {
                 />
               ))}
             </div>
+
+            {/* Clickable OVER/UNDER trade buttons for each barrier */}
+            <div className="grid grid-cols-5 gap-1.5">
+              {[0, 1, 2, 3, 4].map((barrier) => {
+                const overPct = digitStats.distribution
+                  .filter((d: any) => d.digit > barrier)
+                  .reduce((s: number, d: any) => s + d.pct, 0);
+                const isHot = overPct > 60;
+                const isCold = overPct < 35;
+                return (
+                  <button
+                    key={barrier}
+                    onClick={() => openTradeDialog("DIGITOVER", "up")}
+                    className={`flex flex-col items-center p-2 rounded-lg border text-center transition-all hover:scale-[1.02] ${isHot ? "border-green-500/40 bg-green-500/8" : "border-border bg-secondary/20"}`}
+                  >
+                    <div className="text-[9px] text-muted-foreground">OVER {barrier}</div>
+                    <div className={`text-sm font-mono font-bold ${isHot ? "text-green-400" : "text-foreground"}`}>{overPct.toFixed(0)}%</div>
+                    {isHot && <div className="text-[8px] text-green-500 mt-0.5">HOT</div>}
+                  </button>
+                );
+              })}
+              {[5, 6, 7, 8, 9].map((barrier) => {
+                const underPct = digitStats.distribution
+                  .filter((d: any) => d.digit < barrier)
+                  .reduce((s: number, d: any) => s + d.pct, 0);
+                const isHot = underPct > 60;
+                return (
+                  <button
+                    key={barrier}
+                    onClick={() => openTradeDialog("DIGITUNDER", "down")}
+                    className={`flex flex-col items-center p-2 rounded-lg border text-center transition-all hover:scale-[1.02] ${isHot ? "border-blue-500/40 bg-blue-500/8" : "border-border bg-secondary/20"}`}
+                  >
+                    <div className="text-[9px] text-muted-foreground">UNDER {barrier}</div>
+                    <div className={`text-sm font-mono font-bold ${isHot ? "text-blue-400" : "text-foreground"}`}>{underPct.toFixed(0)}%</div>
+                    {isHot && <div className="text-[8px] text-blue-500 mt-0.5">HOT</div>}
+                  </button>
+                );
+              })}
+            </div>
+
             <div className="grid grid-cols-3 gap-2 text-center">
               <div className={`p-2 rounded-lg border ${digitStats.bias === "under" ? "bg-primary/10 border-primary/30" : "bg-secondary/30 border-border"}`}>
                 <div className="text-xs text-muted-foreground">UNDER (0-4)</div>
