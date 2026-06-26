@@ -112,10 +112,19 @@ interface MarketOpportunityCardProps {
       contractType?: string;
       stake?: number;
       shouldTrade?: boolean;
+      digitBarrier?: number | null;
+      barrier?: number | null;
     } | null;
   } | undefined;
   onTrade?: () => void;
   isTradePending?: boolean;
+}
+
+function formatContractLabel(contractType?: string, digitBarrier?: number | null): string {
+  if (!contractType) return "—";
+  if (contractType === "DIGITOVER") return digitBarrier != null ? `OVER ${digitBarrier}` : "OVER";
+  if (contractType === "DIGITUNDER") return digitBarrier != null ? `UNDER ${digitBarrier}` : "UNDER";
+  return contractType;
 }
 
 function ConfidenceArc({ value }: { value: number }) {
@@ -161,7 +170,7 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
             className="px-2.5 py-0.5 rounded-full text-[11px] font-bold font-mono border"
             style={{ color: topMarket.recommendation.direction === "up" ? "#10b981" : "#ef4444", borderColor: topMarket.recommendation.direction === "up" ? "rgba(16,185,129,0.3)" : "rgba(239,68,68,0.3)" }}
           >
-            {topMarket.recommendation.direction.toUpperCase()} · {topMarket.recommendation.contractType}
+            {topMarket.recommendation.direction.toUpperCase()} · {formatContractLabel(topMarket.recommendation.contractType, topMarket.recommendation.digitBarrier ?? topMarket.recommendation.barrier)}
           </span>
         )}
         {topMarket?.category && (
@@ -201,7 +210,7 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
       <div className="grid grid-cols-2 gap-3 flex-1">
         {[
           { label: "Signal", value: topMarket?.recommendation?.direction?.toUpperCase() ?? "—" },
-          { label: "Type", value: topMarket?.recommendation?.contractType ?? "—" },
+          { label: "Type", value: formatContractLabel(topMarket?.recommendation?.contractType, topMarket?.recommendation?.digitBarrier) },
           { label: "Confidence", value: `${conf.toFixed(1)}%` },
           { label: "Stake", value: `$${topMarket?.recommendation?.stake?.toFixed(2) ?? "0.00"}` },
         ].map((item) => (

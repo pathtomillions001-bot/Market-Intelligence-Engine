@@ -41,16 +41,20 @@ export const UpdateSettingsBody = z.object({
   tradeDurationSec: z.coerce.number().optional(),
   paperTradeMode: z.boolean().optional(),
   requirePositiveEv: z.boolean().optional(),
+  maxDrawdown: z.coerce.number().optional(),
   drawdownProtection: z.boolean().optional(),
   drawdownThreshold: z.coerce.number().optional(),
   consecutiveLossLimit: z.coerce.number().optional(),
   marketRotationAfter: z.coerce.number().optional(),
   loopIntervalSec: z.coerce.number().optional(),
-  preferredContractTypes: z.string().optional(),
-  allowedMarkets: z.string().optional(),
+  autonomousEnabled: z.boolean().optional(),
+  preferredContractTypes: z.union([z.string(), z.array(z.string())]).optional(),
+  preferredCategories: z.union([z.string(), z.array(z.string())]).optional(),
+  allowedMarkets: z.union([z.string(), z.array(z.string())]).optional(),
   recoveryMode: z.boolean().optional(),
   recoveryMultiplier: z.coerce.number().optional(),
   maxRecoverySteps: z.coerce.number().optional(),
+  scanAllMarkets: z.boolean().optional(),
 });
 
 export const ToggleAutonomousEngineBody = z.object({

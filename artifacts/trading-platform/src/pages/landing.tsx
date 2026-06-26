@@ -1,119 +1,168 @@
 import { motion } from "framer-motion";
-import { Brain, ChevronRight, Activity } from "lucide-react";
 import { useEffect, useRef } from "react";
+import { ChevronRight, Brain } from "lucide-react";
 
-function NeuralOrb() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
+// ── Floating particles canvas ─────────────────────────────────────────────────
+function Particles() {
+  const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
-    const canvas = canvasRef.current;
+    const canvas = ref.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
-    const W = canvas.width = 220;
-    const H = canvas.height = 220;
-    const cx = W / 2, cy = H / 2;
+    canvas.width = canvas.offsetWidth;
+    canvas.height = canvas.offsetHeight;
+    const W = canvas.width, H = canvas.height;
+    const dots = Array.from({ length: 38 }, () => ({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: 0.6 + Math.random() * 1.2,
+      vy: -(0.12 + Math.random() * 0.28),
+      vx: (Math.random() - 0.5) * 0.12,
+      opacity: 0.15 + Math.random() * 0.45,
+      color: Math.random() > 0.5 ? "76,201,255" : Math.random() > 0.5 ? "139,92,246" : "0,245,212",
+    }));
     let frame = 0;
-
-    const nodes = Array.from({ length: 14 }, (_, i) => {
-      const angle = (i / 14) * Math.PI * 2;
-      const r = 62 + Math.random() * 24;
-      return { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r, phase: Math.random() * Math.PI * 2 };
-    });
-
+    let id: number;
     function draw() {
       if (!ctx) return;
       ctx.clearRect(0, 0, W, H);
-
-      const t = frame * 0.012;
-
-      // Outer glow ring
-      const grad = ctx.createRadialGradient(cx, cy, 30, cx, cy, 100);
-      grad.addColorStop(0, "rgba(99,102,241,0.18)");
-      grad.addColorStop(0.5, "rgba(99,102,241,0.06)");
-      grad.addColorStop(1, "rgba(99,102,241,0)");
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(cx, cy, 100, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Orbit rings
-      for (let r = 0; r < 3; r++) {
-        const radius = 44 + r * 22;
-        const rot = t * (r % 2 === 0 ? 1 : -1) * (0.4 + r * 0.15);
-        ctx.save();
-        ctx.translate(cx, cy);
-        ctx.rotate(rot);
-        ctx.strokeStyle = `rgba(99,102,241,${0.18 - r * 0.04})`;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 8 + r * 4]);
-        ctx.beginPath();
-        ctx.ellipse(0, 0, radius, radius * 0.38, 0, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
-      }
-
-      // Connections
-      for (let i = 0; i < nodes.length; i++) {
-        for (let j = i + 1; j < nodes.length; j++) {
-          const dx = nodes[i].x - nodes[j].x;
-          const dy = nodes[i].y - nodes[j].y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist < 80) {
-            const alpha = (1 - dist / 80) * 0.3 * Math.abs(Math.sin(t * 0.5 + i * 0.4));
-            ctx.strokeStyle = `rgba(139,92,246,${alpha})`;
-            ctx.lineWidth = 0.7;
-            ctx.setLineDash([]);
-            ctx.beginPath();
-            ctx.moveTo(nodes[i].x, nodes[i].y);
-            ctx.lineTo(nodes[j].x, nodes[j].y);
-            ctx.stroke();
-          }
-        }
-      }
-
-      // Nodes
-      nodes.forEach((n, i) => {
-        const pulse = 0.5 + 0.5 * Math.sin(t * 1.2 + n.phase);
-        const alpha = 0.4 + pulse * 0.55;
-        const size = 2 + pulse * 2.5;
-        ctx.beginPath();
-        ctx.arc(n.x, n.y, size, 0, Math.PI * 2);
-        ctx.fillStyle = i % 3 === 0 ? `rgba(165,180,252,${alpha})` : `rgba(99,102,241,${alpha})`;
-        ctx.fill();
-      });
-
-      // Center core
-      const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 28);
-      coreGrad.addColorStop(0, "rgba(165,180,252,0.9)");
-      coreGrad.addColorStop(0.4, "rgba(99,102,241,0.5)");
-      coreGrad.addColorStop(1, "rgba(99,102,241,0)");
-      ctx.beginPath();
-      ctx.arc(cx, cy, 28, 0, Math.PI * 2);
-      ctx.fillStyle = coreGrad;
-      ctx.fill();
-
-      // Center dot
-      ctx.beginPath();
-      ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(255,255,255,0.95)";
-      ctx.fill();
-
       frame++;
+      for (const d of dots) {
+        d.y += d.vy;
+        d.x += d.vx;
+        if (d.y < -4) { d.y = H + 4; d.x = Math.random() * W; }
+        const pulse = 0.5 + 0.5 * Math.sin(frame * 0.03 + d.x);
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${d.color},${d.opacity * pulse})`;
+        ctx.fill();
+      }
+      id = requestAnimationFrame(draw);
     }
-
-    const id = setInterval(draw, 16);
-    return () => clearInterval(id);
+    draw();
+    return () => cancelAnimationFrame(id);
   }, []);
-
-  return <canvas ref={canvasRef} width={220} height={220} style={{ imageRendering: "auto" }} />;
+  return <canvas ref={ref} className="absolute inset-0 w-full h-full pointer-events-none" />;
 }
 
-const STATS = [
-  { value: "8", label: "AI Agents" },
-  { value: "33+", label: "Live Markets" },
-  { value: "100ms", label: "Scan Interval" },
+// ── Holographic market chart canvas ──────────────────────────────────────────
+function HoloChart() {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const W = canvas.width = 140;
+    const H = canvas.height = 140;
+    const cx = W / 2;
+    const BAR_HEIGHTS = [38, 55, 42, 70, 58, 50, 78, 48];
+    const N = BAR_HEIGHTS.length;
+    let frame = 0;
+    let id: number;
+    function draw() {
+      if (!ctx) return;
+      ctx.clearRect(0, 0, W, H);
+      frame++;
+      const t = frame * 0.025;
+      const barW = 12, barGap = 4;
+      const totalW = N * barW + (N - 1) * barGap;
+      const startX = (W - totalW) / 2;
+      const baseY = H - 22;
+      // Platform glow
+      const pg = ctx.createRadialGradient(cx, baseY + 6, 0, cx, baseY + 6, 48);
+      pg.addColorStop(0, "rgba(76,201,255,0.18)");
+      pg.addColorStop(0.5, "rgba(139,92,246,0.07)");
+      pg.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = pg;
+      ctx.beginPath();
+      ctx.ellipse(cx, baseY + 6, 52, 10, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Bars
+      const heights = BAR_HEIGHTS.map((h, i) => h + Math.sin(t + i * 0.7) * 5);
+      const nodePositions: { x: number; y: number }[] = [];
+      heights.forEach((h, i) => {
+        const x = startX + i * (barW + barGap);
+        const y = baseY - h;
+        nodePositions.push({ x: x + barW / 2, y });
+        const barGrad = ctx.createLinearGradient(x, y, x, baseY);
+        barGrad.addColorStop(0, "rgba(76,201,255,0.6)");
+        barGrad.addColorStop(0.5, "rgba(139,92,246,0.3)");
+        barGrad.addColorStop(1, "rgba(76,201,255,0.05)");
+        ctx.fillStyle = barGrad;
+        ctx.beginPath();
+        ctx.roundRect(x, y, barW, h, 3);
+        ctx.fill();
+        // Bar shimmer highlight
+        const shine = ctx.createLinearGradient(x, y, x + barW, y);
+        shine.addColorStop(0, "rgba(255,255,255,0.12)");
+        shine.addColorStop(0.5, "rgba(255,255,255,0.04)");
+        shine.addColorStop(1, "rgba(255,255,255,0)");
+        ctx.fillStyle = shine;
+        ctx.beginPath();
+        ctx.roundRect(x, y, barW * 0.5, h, [3, 0, 0, 3]);
+        ctx.fill();
+      });
+      // Neon line
+      ctx.beginPath();
+      ctx.moveTo(nodePositions[0].x, nodePositions[0].y);
+      for (let i = 1; i < nodePositions.length; i++) {
+        const mx = (nodePositions[i - 1].x + nodePositions[i].x) / 2;
+        const my = (nodePositions[i - 1].y + nodePositions[i].y) / 2;
+        ctx.quadraticCurveTo(nodePositions[i - 1].x, nodePositions[i - 1].y, mx, my);
+      }
+      ctx.lineTo(nodePositions[N - 1].x, nodePositions[N - 1].y);
+      ctx.strokeStyle = "rgba(0,245,212,0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.shadowColor = "#00F5D4";
+      ctx.shadowBlur = 8;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      // Data nodes
+      nodePositions.forEach((p, i) => {
+        const pulse = 0.5 + 0.5 * Math.sin(t * 1.5 + i * 0.9);
+        const rOuter = 3 + pulse * 1.5;
+        const ng = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, rOuter * 2);
+        ng.addColorStop(0, "rgba(0,245,212,0.9)");
+        ng.addColorStop(0.4, "rgba(76,201,255,0.4)");
+        ng.addColorStop(1, "rgba(0,245,212,0)");
+        ctx.fillStyle = ng;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, rOuter * 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255,255,255,0.9)";
+        ctx.fill();
+      });
+      id = requestAnimationFrame(draw);
+    }
+    draw();
+    return () => cancelAnimationFrame(id);
+  }, []);
+  return <canvas ref={ref} width={140} height={140} style={{ imageRendering: "auto" }} />;
+}
+
+// ── Hexagon icon (SVG) ────────────────────────────────────────────────────────
+function HexIcon() {
+  return (
+    <div className="relative w-10 h-10 flex items-center justify-center">
+      <svg viewBox="0 0 40 40" width={40} height={40} className="absolute inset-0">
+        <polygon points="20,2 36,11 36,29 20,38 4,29 4,11" fill="rgba(76,201,255,0.08)" stroke="rgba(76,201,255,0.7)" strokeWidth="1.2" />
+      </svg>
+      <svg viewBox="0 0 16 16" width={16} height={16} className="relative z-10">
+        <polyline points="3,13 8,3 13,13" fill="none" stroke="#4CC9FF" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        <line x1="5.5" y1="9" x2="10.5" y2="9" stroke="#4CC9FF" strokeWidth="1.8" strokeLinecap="round" />
+      </svg>
+    </div>
+  );
+}
+
+const FEATURES = [
+  { icon: "⏰", label: "24/7", sub: "Markets Never Close" },
+  { icon: "🛡", label: "Secure", sub: "Powered by Deriv" },
+  { icon: "⚡", label: "Fast", sub: "Instant Execution" },
 ];
 
 export default function LandingPage({ onEnter }: { onEnter: () => void }) {
@@ -122,89 +171,156 @@ export default function LandingPage({ onEnter }: { onEnter: () => void }) {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4 overflow-hidden">
-      {/* Ambient background */}
+    <div className="min-h-screen flex items-center justify-center p-4 overflow-hidden relative"
+      style={{ background: "radial-gradient(ellipse 120% 100% at 50% 30%, #0b0f1e 0%, #050816 60%, #050816 100%)" }}>
+      {/* Digital grid */}
       <div className="absolute inset-0 pointer-events-none" style={{
-        backgroundImage: "radial-gradient(ellipse 80% 50% at 50% 40%, rgba(99,102,241,0.06) 0%, transparent 100%)",
+        backgroundImage: "linear-gradient(rgba(76,201,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(76,201,255,0.025) 1px, transparent 1px)",
+        backgroundSize: "44px 44px",
       }} />
-      <div className="absolute inset-0 pointer-events-none opacity-30" style={{
-        backgroundImage: "linear-gradient(rgba(99,102,241,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(99,102,241,0.04) 1px, transparent 1px)",
-        backgroundSize: "48px 48px",
-      }} />
+      {/* Particles layer */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <Particles />
+      </div>
+      {/* Ambient glow spots */}
+      <div className="absolute pointer-events-none" style={{ left: "20%", top: "25%", width: 300, height: 300, borderRadius: "50%", background: "radial-gradient(circle, rgba(139,92,246,0.08) 0%, transparent 70%)", filter: "blur(40px)" }} />
+      <div className="absolute pointer-events-none" style={{ right: "15%", bottom: "25%", width: 250, height: 250, borderRadius: "50%", background: "radial-gradient(circle, rgba(76,201,255,0.07) 0%, transparent 70%)", filter: "blur(50px)" }} />
 
+      {/* The card */}
       <motion.div
-        initial={{ opacity: 0, y: 20, scale: 0.97 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        transition={{ duration: 0.65, ease: [0.22, 1, 0.36, 1] }}
-        className="relative z-10 w-full max-w-[400px]"
+        animate={{ y: [0, -4, 0] }}
+        transition={{ duration: 3.5, repeat: Infinity, ease: "easeInOut" }}
+        className="relative z-10 w-full max-w-[360px]"
+        style={{ filter: "drop-shadow(0 0 32px rgba(76,201,255,0.12)) drop-shadow(0 0 80px rgba(139,92,246,0.08))" }}
       >
-        <div
-          className="relative rounded-2xl overflow-hidden"
+        {/* Pulsing neon border */}
+        <motion.div
+          className="absolute -inset-px rounded-[28px] pointer-events-none"
+          animate={{ opacity: [0.5, 1, 0.5] }}
+          transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
           style={{
-            background: "linear-gradient(160deg, #1a1a22 0%, #101014 55%, #13131a 100%)",
-            boxShadow: "0 40px 100px rgba(0,0,0,0.75), 0 0 0 1px rgba(255,255,255,0.07), 0 0 60px rgba(99,102,241,0.08), inset 0 1px 0 rgba(255,255,255,0.07)",
-            transform: "perspective(900px) rotateX(2deg)",
+            background: "linear-gradient(135deg, rgba(76,201,255,0.6) 0%, rgba(139,92,246,0.4) 40%, rgba(0,245,212,0.5) 100%)",
+            borderRadius: 28,
+            padding: 1,
           }}
         >
-          {/* Top shimmer */}
-          <div className="absolute top-0 left-0 right-0 h-px"
-            style={{ background: "linear-gradient(90deg, transparent 10%, rgba(139,92,246,0.7) 50%, transparent 90%)" }} />
+          <div className="w-full h-full rounded-[27px]" style={{ background: "#080d1c" }} />
+        </motion.div>
 
-          <div className="p-6">
-            {/* Logo row */}
+        {/* Card body */}
+        <div className="relative rounded-[28px] overflow-hidden" style={{
+          background: "linear-gradient(160deg, rgba(15,20,38,0.97) 0%, rgba(8,12,28,0.99) 55%, rgba(11,16,32,0.98) 100%)",
+          backdropFilter: "blur(24px)",
+          WebkitBackdropFilter: "blur(24px)",
+          boxShadow: "0 40px 100px rgba(0,0,0,0.8), inset 0 1px 0 rgba(76,201,255,0.12), inset 0 -1px 0 rgba(139,92,246,0.08)",
+          border: "1px solid rgba(76,201,255,0.15)",
+        }}>
+          {/* Moving light reflection */}
+          <motion.div
+            className="absolute inset-x-0 top-0 h-px pointer-events-none"
+            animate={{ opacity: [0.4, 0.9, 0.4], scaleX: [0.6, 1, 0.6] }}
+            transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+            style={{ background: "linear-gradient(90deg, transparent 5%, rgba(76,201,255,0.8) 50%, transparent 95%)", transformOrigin: "center" }}
+          />
+          <motion.div
+            className="absolute pointer-events-none"
+            animate={{ x: ["-100%", "200%"] }}
+            transition={{ duration: 4, repeat: Infinity, ease: "linear", repeatDelay: 2 }}
+            style={{ top: 0, bottom: 0, left: 0, width: "40%", background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.02), transparent)", transform: "skewX(-20deg)" }}
+          />
+
+          <div className="p-5">
+            {/* Top row */}
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg flex items-center justify-center"
-                  style={{ background: "linear-gradient(135deg, rgba(99,102,241,0.3), rgba(99,102,241,0.1))", border: "1px solid rgba(99,102,241,0.35)" }}>
-                  <Activity className="w-4 h-4 text-indigo-400" />
+                <HexIcon />
+                <span className="font-bold text-white text-sm tracking-tight" style={{ fontFamily: "system-ui" }}>NeuroTrade AI</span>
+              </div>
+              <motion.div
+                animate={{ opacity: [0.7, 1, 0.7] }}
+                transition={{ duration: 1.8, repeat: Infinity }}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-full"
+                style={{ background: "rgba(0,245,212,0.07)", border: "1px solid rgba(0,245,212,0.3)" }}
+              >
+                <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: "#00F5D4", boxShadow: "0 0 6px #00F5D4" }} />
+                <span className="text-[10px] font-bold tracking-widest uppercase" style={{ color: "#00F5D4" }}>Market Open</span>
+              </motion.div>
+            </div>
+
+            {/* Hero section: text + chart */}
+            <div className="flex items-start gap-2 mb-4">
+              <div className="flex-1">
+                <h1 className="text-xl font-black leading-tight tracking-tight text-white mb-1">
+                  WELCOME TO<br />
+                  <span style={{ background: "linear-gradient(90deg, #4CC9FF, #8B5CF6, #00F5D4)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+                    NEUROTRADE AI
+                  </span>
+                </h1>
+                <p className="text-xs leading-relaxed" style={{ color: "rgba(180,190,220,0.65)" }}>
+                  Trade 24/7 on volatility.<br />
+                  Opportunities never sleep.
+                </p>
+              </div>
+              {/* Holographic chart */}
+              <div className="relative flex-shrink-0">
+                <motion.div
+                  animate={{ opacity: [0.4, 0.7, 0.4] }}
+                  transition={{ duration: 2.8, repeat: Infinity, ease: "easeInOut" }}
+                  className="absolute inset-0 rounded-xl pointer-events-none"
+                  style={{ background: "radial-gradient(ellipse at center, rgba(76,201,255,0.12) 0%, transparent 70%)", filter: "blur(4px)" }}
+                />
+                <div className="relative rounded-xl overflow-hidden" style={{ background: "rgba(76,201,255,0.03)", border: "1px solid rgba(76,201,255,0.1)" }}>
+                  <HoloChart />
                 </div>
-                <span className="font-bold text-white text-sm tracking-tight">NeuroTrade AI</span>
-              </div>
-              <div className="flex items-center gap-1.5 px-2 py-1 rounded-full" style={{ border: "1px solid rgba(34,197,94,0.25)", background: "rgba(34,197,94,0.06)" }}>
-                <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse inline-block" />
-                <span className="text-[10px] text-green-400 font-medium tracking-wide">LIVE</span>
               </div>
             </div>
 
-            {/* Neural orb — hero visual */}
-            <div className="flex justify-center -mx-2 my-1">
-              <NeuralOrb />
-            </div>
+            {/* Separator */}
+            <div className="h-px mb-4" style={{ background: "linear-gradient(90deg, transparent, rgba(76,201,255,0.15), rgba(139,92,246,0.15), transparent)" }} />
 
-            {/* Headline */}
-            <div className="text-center mb-5 -mt-2">
-              <h1 className="text-xl font-bold text-white tracking-tight leading-snug">
-                Autonomous Trading
-              </h1>
-              <p className="text-xs text-zinc-500 mt-1 leading-relaxed">
-                ML ensemble scanning Deriv Synthetic Indices in real time.<br />
-                No crowd indicators. No guesswork.
-              </p>
-            </div>
-
-            {/* Stats row */}
-            <div className="grid grid-cols-3 gap-2 mb-5">
-              {STATS.map((s) => (
-                <div key={s.label} className="text-center rounded-xl py-2.5"
-                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}>
-                  <div className="text-base font-bold font-mono text-indigo-300">{s.value}</div>
-                  <div className="text-[9px] text-zinc-500 mt-0.5 tracking-wide">{s.label}</div>
+            {/* Feature icons */}
+            <div className="grid grid-cols-3 gap-2 mb-4">
+              {FEATURES.map((f) => (
+                <div key={f.label} className="flex flex-col items-center gap-1 p-2.5 rounded-xl"
+                  style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(76,201,255,0.08)" }}>
+                  <span className="text-lg">{f.icon}</span>
+                  <span className="text-[11px] font-bold text-white">{f.label}</span>
+                  <span className="text-[9px] text-center leading-snug" style={{ color: "rgba(160,170,200,0.55)" }}>{f.sub}</span>
                 </div>
               ))}
             </div>
 
             {/* Separator */}
-            <div className="h-px mb-4" style={{ background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent)" }} />
+            <div className="h-px mb-4" style={{ background: "linear-gradient(90deg, transparent, rgba(139,92,246,0.12), transparent)" }} />
 
-            {/* CTAs */}
+            {/* Smart trades callout */}
+            <motion.div
+              className="flex items-center gap-2 mb-4 px-3 py-2 rounded-xl"
+              animate={{ opacity: [0.75, 1, 0.75] }}
+              transition={{ duration: 2.5, repeat: Infinity }}
+              style={{ background: "rgba(139,92,246,0.07)", border: "1px solid rgba(139,92,246,0.2)" }}
+            >
+              <span className="text-[11px] font-semibold" style={{ color: "#8B5CF6" }}>✦</span>
+              <span className="text-[11px] font-medium flex-1" style={{ color: "rgba(200,180,255,0.85)" }}>
+                Smart Trades. Smarter You.
+              </span>
+              <motion.span
+                animate={{ x: [0, 4, 0] }}
+                transition={{ duration: 1.4, repeat: Infinity }}
+                style={{ color: "#8B5CF6", fontSize: 14 }}
+              >→</motion.span>
+            </motion.div>
+
+            {/* CTA buttons */}
             <div className="space-y-2">
               <motion.button
-                whileHover={{ scale: 1.015 }} whileTap={{ scale: 0.985 }}
+                whileHover={{ scale: 1.015 }}
+                whileTap={{ scale: 0.985 }}
                 onClick={handleDeriv}
-                className="w-full flex items-center justify-center gap-2 py-3 rounded-xl font-semibold text-sm text-white"
+                className="w-full flex items-center justify-center gap-2 py-3 rounded-xl font-bold text-sm text-white"
                 style={{
-                  background: "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)",
-                  boxShadow: "0 0 32px rgba(99,102,241,0.4), inset 0 1px 0 rgba(255,255,255,0.15)",
+                  background: "linear-gradient(135deg, #4CC9FF 0%, #8B5CF6 60%, #00F5D4 100%)",
+                  boxShadow: "0 0 28px rgba(76,201,255,0.35), 0 0 60px rgba(139,92,246,0.2), inset 0 1px 0 rgba(255,255,255,0.2)",
                 }}
               >
                 <Brain className="w-4 h-4" />
@@ -212,18 +328,21 @@ export default function LandingPage({ onEnter }: { onEnter: () => void }) {
                 <ChevronRight className="w-3.5 h-3.5" />
               </motion.button>
               <motion.button
-                whileHover={{ scale: 1.015 }} whileTap={{ scale: 0.985 }}
+                whileHover={{ scale: 1.015 }}
+                whileTap={{ scale: 0.985 }}
                 onClick={onEnter}
                 className="w-full py-2.5 rounded-xl font-medium text-sm transition-colors"
-                style={{ color: "#71717a", border: "1px solid rgba(255,255,255,0.07)", background: "rgba(255,255,255,0.02)" }}
-                onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.14)"; e.currentTarget.style.color = "#a1a1aa"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.07)"; e.currentTarget.style.color = "#71717a"; }}
+                style={{ color: "rgba(140,150,180,0.7)", border: "1px solid rgba(76,201,255,0.1)", background: "rgba(76,201,255,0.03)" }}
+                onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(76,201,255,0.2)"; e.currentTarget.style.color = "rgba(180,190,220,0.85)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(76,201,255,0.1)"; e.currentTarget.style.color = "rgba(140,150,180,0.7)"; }}
               >
                 Explore Demo Mode
               </motion.button>
             </div>
 
-            <p className="text-[10px] text-zinc-700 text-center mt-3">OAuth · No credentials stored · Paper trade mode available</p>
+            <p className="text-[9px] text-center mt-3" style={{ color: "rgba(80,90,120,0.7)" }}>
+              OAuth · No credentials stored · Paper trade mode available
+            </p>
           </div>
         </div>
       </motion.div>

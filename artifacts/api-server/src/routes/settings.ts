@@ -67,8 +67,9 @@ router.put("/", async (req, res): Promise<void> => {
   if (updates.consecutiveLossLimit !== undefined) updateData.consecutiveLossLimit = updates.consecutiveLossLimit;
   if (updates.minConfidenceThreshold !== undefined) updateData.minConfidenceThreshold = String(updates.minConfidenceThreshold);
   if (updates.marketRotationAfter !== undefined) updateData.marketRotationAfter = updates.marketRotationAfter;
-  if (updates.preferredContractTypes !== undefined) updateData.preferredContractTypes = updates.preferredContractTypes.join(",");
-  if (updates.preferredCategories !== undefined) updateData.preferredCategories = updates.preferredCategories.join(",");
+  const toCommaStr = (v: string | string[] | undefined): string => Array.isArray(v) ? v.join(",") : (v ?? "");
+  if (updates.preferredContractTypes !== undefined) updateData.preferredContractTypes = toCommaStr(updates.preferredContractTypes);
+  if (updates.preferredCategories !== undefined) updateData.preferredCategories = toCommaStr(updates.preferredCategories);
   if (updates.autonomousEnabled !== undefined) updateData.autonomousEnabled = updates.autonomousEnabled;
   if ((updates as any).allowedMarkets !== undefined) {
     const am = (updates as any).allowedMarkets;

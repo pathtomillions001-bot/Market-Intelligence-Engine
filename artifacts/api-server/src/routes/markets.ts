@@ -136,7 +136,7 @@ router.get("/top", async (_req, res): Promise<void> => {
     analysisCache.set(market.symbol, best);
   }
 
-  res.json(buildMarketDetail(best.symbol, best.displayName, best.category, best.analysis, best.prices));
+  res.json(buildMarketDetail(best.symbol, best.displayName, best.category, best.analysis as any, best.prices));
 });
 
 router.get("/scan", async (_req, res): Promise<void> => {

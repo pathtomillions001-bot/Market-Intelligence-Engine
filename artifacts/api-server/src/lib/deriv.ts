@@ -424,6 +424,17 @@ class DerivTickManager extends EventEmitter {
 
   getDigits(symbol: string, count = 300): number[] {
     const buf = this.digitBuffers.get(symbol) ?? [];
+    if (buf.length >= 30) return buf.slice(-count);
+    // Sparse — derive from tick buffer to warm up digit analysis immediately
+    const market = getMarketInfo(symbol);
+    if (market?.digitEnabled) {
+      const ticks = this.tickBuffers.get(symbol) ?? [];
+      if (ticks.length >= 5) {
+        const derived = ticks.map((p) => extractLastDigit(p, market.pipSize));
+        const combined = [...derived, ...buf];
+        return combined.slice(-count);
+      }
+    }
     return buf.slice(-count);
   }
 

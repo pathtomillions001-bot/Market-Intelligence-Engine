@@ -2,3 +2,6 @@
 - [Payout multiplier cache](payout-cache.md) — finalizeAnalysis calls Deriv WS per market scan (slow); cache payout multipliers 20min in-memory, use skipProposal for paper/demo trades.
 - [Live trade execution](live-trade-exec.md) — manual trades route now uses executeLiveTrade+waitForContractResult when token exists and not paperTradeMode; inserts as "open" then updates to won/lost.
 - [Recovery cross-contract logic](recovery-logic.md) — on loss: engine switches contract type (OVER→UNDER/RISE, FALL→RISE, etc.) and calculates stake to cover loss; tracked via lastLossContractType/barrier/amount.
+- [Settings Zod schema quirks](settings-zod.md) — UpdateSettingsBody must include maxDrawdown+autonomousEnabled; preferredContractTypes/preferredCategories/allowedMarkets accept union[string, string[]] and settings route joins arrays with commas.
+- [Digit analysis warmup](digit-warmup.md) — getDigits() falls back to deriving from tickBuffers when digitBuffer has <30 entries; DIGITOVER/DIGITUNDER always need a barrier (default: OVER=5, UNDER=4) or Deriv rejects the trade.
+- [Live trade P&L fix](live-trade-pnl.md) — failed live trades must use profit=String(-stake) not "0"; flash-card label should use formatContractLabel() to show "OVER 5" not "DIGITOVER".

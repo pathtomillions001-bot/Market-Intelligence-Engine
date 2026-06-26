@@ -220,6 +220,7 @@ export default function MarketDetail() {
   // Live analysis state — updated via SSE on every tick
   const [liveDigitStats, setLiveDigitStats] = useState<any | null>(null);
   const [liveTrendStats, setLiveTrendStats] = useState<any | null>(null);
+  const [dialogCountdown, setDialogCountdown] = useState<number | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const lastTickTimeRef = useRef<number>(Date.now());
 
@@ -314,6 +315,13 @@ export default function MarketDetail() {
   const priceChange = startPrice > 0 ? ((currentPrice - startPrice) / startPrice) * 100 : 0;
 
   const pipSize = symbol?.includes("R_100") || symbol?.includes("1HZ100") ? 2 : symbol?.startsWith("1HZ") || symbol?.startsWith("R_") ? 3 : 4;
+
+  useEffect(() => {
+    if (!tradeDialog) { setDialogCountdown(null); return; }
+    setDialogCountdown(15);
+    const iv = setInterval(() => setDialogCountdown((c) => (c !== null ? Math.max(0, c - 1) : null)), 1000);
+    return () => clearInterval(iv);
+  }, [tradeDialog]);
 
   function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number) {
     setTradeContract(contractType);
@@ -564,37 +572,72 @@ export default function MarketDetail() {
               </div>
             )}
 
-            {/* Contract type buttons */}
+            {/* Quick Trade — all market types */}
             <div className="space-y-2">
-              <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Trade Now</div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {suggestedContracts.filter((c: any) => c.suitable).slice(0, 4).map((c: any) => {
-                  const isUp = c.contractType === "RISE" || c.contractType === "CALL" || c.contractType === "DIGITOVER";
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Quick Trade</div>
+                <div className="text-[10px] font-mono text-muted-foreground">5 ticks · auto-configured</div>
+              </div>
+
+              {/* Rise / Fall and Call / Put — always visible */}
+              <div className="grid grid-cols-2 gap-1.5">
+                {([
+                  { ct: "RISE", dir: "up" as const, label: "▲ RISE", probKey: "rise" },
+                  { ct: "FALL", dir: "down" as const, label: "▼ FALL", probKey: "fall" },
+                  { ct: "CALL", dir: "up" as const, label: "↑ CALL", probKey: "call" },
+                  { ct: "PUT",  dir: "down" as const, label: "↓ PUT",  probKey: "put"  },
+                ] as const).map(({ ct, dir, label, probKey }) => {
+                  const prob: number | undefined = (trendStats as any)?.winProb?.[probKey];
+                  const pct = prob != null ? Math.round(prob) : null;
+                  const isRec = (recommendation as any)?.contractType === ct;
+                  const isUp = dir === "up";
                   return (
-                    <button
-                      key={c.contractType}
-                      onClick={() => openTradeDialog(c.contractType, isUp ? "up" : "down")}
-                      className={`p-3 rounded-lg border text-left transition-all hover:scale-[1.02] ${
-                        c.contractType === recommendation.contractType
-                          ? "border-primary/50 bg-primary/10"
-                          : "border-border bg-secondary/30 hover:border-border/80"
+                    <button key={ct} onClick={() => openTradeDialog(ct, dir)}
+                      className={`relative p-2.5 rounded-lg border text-left transition-all hover:scale-[1.02] active:scale-[0.98] ${
+                        isRec
+                          ? "border-primary/50 bg-primary/10 shadow-sm shadow-primary/20"
+                          : "border-border bg-secondary/30 hover:border-muted-foreground/30"
                       }`}
                     >
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="font-mono font-bold text-sm">{c.label}</span>
-                        <span className={`text-xs font-mono ${c.confidence >= 65 ? "text-green-400" : "text-amber-400"}`}>{c.confidence}%</span>
-                      </div>
-                      <div className="text-[10px] text-muted-foreground">{c.description}</div>
-                      <div className="flex items-center justify-between mt-1.5">
-                        <span className="text-[10px] text-muted-foreground">Stake: <span className="text-foreground font-mono">${c.recommendedStake.toFixed(2)}</span></span>
-                        <Badge variant="outline" className={`text-[9px] px-1 ${c.riskLevel === "low" ? "border-green-500/30 text-green-400" : c.riskLevel === "high" ? "border-red-500/30 text-red-400" : "border-amber-500/30 text-amber-400"}`}>
-                          {c.riskLevel} risk
-                        </Badge>
-                      </div>
+                      {isRec && <span className="absolute top-1 right-1.5 text-[8px] font-bold text-primary uppercase tracking-wider">AI ★</span>}
+                      <div className={`font-mono font-bold text-sm ${isUp ? "text-green-400" : "text-red-400"}`}>{label}</div>
+                      {pct != null
+                        ? <div className={`text-[10px] mt-0.5 font-mono ${pct >= 55 ? "text-green-400" : pct >= 45 ? "text-amber-400" : "text-red-400"}`}>{pct}% prob</div>
+                        : <div className="text-[10px] mt-0.5 text-muted-foreground">click to trade</div>}
                     </button>
                   );
                 })}
               </div>
+
+              {/* Digit OVER / UNDER — only for digit-enabled markets */}
+              {isDigitMarket && (
+                <div className="grid grid-cols-2 gap-1.5">
+                  {([
+                    { ct: "DIGITOVER", dir: "up" as const, label: "OVER", barrier: digitBarrier ?? 5, color: "text-violet-400", borderRec: "border-violet-500/50 bg-violet-500/10 shadow-violet-500/20" },
+                    { ct: "DIGITUNDER", dir: "down" as const, label: "UNDER", barrier: digitBarrier ?? 5, color: "text-rose-400", borderRec: "border-rose-500/50 bg-rose-500/10 shadow-rose-500/20" },
+                  ] as const).map(({ ct, dir, label, barrier, color, borderRec }) => {
+                    const isRec = (recommendation as any)?.contractType === ct;
+                    const overPct = digitStats ? Math.round(digitStats.overPct ?? 0) : null;
+                    const underPct = digitStats ? Math.round(digitStats.underPct ?? 0) : null;
+                    const prob = ct === "DIGITOVER" ? overPct : underPct;
+                    return (
+                      <button key={ct} onClick={() => openTradeDialog(ct, dir, barrier)}
+                        className={`relative p-2.5 rounded-lg border text-left transition-all hover:scale-[1.02] active:scale-[0.98] ${
+                          isRec
+                            ? `${borderRec} shadow-sm`
+                            : "border-border bg-secondary/30 hover:border-muted-foreground/30"
+                        }`}
+                      >
+                        {isRec && <span className={`absolute top-1 right-1.5 text-[8px] font-bold uppercase tracking-wider ${color}`}>AI ★</span>}
+                        <div className={`font-mono font-bold text-sm ${color}`}>{label} {barrier}</div>
+                        {prob != null
+                          ? <div className={`text-[10px] mt-0.5 font-mono ${prob >= 50 ? "text-green-400" : "text-amber-400"}`}>{prob}% rate</div>
+                          : <div className="text-[10px] mt-0.5 text-muted-foreground">digit contract</div>}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -622,11 +665,29 @@ export default function MarketDetail() {
           <DialogHeader>
             <DialogTitle>Place Trade — {tradeContract}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="p-3 bg-secondary/30 rounded-lg">
-              <div className="text-xs text-muted-foreground mb-0.5">Market</div>
-              <div className="font-medium">{market.displayName}</div>
-              <div className="text-xs font-mono text-muted-foreground mt-0.5">Current: {currentPrice.toFixed(pipSize)}</div>
+          <div className="space-y-3 py-2">
+            <div className="p-3 bg-secondary/30 rounded-lg flex justify-between items-start">
+              <div>
+                <div className="text-xs text-muted-foreground mb-0.5">Market</div>
+                <div className="font-medium">{market.displayName}</div>
+                <div className="text-xs font-mono text-muted-foreground mt-0.5">Current: {currentPrice.toFixed(pipSize)}</div>
+              </div>
+              {dialogCountdown !== null && (
+                <div className={`text-right text-xs font-mono font-bold ${dialogCountdown <= 5 ? "text-red-400 animate-pulse" : dialogCountdown <= 10 ? "text-amber-400" : "text-muted-foreground"}`}>
+                  <div>{dialogCountdown}s</div>
+                  <div className="text-[9px] font-normal">to place</div>
+                </div>
+              )}
+            </div>
+            {/* Contract type + duration info */}
+            <div className="flex items-center gap-2 text-xs">
+              <span className="px-2 py-1 rounded-md bg-primary/10 border border-primary/30 font-mono font-bold text-primary">
+                {tradeContract.startsWith("DIGIT") ? `${tradeContract.replace("DIGIT", "")} ${tradeBarrier ?? ""}` : tradeContract}
+              </span>
+              <span className="px-2 py-1 rounded-md bg-secondary/50 border border-border font-mono text-muted-foreground">5 ticks</span>
+              {tradeBarrier != null && !tradeContract.startsWith("DIGIT") === false && (
+                <span className="px-2 py-1 rounded-md bg-violet-500/10 border border-violet-500/30 font-mono text-violet-400 text-[10px]">Barrier: {tradeBarrier}</span>
+              )}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="stake">Stake (USD)</Label>

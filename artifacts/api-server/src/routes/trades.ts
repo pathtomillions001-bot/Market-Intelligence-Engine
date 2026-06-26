@@ -172,8 +172,9 @@ router.post("/", async (req, res): Promise<void> => {
 
   const tradeDuration = duration ?? finalized.recommendedDuration ?? 5;
   const isDigit = contractType.includes("DIGIT");
-  // Use user-selected barrier if provided, fall back to AI-recommended barrier
-  const barrier = isDigit ? (requestBarrier ?? rawAnalysis.digitBarrier ?? undefined) : undefined;
+  // For digit contracts, always ensure a valid barrier (user > AI > safe default)
+  const defaultBarrier = contractType === "DIGITOVER" ? 5 : contractType === "DIGITUNDER" ? 4 : undefined;
+  const barrier = isDigit ? (requestBarrier ?? rawAnalysis.digitBarrier ?? defaultBarrier) : undefined;
   const currency = accounts.length > 0 ? accounts[0].currency : "USD";
 
   const isLiveTrade = !isDemo && !paperTradeMode && !!token;
@@ -217,11 +218,12 @@ router.post("/", async (req, res): Promise<void> => {
       exitPrice = contractResult.exitSpot;
       payout = stake + Math.max(profit, 0);
     } catch (liveErr) {
-      logger.warn({ liveErrMsg: liveErr instanceof Error ? liveErr.message : String(liveErr) }, "Live trade failed — cancelling open trade");
+      const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
+      logger.warn({ liveErrMsg: errMsg, symbol, contractType, barrier }, "Live trade failed — cancelling open trade");
       await db.update(tradesTable)
-        .set({ status: "lost", profit: "0", closedAt: new Date() })
+        .set({ status: "lost", profit: String(-stake), payout: "0", closedAt: new Date() })
         .where(eq(tradesTable.id, openTrade.id));
-      res.status(500).json({ error: "Live trade execution failed. Deriv may be unavailable." });
+      res.status(500).json({ error: `Trade execution failed: ${errMsg}` });
       return;
     }
 
