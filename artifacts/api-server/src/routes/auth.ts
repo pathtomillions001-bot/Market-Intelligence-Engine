@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { accountsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { authorizeWithDeriv, setDerivToken, clearDerivToken, getCachedAccountInfo, getLiveBalance } from "../lib/deriv";
+import { authorizeWithDeriv, setDerivToken, clearDerivToken, getCachedAccountInfo, getLiveBalance, getCachedToken } from "../lib/deriv";
 import { ConnectDerivAccountBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 
@@ -89,31 +89,60 @@ router.post("/connect", async (req, res): Promise<void> => {
   }
 });
 
+function formatAccount(account: { id: number; loginId: string; currency: string; balance: string; isVirtual: boolean; email: string | null; fullName: string | null; country: string | null; connectedAt: Date }, balance?: number) {
+  return {
+    id: account.id,
+    loginId: account.loginId,
+    currency: account.currency,
+    balance: balance ?? Number(account.balance),
+    isVirtual: account.isVirtual,
+    email: account.email,
+    fullName: account.fullName,
+    country: account.country,
+    connectedAt: account.connectedAt.toISOString(),
+  };
+}
+
 router.get("/account", async (req, res): Promise<void> => {
-  const accounts = await db.select().from(accountsTable).limit(1);
+  let accounts = await db.select().from(accountsTable).limit(1);
+
+  // ── Auto-restore: if DB row is missing but token is cached in memory, rebuild it ──
   if (accounts.length === 0) {
-    res.status(404).json({ error: "No account connected" });
-    return;
+    const cached = getCachedToken();
+    if (!cached) {
+      res.status(404).json({ error: "No account connected" });
+      return;
+    }
+    try {
+      logger.info("Restoring account from cached token");
+      const info = await authorizeWithDeriv(cached);
+      const [restored] = await db.insert(accountsTable).values({
+        loginId: info.loginid,
+        token: cached,
+        currency: info.currency,
+        balance: String(info.balance),
+        isVirtual: info.is_virtual === 1,
+        email: info.email ?? null,
+        fullName: info.fullname ?? null,
+        country: info.country ?? null,
+      }).returning();
+      res.json(formatAccount(restored, info.balance));
+      return;
+    } catch {
+      res.status(404).json({ error: "No account connected" });
+      return;
+    }
   }
+
   const account = accounts[0];
 
-  // Sync live balance if token is available
+  // ── Sync live balance ─────────────────────────────────────────────────────────
   if (account.token) {
     try {
       const liveBalance = await getLiveBalance(account.token);
       if (liveBalance !== null && Math.abs(liveBalance - Number(account.balance)) > 0.01) {
         await db.update(accountsTable).set({ balance: String(liveBalance), updatedAt: new Date() }).where(eq(accountsTable.id, account.id));
-        res.json({
-          id: account.id,
-          loginId: account.loginId,
-          currency: account.currency,
-          balance: liveBalance,
-          isVirtual: account.isVirtual,
-          email: account.email,
-          fullName: account.fullName,
-          country: account.country,
-          connectedAt: account.connectedAt.toISOString(),
-        });
+        res.json(formatAccount(account, liveBalance));
         return;
       }
     } catch {
@@ -121,17 +150,7 @@ router.get("/account", async (req, res): Promise<void> => {
     }
   }
 
-  res.json({
-    id: account.id,
-    loginId: account.loginId,
-    currency: account.currency,
-    balance: Number(account.balance),
-    isVirtual: account.isVirtual,
-    email: account.email,
-    fullName: account.fullName,
-    country: account.country,
-    connectedAt: account.connectedAt.toISOString(),
-  });
+  res.json(formatAccount(account));
 });
 
 router.post("/disconnect", async (_req, res): Promise<void> => {
