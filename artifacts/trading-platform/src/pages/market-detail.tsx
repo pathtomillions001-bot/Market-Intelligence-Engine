@@ -294,6 +294,14 @@ export default function MarketDetail() {
     }
   }, [rec]);
 
+  // ── Trade dialog countdown — MUST be before any early return (Rules of Hooks) ─
+  useEffect(() => {
+    if (!tradeDialog) { setDialogCountdown(null); return; }
+    setDialogCountdown(15);
+    const iv = setInterval(() => setDialogCountdown((c) => (c !== null ? Math.max(0, c - 1) : null)), 1000);
+    return () => clearInterval(iv);
+  }, [tradeDialog]);
+
   if (isLoading || !market) {
     return (
       <div className="p-8 flex items-center gap-3 text-muted-foreground">
@@ -315,13 +323,6 @@ export default function MarketDetail() {
   const priceChange = startPrice > 0 ? ((currentPrice - startPrice) / startPrice) * 100 : 0;
 
   const pipSize = symbol?.includes("R_100") || symbol?.includes("1HZ100") ? 2 : symbol?.startsWith("1HZ") || symbol?.startsWith("R_") ? 3 : 4;
-
-  useEffect(() => {
-    if (!tradeDialog) { setDialogCountdown(null); return; }
-    setDialogCountdown(15);
-    const iv = setInterval(() => setDialogCountdown((c) => (c !== null ? Math.max(0, c - 1) : null)), 1000);
-    return () => clearInterval(iv);
-  }, [tradeDialog]);
 
   function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number) {
     setTradeContract(contractType);

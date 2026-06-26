@@ -7,6 +7,7 @@ import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { motion } from "framer-motion";
 import { useState, useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Info, TrendingUp, TrendingDown, Hash } from "lucide-react";
 
@@ -69,6 +70,7 @@ export default function Settings() {
   const { data: settings, isLoading } = useGetSettings();
   const { data: account } = useGetAccount();
   const updateSettings = useUpdateSettings();
+  const queryClient = useQueryClient();
 
   const [form, setForm] = useState({
     riskProfile: "moderate" as "conservative" | "moderate" | "aggressive",
@@ -114,8 +116,10 @@ export default function Settings() {
         preferredContractTypes: settings.preferredContractTypes.length > 0
           ? settings.preferredContractTypes
           : ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"],
-        preferredCategories: ["synthetic"],
-        allowedMarkets: [],
+        preferredCategories: (settings as any).preferredCategories?.length > 0
+          ? (settings as any).preferredCategories
+          : ["synthetic"],
+        allowedMarkets: (settings as any).allowedMarkets ?? [],
       });
     }
   }, [settings]);
@@ -140,9 +144,13 @@ export default function Settings() {
   };
 
   const handleSave = () => {
-    updateSettings.mutate({ data: { ...form, preferredCategories: ["synthetic"], allowedMarkets: [] } as any }, {
-      onSuccess: () => toast.success("Settings saved"),
-      onError: (err: any) => toast.error(err?.error || "Failed to save settings"),
+    updateSettings.mutate({ data: { ...form } as any }, {
+      onSuccess: (saved: any) => {
+        queryClient.setQueryData(["settings"], saved);
+        queryClient.invalidateQueries({ queryKey: ["settings"] });
+        toast.success("Settings saved");
+      },
+      onError: (err: any) => toast.error((err as any)?.error || "Failed to save settings"),
     });
   };
 
