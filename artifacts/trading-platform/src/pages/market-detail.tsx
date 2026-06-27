@@ -282,15 +282,15 @@ export default function MarketDetail() {
       const lastPrice = market.priceHistory[market.priceHistory.length - 1]?.price;
       if (lastPrice) setLivePrice(lastPrice);
     }
-    if (market && !liveDigitStats && (market as any).digitStats) setLiveDigitStats((market as any).digitStats);
-    if (market && !liveTrendStats && (market as any).trendStats) setLiveTrendStats((market as any).trendStats);
+    if (market && (market as any).digitStats) setLiveDigitStats((market as any).digitStats);
+    if (market && (market as any).trendStats) setLiveTrendStats((market as any).trendStats);
   }, [market]);
 
   // Populate from rec on first load too
   useEffect(() => {
     if (rec) {
-      if ((rec as any).digitStats && !liveDigitStats) setLiveDigitStats((rec as any).digitStats);
-      if ((rec as any).trendStats && !liveTrendStats) setLiveTrendStats((rec as any).trendStats);
+      if ((rec as any).digitStats) setLiveDigitStats((rec as any).digitStats);
+      if ((rec as any).trendStats) setLiveTrendStats((rec as any).trendStats);
     }
   }, [rec]);
 

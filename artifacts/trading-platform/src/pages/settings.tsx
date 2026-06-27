@@ -147,10 +147,12 @@ export default function Settings() {
     updateSettings.mutate({ data: { ...form } as any }, {
       onSuccess: (saved: any) => {
         queryClient.setQueryData(["settings"], saved);
-        queryClient.invalidateQueries({ queryKey: ["settings"] });
-        toast.success("Settings saved");
+        toast.success("Settings saved successfully");
       },
-      onError: (err: any) => toast.error((err as any)?.error || "Failed to save settings"),
+      onError: (err: any) => {
+        const msg = err?.data?.error || err?.message || "Failed to save settings";
+        toast.error(msg);
+      },
     });
   };
 

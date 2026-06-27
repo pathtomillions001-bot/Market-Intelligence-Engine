@@ -3,6 +3,7 @@ import { db } from "@workspace/db";
 import { settingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { UpdateSettingsBody } from "@workspace/api-zod";
+import { logger } from "../lib/logger";
 
 const router = Router();
 
@@ -35,8 +36,8 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     scanAllMarkets: s.scanAllMarkets,
     tradeDurationSec: s.tradeDurationSec,
     maxTradeStake: Number(s.maxTradeStake),
-    paperTradeMode: (s as { paperTradeMode?: boolean }).paperTradeMode ?? false,
-    requirePositiveEv: (s as { requirePositiveEv?: boolean }).requirePositiveEv ?? true,
+    paperTradeMode: s.paperTradeMode,
+    requirePositiveEv: s.requirePositiveEv,
   };
 }
 
@@ -46,14 +47,17 @@ router.get("/", async (_req, res): Promise<void> => {
 });
 
 router.put("/", async (req, res): Promise<void> => {
+  logger.info({ body: req.body }, "PUT /api/settings received");
   const parseResult = UpdateSettingsBody.safeParse(req.body);
   if (!parseResult.success) {
-    res.status(400).json({ error: "Invalid settings" });
+    logger.error({ issues: parseResult.error.issues }, "Settings validation failed");
+    res.status(400).json({ error: "Invalid settings", details: parseResult.error.issues });
     return;
   }
 
-  const settings = await getOrCreateSettings();
-  const updates = parseResult.data;
+  try {
+    const settings = await getOrCreateSettings();
+    const updates = parseResult.data;
 
   const updateData: Partial<typeof settingsTable.$inferInsert> = {
     updatedAt: new Date(),
@@ -85,12 +89,18 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).paperTradeMode !== undefined) updateData.paperTradeMode = (updates as any).paperTradeMode;
   if ((updates as any).requirePositiveEv !== undefined) updateData.requirePositiveEv = (updates as any).requirePositiveEv;
 
-  const [updated] = await db.update(settingsTable)
-    .set(updateData)
-    .where(eq(settingsTable.id, settings.id))
-    .returning();
+    const [updated] = await db.update(settingsTable)
+      .set(updateData)
+      .where(eq(settingsTable.id, settings.id))
+      .returning();
 
-  res.json(formatSettings(updated));
+    logger.info({ id: updated.id }, "Settings saved successfully");
+    res.json(formatSettings(updated));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    logger.error({ err: e, msg }, "Settings save DB error");
+    res.status(500).json({ error: msg });
+  }
 });
 
 export default router;

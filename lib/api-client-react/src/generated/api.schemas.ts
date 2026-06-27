@@ -121,26 +121,26 @@ export interface MarketRecommendation {
 export interface Settings {
   id: number;
   riskProfile: string;
-  maxRiskPerTrade: string;
-  dailyTarget: string;
-  dailyLossLimit: string;
-  maxTradeStake: string;
-  minConfidenceThreshold: string;
+  maxRiskPerTrade: number;
+  dailyTarget: number;
+  dailyLossLimit: number;
+  maxDrawdown: number;
+  maxTradeStake: number;
+  minConfidenceThreshold: number;
   tradeDurationSec: number;
   paperTradeMode: boolean;
   requirePositiveEv: boolean;
-  drawdownProtection: boolean;
-  drawdownThreshold: string;
   consecutiveLossLimit: number;
   marketRotationAfter: number;
   loopIntervalSec: number;
-  preferredContractTypes: string;
-  allowedMarkets: string;
-  recoveryMode: boolean;
-  recoveryMultiplier: string;
-  maxRecoverySteps: number;
+  preferredContractTypes: string[];
+  preferredCategories: string[];
+  allowedMarkets: string[];
   autonomousEnabled: boolean;
-  updatedAt: string;
+  recoveryMode: boolean;
+  recoveryMultiplier: number;
+  maxRecoverySteps: number;
+  scanAllMarkets: boolean;
 }
 
 export interface PerformanceAnalytics {

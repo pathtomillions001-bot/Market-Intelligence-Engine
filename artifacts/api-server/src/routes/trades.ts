@@ -210,13 +210,13 @@ router.post("/", async (req, res): Promise<void> => {
         currency,
         barrier,
       });
-      entryPrice = liveResult.buyPrice;
 
-      const contractResult = await waitForContractResult(token!, liveResult.contractId, (tradeDuration + 10) * 1000);
+      const contractResult = await waitForContractResult(token!, liveResult.contractId, (tradeDuration + 15) * 1000);
       won = contractResult.won;
       profit = contractResult.profit;
       exitPrice = contractResult.exitSpot;
       payout = stake + Math.max(profit, 0);
+      entryPrice = contractResult.entrySpot || liveResult.buyPrice;
     } catch (liveErr) {
       const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
       logger.warn({ liveErrMsg: errMsg, symbol, contractType, barrier }, "Live trade failed — cancelling open trade");

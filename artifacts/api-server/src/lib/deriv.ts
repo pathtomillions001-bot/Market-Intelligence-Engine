@@ -746,7 +746,7 @@ export async function executeLiveTrade(token: string, params: {
           resolve({
             contractId: msg.buy.contract_id,
             buyPrice: Number(msg.buy.buy_price),
-            entrySpot: Number(msg.buy.start_time),
+            entrySpot: Number(msg.buy.buy_price),
             longcode: msg.buy.longcode ?? "",
           });
         }

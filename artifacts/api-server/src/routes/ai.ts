@@ -19,7 +19,7 @@ let currentMarket: string | null = null;
 let nextScanIn: number | null = null;
 let stopReasons: string[] = [];
 let autonomousTimer: ReturnType<typeof setTimeout> | null = null;
-let loopIntervalSec = 15;
+let loopIntervalSec = 3;
 let lastTradeTime: Date | null = null;
 
 let exploitSymbol: string | null = null;
@@ -485,8 +485,8 @@ function formatRecommendation(symbol: string, analysis: Awaited<ReturnType<typeo
 
 function scheduleNext(tradeExecuted = false) {
   if (!engineRunning) return;
-  // Fast adaptive scanning: 2s after a trade settles, 3s when scanning for opportunities
-  const delayMs = tradeExecuted ? 2000 : 3000;
+  // Fast adaptive scanning: 1.5s after a trade settles, 800ms when scanning for opportunities
+  const delayMs = tradeExecuted ? 1500 : 800;
   nextScanIn = Math.ceil(delayMs / 1000);
   loopIntervalSec = nextScanIn;
   autonomousTimer = setTimeout(runAutonomousLoop, delayMs);
