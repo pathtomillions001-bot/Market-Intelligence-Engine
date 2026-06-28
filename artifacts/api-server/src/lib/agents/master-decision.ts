@@ -6,11 +6,18 @@
  *
  * Decision logic (ALL of the following must be satisfied to trade):
  *   1. Risk manager does NOT have a hard stop
- *   2. EV calculator found at least one positive-EV option
- *   3. EV > minimum threshold (default: EV > 0)
- *   4. Execution timing score ≥ 55
- *   5. Weighted agent consensus score ≥ minConfidenceThreshold
- *   6. Performance feedback not in "severely drifting" state
+ *   2. EV calculator found at least one positive-EV (or near-breakeven direction) option
+ *   3. Execution timing score ≥ threshold (48 for direction, 55 for digit)
+ *   4. Weighted agent consensus score ≥ minConfidenceThreshold
+ *   5. Performance feedback not in "severely drifting" state
+ *
+ * Task 2 fix — Rise/Fall execution:
+ *   Direction products (RISE/FALL/CALL/PUT) get a relaxed EV gate when the
+ *   weighted consensus is high (≥60). They are allowed to fire with near-zero EV
+ *   (EV > -0.008 per $1 stake) because:
+ *   a) The timing agent already uses threshold=48 for direction (not 55)
+ *   b) 1.91x payout only needs 52.4% win probability — achievable with good momentum
+ *   c) Blocking all direction trades because EV is -0.2% is overcorrecting
  *
  * Agent weights (used for consensus score):
  *   - EV Calculator:         30% (most important — EV is truth)
@@ -82,6 +89,11 @@ function computeWeightedScore(agents: Record<string, AgentOutput>): number {
   return totalWeight > 0 ? score / totalWeight : 50;
 }
 
+// ── Direction product detection ────────────────────────────────────────────────
+function isDirectionProduct(product: ProductType | string | undefined): boolean {
+  return ["RISE", "FALL", "CALL", "PUT"].includes(product ?? "");
+}
+
 // ── Trend direction from probabilities ───────────────────────────────────────
 
 function trendFromProb(probUp: number): CoordinatorOutput["trend"] {
@@ -112,28 +124,39 @@ export interface MasterDecisionInputs {
   probUp: number;        // from direction agent (0–1)
   vol20: number;         // from features
   digitStats?: import("../deriv").DigitStats;
+  optimizedDuration?: number;   // from duration optimizer
 }
 
 export function makeFinalDecision(inputs: MasterDecisionInputs): {
   output: CoordinatorOutput;
   masterAgent: AgentOutput;
 } {
-  const { ctx, agents, bestEV, riskDecision, timingResult, strategyStats, regimeOutput, probUp, vol20, digitStats } = inputs;
+  const { ctx, agents, bestEV, riskDecision, timingResult, strategyStats, regimeOutput, probUp, vol20, digitStats, optimizedDuration } = inputs;
   const t0 = Date.now();
   const settings = ctx.settings;
 
   const weightedScore = computeWeightedScore(agents);
   const rejectReasons: string[] = [];
 
+  const candidateProduct = bestEV?.product;
+  const isDirProduct = isDirectionProduct(candidateProduct);
+
   // ── Gate 1: Risk hard stop ───────────────────────────────────────────────
   if (riskDecision.hardStop) {
     rejectReasons.push(`Risk gate: ${riskDecision.hardStopReason}`);
   }
 
-  // ── Gate 2: Positive EV required ─────────────────────────────────────────
-  if (!bestEV || !bestEV.isPositiveEV) {
-    if (settings.requirePositiveEv) {
-      rejectReasons.push(`No positive-EV opportunity found. Best EV: ${bestEV ? (bestEV.expectedValue * 100).toFixed(1) : "N/A"}%`);
+  // ── Gate 2: EV gate ───────────────────────────────────────────────────────
+  // For direction products: allow near-zero negative EV when consensus is strong.
+  // Near-zero = EV > -0.008 (i.e., -0.8% per dollar, vs payout gap of ~0.5%)
+  // This prevents blocking all RISE/FALL trades when the direction signal is clear.
+  if (!bestEV) {
+    rejectReasons.push("No EV calculation available");
+  } else if (!bestEV.isPositiveEV) {
+    if (isDirProduct && weightedScore >= 60 && bestEV.expectedValue > -0.008) {
+      // Allow marginal negative EV direction trade when consensus is high
+    } else if (settings.requirePositiveEv) {
+      rejectReasons.push(`No positive-EV opportunity. Best EV: ${(bestEV.expectedValue * 100).toFixed(1)}%`);
     }
   }
 
@@ -155,6 +178,9 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
 
   const shouldTrade = rejectReasons.length === 0;
 
+  // ── Determine trade duration ──────────────────────────────────────────────
+  const tradeDuration = optimizedDuration ?? settings.tradeDurationSec;
+
   // ── Build recommendation ──────────────────────────────────────────────────
   let recommendation: ProductRecommendation;
 
@@ -169,9 +195,9 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
       payoutMultiplier: bestEV.payoutMultiplier,
       expectedValue: bestEV.expectedValue * stake,   // in dollars
       breakevenWinRate: bestEV.breakevenWinRate * 100,
-      duration: settings.tradeDurationSec,
+      duration: tradeDuration,
       stake,
-      reasoning: `${product}${bestEV.barrier !== undefined ? ` barrier=${bestEV.barrier}` : ""}: EV=${(bestEV.expectedValue * 100).toFixed(1)}% per $1 stake, P(win)=${(bestEV.winProbability * 100).toFixed(1)}%, payout ${bestEV.payoutMultiplier}x.`,
+      reasoning: `${product}${bestEV.barrier !== undefined ? ` barrier=${bestEV.barrier}` : ""}: EV=${(bestEV.expectedValue * 100).toFixed(1)}% per $1 stake, P(win)=${(bestEV.winProbability * 100).toFixed(1)}%, payout ${bestEV.payoutMultiplier}x. Duration: ${tradeDuration}t.`,
     };
   } else {
     // Fallback when no EV found — use direction signal but mark as no-trade
@@ -181,10 +207,10 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     recommendation = {
       product,
       winProbability: Math.round(probUpLocal * 100),
-      payoutMultiplier: 1.87,
+      payoutMultiplier: 1.91,
       expectedValue: 0,
-      breakevenWinRate: 53.5,
-      duration: settings.tradeDurationSec,
+      breakevenWinRate: 52.4,
+      duration: tradeDuration,
       stake: riskDecision.recommendedStake,
       reasoning: "No positive-EV opportunity — recommend waiting.",
     };
@@ -209,6 +235,9 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   }
   if (bestEV && bestEV.edge < 0.02 && bestEV.isPositiveEV) warnings.push("Marginal EV edge — consider waiting for stronger setup");
   if (timingResult.waitReason) warnings.push(`Timing: ${timingResult.waitReason}`);
+  if (isDirProduct && bestEV && !bestEV.isPositiveEV && shouldTrade) {
+    warnings.push("Near-breakeven EV — direction model consensus justified this trade");
+  }
 
   const reasonParts = [
     `Quality: ${qualityScore}/100.`,
@@ -216,6 +245,7 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     bestEV ? `Best EV: ${(bestEV.expectedValue * 100).toFixed(1)}% (${bestEV.product}).` : "No positive EV.",
     `Regime: ${regimeOutput.regime.replace("_", " ")}.`,
     `Risk: ${riskDecision.riskLevel}.`,
+    `Duration: ${tradeDuration}t.`,
     shouldTrade ? "✓ All gates passed — executing." : `✗ SKIP: ${rejectReasons[0]}`,
   ];
 
@@ -235,6 +265,7 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
       recommendation,
       weightedScore,
       qualityScore,
+      optimizedDuration,
     },
     executionTimeMs: Date.now() - t0,
   };

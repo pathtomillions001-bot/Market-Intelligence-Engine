@@ -3,14 +3,47 @@ import { db } from "@workspace/db";
 import { tradesTable, accountsTable, settingsTable } from "@workspace/db";
 import { eq, desc, and, sql } from "drizzle-orm";
 import { ExecuteTradeBody, GetTradesQueryParams, GetTradeParams } from "@workspace/api-zod";
-import { analyzeMarket, updateSelfLearning } from "../lib/ai-engine";
-import { getTickHistory, DERIV_MARKETS, getCachedToken, executeLiveTrade, waitForContractResult, getLiveBalance } from "../lib/deriv";
-import { finalizeAnalysis, logTradeFeatures, shouldExecuteTrade } from "../lib/trade-helpers";
+import { tickManager, DERIV_MARKETS, getCachedToken, executeLiveTrade, waitForContractResult, getLiveBalance } from "../lib/deriv";
+import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
 import { logger } from "../lib/logger";
+import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 
 const router = Router();
 
 const DEMO_BALANCE = 10000;
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+function buildTradingSettingsForManual(s: any, preferredContractTypes: string[]): TradingSettings {
+  return {
+    maxRiskPerTrade:        s ? Number(s.maxRiskPerTrade) : 2,
+    minConfidenceThreshold: s ? Math.min(Number(s.minConfidenceThreshold), 55) : 38,
+    riskProfile:            (s?.riskProfile ?? "moderate") as "conservative" | "moderate" | "aggressive",
+    preferredContractTypes,
+    tradeDurationSec:       s?.tradeDurationSec ?? 5,
+    maxTradeStake:          s ? Number(s.maxTradeStake) : 500,
+    dailyLossLimit:         s ? Number(s.dailyLossLimit) : 30,
+    dailyTarget:            s ? Number(s.dailyTarget) : 50,
+    consecutiveLossLimit:   s?.consecutiveLossLimit ?? 3,
+    maxDrawdown:            s ? Number(s.maxDrawdown ?? 20) : 20,
+    requirePositiveEv:      s?.requirePositiveEv ?? true,
+    paperTradeMode:         s?.paperTradeMode ?? false,
+  };
+}
+
+function buildDailyStatsForManual(closedToday: any[]): DailyStats {
+  const wins = closedToday.filter((t) => t.status === "won").length;
+  const losses = closedToday.filter((t) => t.status === "lost").length;
+  const profit = closedToday.reduce((s: number, t: any) => s + Number(t.profit ?? 0), 0);
+  const sorted = [...closedToday].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  let consecutiveLosses = 0;
+  for (const t of sorted) { if (t.status === "lost") consecutiveLosses++; else break; }
+  let consecutiveWins = 0;
+  for (const t of sorted) { if (t.status === "won") consecutiveWins++; else break; }
+  return { tradesCount: closedToday.length, wins, losses, profit, consecutiveLosses, consecutiveWins };
+}
+
+// ── Stats ──────────────────────────────────────────────────────────────────────
 
 router.get("/stats", async (_req, res): Promise<void> => {
   const trades = await db.select().from(tradesTable).where(
@@ -120,6 +153,8 @@ router.get("/", async (req, res): Promise<void> => {
   res.json(trades.map(formatTrade));
 });
 
+// ── Manual trade execution ─────────────────────────────────────────────────────
+
 router.post("/", async (req, res): Promise<void> => {
   const parseResult = ExecuteTradeBody.safeParse(req.body);
   if (!parseResult.success) {
@@ -128,15 +163,14 @@ router.post("/", async (req, res): Promise<void> => {
   }
 
   const { symbol, contractType, stake, direction, isAutonomous, duration, durationUnit } = parseResult.data;
-  // barrier may be sent from the frontend but not in the Zod schema — read directly from body
-  const requestBarrier = typeof (req.body as any).barrier === "number" ? (req.body as any).barrier as number : undefined;
+  // barrier is in Zod schema — use it directly
+  const requestBarrier = parseResult.data.barrier ?? undefined;
 
   const accounts = await db.select().from(accountsTable).limit(1);
   const settings = await db.select().from(settingsTable).limit(1);
   const balance = accounts.length > 0 ? Number(accounts[0].balance) : DEMO_BALANCE;
   const maxRisk = settings.length > 0 ? Number(settings[0].maxRiskPerTrade) : 2;
   const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
-  const requirePositiveEv = settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true;
 
   if (stake > balance * (maxRisk / 100) * 5) {
     res.status(400).json({ error: `Stake ${stake.toFixed(2)} exceeds risk limit. Max: ${(balance * maxRisk / 100 * 5).toFixed(2)}` });
@@ -150,36 +184,74 @@ router.post("/", async (req, res): Promise<void> => {
   const market = DERIV_MARKETS.find((m) => m.symbol === symbol);
   const displayName = market?.displayName ?? symbol;
 
-  const prices = await getTickHistory(symbol, 30);
-  const rawAnalysis = analyzeMarket(symbol, market?.category ?? "synthetic", prices, balance, {
-    maxRiskPerTrade: maxRisk,
-    minConfidenceThreshold: settings.length > 0 ? Number(settings[0].minConfidenceThreshold) : 65,
-    riskProfile: settings.length > 0 ? settings[0].riskProfile : "moderate",
-    preferredContractTypes: settings.length > 0 ? settings[0].preferredContractTypes.split(",").filter(Boolean) : undefined,
-    tradeDurationSec: settings.length > 0 ? settings[0].tradeDurationSec : 5,
-  });
-
   const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
   const currency = accounts.length > 0 ? accounts[0].currency : "USD";
-  const finalized = await finalizeAnalysis(rawAnalysis, {
-    symbol,
-    currency,
-    token,
-    defaultDuration: rawAnalysis.recommendedDuration ?? (settings.length > 0 ? settings[0].tradeDurationSec : 5),
-    barrier: requestBarrier ?? rawAnalysis.digitBarrier,
-    skipProposal: paperTradeMode || !token,
-  });
-
-  const tradeDuration = duration ?? finalized.recommendedDuration ?? 5;
-  const isDigit = contractType.includes("DIGIT");
-  // For digit contracts, always ensure a valid barrier (user > AI > safe default)
-  const defaultBarrier = contractType === "DIGITOVER" ? 5 : contractType === "DIGITUNDER" ? 4 : undefined;
-  const barrier = isDigit ? (requestBarrier ?? rawAnalysis.digitBarrier ?? defaultBarrier) : undefined;
-
-  // Live trade when Deriv token is available (regardless of whether accounts table has a row)
   const isLiveTrade = !paperTradeMode && !!token;
 
-  let won: boolean, profit: number, payout: number, entryPrice: number, exitPrice: number;
+  // ── Run coordinator for rich AI context ──────────────────────────────────
+  const preferredContractTypes = [contractType];
+  const tradingSettings = buildTradingSettingsForManual(settings.length > 0 ? settings[0] : null, preferredContractTypes);
+
+  // Build daily stats
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
+  const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
+  const daily = buildDailyStatsForManual(closedToday);
+
+  const prices = tickManager.getTicks(symbol, 100);
+  const digits = market?.digitEnabled ? tickManager.getDigits(symbol, 300) : [];
+
+  const ctx: ScanContext = {
+    symbol,
+    displayName,
+    category: market?.category ?? "synthetic",
+    prices,
+    digits,
+    balance,
+    settings: tradingSettings,
+    daily,
+    token,
+    currency,
+  };
+
+  let analysis;
+  try {
+    const coordinatorOutput = await runCoordinator(ctx);
+    analysis = buildLegacyAnalysis(coordinatorOutput);
+  } catch (err) {
+    logger.warn({ err, symbol }, "Coordinator failed for manual trade — using defaults");
+    analysis = {
+      calibratedConfidence: 55,
+      winProbability: 55,
+      expectedValue: 0,
+      payoutMultiplier: 1.91,
+      breakevenWinRate: 52.4,
+      riskScore: 50,
+      reasoning: "Manual trade (coordinator unavailable)",
+      digitBarrier: requestBarrier,
+      recommendedDuration: duration ?? 5,
+    };
+  }
+
+  const tradeDuration = duration ?? (analysis as any).recommendedDuration ?? 5;
+  const isDigit = contractType.includes("DIGIT");
+
+  // For digit contracts, always ensure a valid barrier
+  const defaultBarrier = contractType === "DIGITOVER" ? 5 : contractType === "DIGITUNDER" ? 4 : undefined;
+  const barrier = isDigit
+    ? (requestBarrier ?? (analysis as any).digitBarrier ?? defaultBarrier)
+    : undefined;
+
+  const winProbability: number = (analysis as any).winProbability ?? 55;
+  const payoutMultiplier: number = (analysis as any).payoutMultiplier ?? 1.91;
+  const payout = stake * payoutMultiplier;
+
+  logger.info({
+    symbol, contractType, stake, barrier, duration: tradeDuration,
+    isLiveTrade, paperTradeMode, token: token ? "present" : "absent",
+  }, "Manual trade request");
+
+  let won: boolean, profit: number, entryPrice: number, exitPrice: number;
 
   if (isLiveTrade) {
     // Insert as "open" immediately so the journal shows it in-progress
@@ -191,16 +263,16 @@ router.post("/", async (req, res): Promise<void> => {
       stake: String(stake),
       direction,
       status: "open",
-      aiConfidence: String(finalized.calibratedConfidence),
-      aiRiskScore: String(finalized.riskScore),
+      aiConfidence: String(winProbability),
+      aiRiskScore: String((analysis as any).riskScore ?? 50),
       isAutonomous: isAutonomous ?? false,
-      agentReasoning: `${rawAnalysis.reasoning} EV=$${finalized.expectedValue.toFixed(2)} (breakeven ${finalized.breakevenWinRate}%)`,
+      agentReasoning: `[LIVE] ${(analysis as any).reasoning ?? "Manual trade"}`,
       duration: tradeDuration,
       durationUnit: durationUnit ?? "t",
     }).returning();
 
     try {
-      logger.info({ symbol, contractType, stake, barrier }, "Executing live trade");
+      logger.info({ symbol, contractType, stake, barrier }, "Executing live manual trade on Deriv");
       const liveResult = await executeLiveTrade(token!, {
         symbol,
         contractType,
@@ -215,23 +287,23 @@ router.post("/", async (req, res): Promise<void> => {
       won = contractResult.won;
       profit = contractResult.profit;
       exitPrice = contractResult.exitSpot;
-      payout = stake + Math.max(profit, 0);
       entryPrice = contractResult.entrySpot || liveResult.buyPrice;
     } catch (liveErr) {
       const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
-      logger.warn({ liveErrMsg: errMsg, symbol, contractType, barrier }, "Live trade failed — cancelling open trade");
+      logger.warn({ liveErrMsg: errMsg, symbol, contractType, barrier }, "Live manual trade failed");
       await db.update(tradesTable)
-        .set({ status: "lost", profit: String(-stake), payout: "0", closedAt: new Date() })
+        .set({ status: "lost", profit: String(-stake), payout: "0", closedAt: new Date(),
+               agentReasoning: `[LIVE — FAILED: ${errMsg}] ${(analysis as any).reasoning ?? ""}` })
         .where(eq(tradesTable.id, openTrade.id));
       res.status(500).json({ error: `Trade execution failed: ${errMsg}` });
       return;
     }
 
-    await updateSelfLearning(symbol, contractType, rawAnalysis.digitBarrier, won);
+    recordTradeOutcome(symbol, contractType, barrier ?? null, won, profit, stake);
 
     const [closedTrade] = await db.update(tradesTable).set({
       status: won ? "won" : "lost",
-      payout: String(payout),
+      payout: String(stake + Math.max(profit, 0)),
       profit: String(profit),
       entryPrice: String(entryPrice),
       exitPrice: String(exitPrice),
@@ -246,27 +318,21 @@ router.post("/", async (req, res): Promise<void> => {
       }
     } catch { /* ignore */ }
 
-    await logTradeFeatures(closedTrade.id, finalized, {
-      symbol, barrier: rawAnalysis.digitBarrier, tickWindow: rawAnalysis.tickWindow,
-      duration: tradeDuration, isPaperTrade: false,
-    });
-
     res.status(201).json(formatTrade(closedTrade));
     return;
   }
 
-  // Paper / demo trade simulation
-  const winProbability = finalized.winProbability / 100;
-  won = Math.random() < winProbability;
-  payout = stake * finalized.payoutMultiplier;
+  // ── Paper / demo trade simulation ─────────────────────────────────────────
+  const winProb = winProbability / 100;
+  won = Math.random() < winProb;
   profit = won ? payout - stake : -stake;
 
-  entryPrice = prices[prices.length - 1];
+  entryPrice = prices[prices.length - 1] ?? 100;
   exitPrice = won
     ? direction === "up" ? entryPrice * 1.001 : entryPrice * 0.999
     : direction === "up" ? entryPrice * 0.999 : entryPrice * 1.001;
 
-  await updateSelfLearning(symbol, contractType, rawAnalysis.digitBarrier, won);
+  recordTradeOutcome(symbol, contractType, barrier ?? null, won, profit, stake);
 
   const [trade] = await db.insert(tradesTable).values({
     symbol,
@@ -280,19 +346,14 @@ router.post("/", async (req, res): Promise<void> => {
     profit: String(profit),
     entryPrice: String(entryPrice),
     exitPrice: String(exitPrice),
-    aiConfidence: String(finalized.calibratedConfidence),
-    aiRiskScore: String(finalized.riskScore),
+    aiConfidence: String(winProbability),
+    aiRiskScore: String((analysis as any).riskScore ?? 50),
     isAutonomous: isAutonomous ?? false,
-    agentReasoning: `[${token ? "PAPER" : "DEMO"}] ${rawAnalysis.reasoning} EV=$${finalized.expectedValue.toFixed(2)}`,
+    agentReasoning: `[${token ? "PAPER" : "DEMO"}] ${(analysis as any).reasoning ?? "Manual trade"}`,
     duration: tradeDuration,
     durationUnit: durationUnit ?? "t",
     closedAt: new Date(),
   }).returning();
-
-  await logTradeFeatures(trade.id, finalized, {
-    symbol, barrier: rawAnalysis.digitBarrier, tickWindow: rawAnalysis.tickWindow,
-    duration: tradeDuration, isPaperTrade: true,
-  });
 
   // Update simulated balance for paper/demo trades
   try {

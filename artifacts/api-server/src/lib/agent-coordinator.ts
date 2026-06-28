@@ -8,7 +8,8 @@
  *
  *   Stage 1 (parallel):  FeatureEngineering + DailyStats fetch
  *   Stage 2 (parallel):  MarketRegime + Direction + Digit
- *   Stage 3:             EVCalculator (needs Direction + Digit outputs)
+ *   Stage 2.5:           Duration Optimizer (needs regime + features)
+ *   Stage 3:             EVCalculator (needs Direction + Digit + duration)
  *   Stage 4 (parallel):  RiskManager + ExecutionTiming + PerformanceFeedback
  *   Stage 5:             MasterDecision (aggregates all)
  *
@@ -26,6 +27,7 @@ import { runRiskManagerAgent } from "./agents/risk-manager";
 import { runExecutionTimingAgent } from "./agents/execution-timing";
 import { runPerformanceFeedbackAgent, recordTradeOutcome, getStrategyStats } from "./agents/performance-feedback";
 import { makeFinalDecision } from "./agents/master-decision";
+import { selectOptimalDuration } from "./agents/duration-optimizer";
 import { analyzeDigits } from "./deriv";
 import { getContractProposal } from "./deriv";
 import { logger } from "./logger";
@@ -92,6 +94,8 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   const features = feAgent.featureSet;
 
   // ── Stage 2: Regime + Direction + Digit (parallel) ────────────────────────
+  // Always run direction agent regardless of preferredContractTypes so the
+  // Agent Intelligence Panel always has direction data to display.
   const [regimeAgent, dirAgent, digitAgent] = await Promise.all([
     Promise.resolve(runMarketRegimeAgent(ctx, features)),
     Promise.resolve(runDirectionAgent(ctx, features, ctx.settings.tradeDurationSec)),
@@ -108,12 +112,20 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   const wantDigit = preferred.some((t) => t.startsWith("DIGIT"));
   const hasDigitEdge = digitResult?.hasEdge ?? false;
 
+  // ── Stage 2.5: Duration optimization ─────────────────────────────────────
+  // Select the optimal tick duration for the most likely contract type.
+  const candidateProduct = wantDigit && hasDigitEdge
+    ? (digitResult?.bestOption?.contractType ?? "DIGITOVER")
+    : (wantDirection ? (dirResult.direction === "up" ? "RISE" : "FALL") : "RISE");
+
+  const durationOpt = selectOptimalDuration(ctx, features, regime, candidateProduct);
+  const optimizedDuration = durationOpt.duration;
+
   // Best barrier for live payout fetch
   const bestDigitBarrier = digitResult?.bestOption?.barrier;
   const payoutStake = computeStake(ctx);
 
-  // ── Stage 3: EV calculation (needs direction + digit outputs) ─────────────
-  // Fetch live payouts asynchronously (with timeout fallback to defaults)
+  // ── Stage 3: EV calculation (needs direction + digit + optimal duration) ──
   let livePayouts: Record<string, number> | null = null;
   const contractTypesToFetch = [
     ...(wantDirection ? ["RISE", "FALL"] : []),
@@ -127,7 +139,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
         ctx.token,
         ctx.currency,
         payoutStake,
-        ctx.settings.tradeDurationSec,
+        optimizedDuration,
         bestDigitBarrier,
       );
     } catch {
@@ -159,17 +171,22 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   const strategyStats = perfAgent.stats;
 
   // ── Stage 5: Master Decision ──────────────────────────────────────────────
-  // Collect all agent outputs
-  const agentOutputs = {
+  // Always include direction in agentOutputs (for Agent Intelligence Panel display),
+  // even when wantDirection is false — it shows the panel is doing directional analysis.
+  const agentOutputs: Record<string, any> = {
     featureEngineering: feAgent as any,
     marketRegime: regimeAgent as any,
-    ...(wantDirection ? { direction: dirAgent as any } : {}),
-    ...(wantDigit && hasDigitEdge ? { digitDistribution: digitAgent as any } : {}),
+    direction: dirAgent as any,   // always include for panel display
     evCalculator: evAgent as any,
     riskManager: riskAgent as any,
     executionTiming: timingAgent as any,
     performanceFeedback: perfAgent as any,
   };
+
+  // Only include digitDistribution in weighted consensus if there's real digit edge
+  if (wantDigit && hasDigitEdge) {
+    agentOutputs["digitDistribution"] = digitAgent as any;
+  }
 
   // Build digit stats for the UI
   const digitStats = ctx.digits.length >= 10 ? analyzeDigits(ctx.digits.slice(-100)) : undefined;
@@ -185,7 +202,19 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
     probUp: dirResult.probUp,
     vol20: features.price.vol20,
     digitStats,
+    optimizedDuration,
   });
+
+  // Attach duration optimizer output to the agents record for the UI panel
+  (output.agents as any)["durationOptimizer"] = {
+    agentId: "durationOptimizer",
+    score: durationOpt.confidence,
+    confidence: durationOpt.confidence,
+    signal: "neutral" as const,
+    reasoning: durationOpt.reasoning,
+    data: { duration: durationOpt.duration, allScores: durationOpt.allScores },
+    executionTimeMs: 0,
+  };
 
   logger.debug({
     symbol: ctx.symbol,
@@ -193,6 +222,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
     quality: output.qualityScore,
     ev: bestEV?.expectedValue,
     regime,
+    duration: optimizedDuration,
     ms: Date.now() - t0,
   }, "Coordinator scan complete");
 

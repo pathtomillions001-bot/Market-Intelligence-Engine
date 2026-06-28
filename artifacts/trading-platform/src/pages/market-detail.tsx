@@ -43,6 +43,186 @@ const AGENT_LABELS: Record<string, string> = {
   tradeExecution: "Trade Execution", selfLearning: "Self-Learning Performance",
 };
 
+// ── Agent Intelligence Panel ───────────────────────────────────────────────────
+
+const AGENT_META: Record<string, { label: string; icon: string; description: string }> = {
+  featureEngineering: { label: "Feature Engineering", icon: "⚙", description: "Extracts multi-horizon price/digit features" },
+  marketRegime:       { label: "Market Regime",       icon: "📊", description: "Classifies trend/volatility/regime state" },
+  direction:          { label: "Direction Model",     icon: "🧭", description: "ML ensemble: RF + GB directional probability" },
+  digitDistribution:  { label: "Digit Distribution",  icon: "🔢", description: "Multinomial + Markov EV-ranked barrier scoring" },
+  evCalculator:       { label: "EV Calculator",       icon: "💰", description: "Expected value vs Deriv payout analysis" },
+  riskManager:        { label: "Risk Manager",        icon: "🛡", description: "Portfolio risk, drawdown, stake sizing" },
+  executionTiming:    { label: "Execution Timing",    icon: "⏱", description: "Entry quality: velocity, momentum, z-score" },
+  performanceFeedback:{ label: "Performance Feedback",icon: "📈", description: "Historical win rates and strategy drift" },
+  masterDecision:     { label: "Master Decision",     icon: "🎯", description: "Final gate: EV + timing + consensus aggregation" },
+  durationOptimizer:  { label: "Duration Optimizer",  icon: "⌛", description: "Optimal tick duration: volatility + regime + Hurst" },
+};
+
+const AGENT_ORDER = [
+  "featureEngineering", "marketRegime", "direction", "digitDistribution",
+  "evCalculator", "riskManager", "executionTiming", "performanceFeedback",
+  "durationOptimizer", "masterDecision",
+];
+
+function AgentSignalBadge({ signal }: { signal: string }) {
+  const map: Record<string, string> = {
+    strong_buy: "bg-green-500/15 text-green-400 border-green-500/30",
+    buy: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+    neutral: "bg-zinc-500/15 text-zinc-400 border-zinc-600/30",
+    sell: "bg-red-500/15 text-red-400 border-red-500/30",
+    strong_sell: "bg-rose-500/15 text-rose-500 border-rose-500/30",
+  };
+  const label: Record<string, string> = {
+    strong_buy: "STRONG BUY", buy: "BUY", neutral: "NEUTRAL", sell: "SELL", strong_sell: "STRONG SELL",
+  };
+  return (
+    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${map[signal] ?? map["neutral"]}`}>
+      {label[signal] ?? signal.toUpperCase()}
+    </span>
+  );
+}
+
+function AgentScoreRing({ score }: { score: number }) {
+  const color = score >= 70 ? "#22c55e" : score >= 50 ? "#f59e0b" : "#ef4444";
+  const r = 12, circ = 2 * Math.PI * r;
+  const fill = (score / 100) * circ;
+  return (
+    <svg width="32" height="32" className="shrink-0">
+      <circle cx="16" cy="16" r={r} fill="none" stroke="hsl(var(--secondary))" strokeWidth="3" />
+      <circle cx="16" cy="16" r={r} fill="none" stroke={color} strokeWidth="3"
+        strokeDasharray={`${fill} ${circ}`} strokeLinecap="round"
+        transform="rotate(-90 16 16)" />
+      <text x="16" y="20" textAnchor="middle" fontSize="8" fontWeight="bold" fill={color}>{score}</text>
+    </svg>
+  );
+}
+
+function AgentIntelligencePanel({ agentOutputs, recommendation }: { agentOutputs: any; recommendation: any }) {
+  if (!agentOutputs || Object.keys(agentOutputs).length === 0) {
+    return (
+      <Card className="bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Activity className="w-4 h-4 text-primary" />
+            Agent Intelligence Panel
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="text-xs text-muted-foreground text-center py-4">
+            Loading agent analysis... (refresh in a moment)
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const masterAgent = agentOutputs["masterDecision"];
+  const shouldTrade = masterAgent?.data?.shouldTrade ?? false;
+  const rejectReasons: string[] = masterAgent?.data?.rejectReasons ?? [];
+  const weightedScore = masterAgent?.data?.weightedScore ?? 0;
+  const qualityScore = masterAgent?.data?.qualityScore ?? 0;
+  const optimizedDuration = masterAgent?.data?.optimizedDuration ?? recommendation?.recommendedDuration ?? 5;
+
+  const orderedAgents = AGENT_ORDER.filter((k) => agentOutputs[k]);
+
+  return (
+    <Card className="bg-card">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Activity className="w-4 h-4 text-primary" />
+            Agent Intelligence Panel
+            <span className="ml-1 w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            <div className={`text-[10px] font-bold px-2 py-1 rounded-full border ${
+              shouldTrade
+                ? "bg-green-500/15 text-green-400 border-green-500/30"
+                : "bg-amber-500/10 text-amber-400 border-amber-500/30"
+            }`}>
+              {shouldTrade ? "✓ TRADE" : "⏸ WAIT"}
+            </div>
+            <div className="text-[10px] font-mono text-muted-foreground">
+              Q:{qualityScore} · {optimizedDuration}t
+            </div>
+          </div>
+        </div>
+
+        {/* Master summary row */}
+        <div className="mt-2 grid grid-cols-3 gap-2">
+          <div className="text-center p-2 rounded-lg bg-secondary/30 border border-border">
+            <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">Consensus</div>
+            <div className={`text-base font-mono font-bold ${weightedScore >= 60 ? "text-green-400" : weightedScore >= 45 ? "text-amber-400" : "text-red-400"}`}>{weightedScore.toFixed(0)}<span className="text-xs text-muted-foreground">/100</span></div>
+          </div>
+          <div className="text-center p-2 rounded-lg bg-secondary/30 border border-border">
+            <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">Duration</div>
+            <div className="text-base font-mono font-bold text-primary">{optimizedDuration}<span className="text-xs text-muted-foreground"> ticks</span></div>
+          </div>
+          <div className="text-center p-2 rounded-lg bg-secondary/30 border border-border">
+            <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">Agents</div>
+            <div className="text-base font-mono font-bold">{orderedAgents.length}<span className="text-xs text-muted-foreground"> active</span></div>
+          </div>
+        </div>
+
+        {/* Reject reasons */}
+        {rejectReasons.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {rejectReasons.map((r, i) => (
+              <div key={i} className="flex items-start gap-1.5 px-2 py-1.5 rounded bg-amber-500/5 border border-amber-500/15 text-[10px] text-amber-400">
+                <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
+                <span>{r}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardHeader>
+
+      <CardContent className="space-y-1.5 pt-0">
+        {orderedAgents.map((key) => {
+          const agent = agentOutputs[key];
+          const meta = AGENT_META[key] ?? { label: key, icon: "◈", description: "" };
+          const isLast = key === "masterDecision";
+          return (
+            <div key={key}
+              className={`flex items-start gap-3 p-2.5 rounded-lg border transition-colors ${
+                isLast
+                  ? "border-primary/30 bg-primary/5"
+                  : agent.score >= 70
+                    ? "border-green-500/15 bg-secondary/20"
+                    : agent.score >= 50
+                      ? "border-border bg-secondary/10"
+                      : "border-red-500/15 bg-red-500/5"
+              }`}
+            >
+              {/* Score ring */}
+              <AgentScoreRing score={agent.score ?? 0} />
+
+              {/* Content */}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+                  <span className="text-[10px] font-bold text-foreground">{meta.icon} {meta.label}</span>
+                  <AgentSignalBadge signal={agent.signal ?? "neutral"} />
+                  {agent.confidence != null && (
+                    <span className="text-[9px] text-muted-foreground font-mono">
+                      conf:{agent.confidence}%
+                    </span>
+                  )}
+                  {agent.executionTimeMs != null && agent.executionTimeMs > 0 && (
+                    <span className="text-[9px] text-zinc-600 font-mono ml-auto">{agent.executionTimeMs}ms</span>
+                  )}
+                </div>
+                <p className="text-[10px] text-muted-foreground leading-relaxed line-clamp-2" title={agent.reasoning}>
+                  {agent.reasoning || meta.description}
+                </p>
+              </div>
+            </div>
+          );
+        })}
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── Digit distribution bar ─────────────────────────────────────────────────────
 function DigitBar({ digit, count, pct, hot, cold, barrier, contractType }: {
   digit: number; count: number; pct: number; hot: boolean; cold: boolean; barrier?: number; contractType?: string;
@@ -665,21 +845,9 @@ export default function MarketDetail() {
         </Card>
       )}
 
-      {/* 8 Agent Scores */}
-      {market.agentScores && (
-        <Card className="bg-card">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm">8-Agent AI Scoring</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {Object.entries(market.agentScores).map(([key, agent]: [string, any]) => (
-                <AgentBar key={key} name={AGENT_LABELS[key] ?? key} score={agent.score} weight={agent.weight} signal={agent.signal} reasoning={agent.reasoning} />
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      {/* Agent Intelligence Panel — live 9-agent breakdown */}
+      <AgentIntelligencePanel agentOutputs={(rec as any)?.agentOutputs} recommendation={recommendation} />
+
 
       {/* Trade dialog */}
       <Dialog open={tradeDialog} onOpenChange={setTradeDialog}>

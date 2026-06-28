@@ -339,13 +339,43 @@ function reconstructPrices(returns: number[], base = 1000): number[] {
   return prices;
 }
 
-/** Feature-based probability when no model is trained yet */
+/**
+ * Feature-based probability when no ML model is trained yet.
+ *
+ * Produces more decisive signals than a naive upFrac average by incorporating:
+ *   - Multi-horizon up fractions (base)
+ *   - Momentum at 1t/5t/10t (scaled via tanh to keep bounded)
+ *   - Hurst amplification (trending markets → amplify momentum signal)
+ *   - Autocorrelation lag-1 (persistence of current direction)
+ *   - z-score reversal tendency (extreme ticks often mean-revert)
+ */
 function featureBasedProb(features: FeatureSet): number {
   const pf = features.price;
-  // Weight recent fraction of up moves at multiple horizons
-  return Math.max(0.15, Math.min(0.85,
-    pf.upFrac1 * 0.35 + pf.upFrac5 * 0.40 + pf.upFrac10 * 0.25
-  ));
+
+  // Base: weighted fraction of up ticks across horizons
+  const fracBase = pf.upFrac1 * 0.30 + pf.upFrac5 * 0.45 + pf.upFrac10 * 0.25;
+
+  // Momentum adjustment: tanh keeps this bounded to ±0.12
+  const mom5Adj  = Math.tanh(pf.momentum5  * 600) * 0.12;
+  const mom10Adj = Math.tanh(pf.momentum10 * 400) * 0.06;
+
+  // Hurst amplification: trending (H>0.55) amplifies momentum signal by up to 35%
+  const hurstMult = pf.hurst > 0.58 ? 1.35
+    : pf.hurst > 0.55 ? 1.15
+    : pf.hurst < 0.45 ? 0.75
+    : pf.hurst < 0.42 ? 0.60
+    : 1.0;
+
+  // Autocorrelation lag-1 (positive = momentum, contributes ±0.06)
+  const acAdj = Math.tanh(pf.autocorr1 * 5) * 0.06;
+
+  // z-score: extreme positive tick → slight down bias (mean-reversion), and vice-versa
+  const zAdj = pf.zScoreLast > 2.0 ? -0.04
+    : pf.zScoreLast < -2.0 ? 0.04
+    : 0;
+
+  const raw = fracBase + (mom5Adj + mom10Adj) * hurstMult + acAdj + zAdj;
+  return Math.max(0.15, Math.min(0.85, raw));
 }
 
 // ── Agent runner ──────────────────────────────────────────────────────────────

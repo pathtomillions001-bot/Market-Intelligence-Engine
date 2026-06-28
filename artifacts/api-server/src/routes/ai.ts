@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@workspace/db";
-import { sql, desc } from "drizzle-orm";
+import { sql, desc, eq } from "drizzle-orm";
 import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo, analyzeDigits, analyzeTrend } from "../lib/deriv";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
@@ -288,6 +288,7 @@ async function runAutonomousLoop() {
     const effectiveBarrier = rec.barrier;
     const duration = rec.duration;
     const payout = stake * rec.payoutMultiplier;
+    const barrierToStore = effectiveContractType.includes("DIGIT") ? (effectiveBarrier ?? null) : null;
 
     let won: boolean, profit: number, entryPrice: number, exitPrice: number;
 
@@ -298,7 +299,61 @@ async function runAutonomousLoop() {
       entryPrice = ctx.prices[ctx.prices.length - 1] ?? 100;
       exitPrice = entryPrice;
       logger.info({ symbol: bestMarket.symbol, paper: true, won, ev: analysis.expectedValue }, "Paper trade");
+
+      // Paper trades: insert completed record immediately
+      recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
+
+      await db.insert(tradesTable).values({
+        symbol: bestMarket.symbol,
+        displayName: bestMarket.displayName,
+        contractType: effectiveContractType,
+        barrier: barrierToStore,
+        stake: String(stake),
+        direction: output.direction,
+        status: won ? "won" : "lost",
+        payout: String(payout),
+        profit: String(profit),
+        entryPrice: String(entryPrice),
+        exitPrice: String(exitPrice),
+        aiConfidence: String(rec.winProbability),
+        aiRiskScore: String(output.riskScore),
+        isAutonomous: true,
+        agentReasoning: `[PAPER] ${output.reasoning}`,
+        duration,
+        durationUnit: "t",
+        closedAt: new Date(),
+      });
     } else {
+      // ── Live trade: insert "open" FIRST so journal shows it immediately ──
+      const [openTrade] = await db.insert(tradesTable).values({
+        symbol: bestMarket.symbol,
+        displayName: bestMarket.displayName,
+        contractType: effectiveContractType,
+        barrier: barrierToStore,
+        stake: String(stake),
+        direction: output.direction,
+        status: "open",
+        aiConfidence: String(rec.winProbability),
+        aiRiskScore: String(output.riskScore),
+        isAutonomous: true,
+        agentReasoning: output.reasoning,
+        duration,
+        durationUnit: "t",
+      }).returning();
+
+      // Broadcast so journal updates immediately
+      broadcastSSE("trade_started", {
+        id: openTrade.id,
+        symbol: bestMarket.symbol,
+        contract: effectiveContractType,
+        barrier: barrierToStore,
+        stake,
+        duration,
+        regime: output.regime,
+        confidence: rec.winProbability,
+        ev: analysis.expectedValue,
+      });
+
       try {
         const liveResult = await executeLiveTrade(token, {
           symbol: bestMarket.symbol,
@@ -310,50 +365,37 @@ async function runAutonomousLoop() {
           barrier: effectiveContractType.includes("DIGIT") ? effectiveBarrier : undefined,
         });
         entryPrice = liveResult.buyPrice;
-        const contractResult = await waitForContractResult(token, liveResult.contractId, (duration + 5) * 1000);
+        const contractResult = await waitForContractResult(token, liveResult.contractId, (duration + 15) * 1000);
         won = contractResult.won;
         profit = contractResult.profit;
         exitPrice = contractResult.exitSpot;
         await syncLiveBalance(token);
       } catch (liveErr) {
-        logger.warn({ liveErrMsg: liveErr instanceof Error ? liveErr.message : String(liveErr) }, "Live trade failed — skipping");
+        const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
+        logger.warn({ liveErrMsg: errMsg, symbol: bestMarket.symbol, contractType: effectiveContractType }, "Live autonomous trade failed");
+        // Mark the open record as lost so it doesn't linger in the journal
+        await db.update(tradesTable)
+          .set({ status: "lost", profit: String(-stake), payout: "0", closedAt: new Date(),
+                 agentReasoning: `${output.reasoning} [EXECUTION FAILED: ${errMsg}]` })
+          .where(eq(tradesTable.id, openTrade.id));
+        broadcastSSE("trade_completed", { id: openTrade.id, symbol: bestMarket.symbol, won: false,
+          profit: (-stake).toFixed(2), contract: effectiveContractType, error: errMsg });
         scheduleNext(false);
         return;
       }
+
+      // Update the open record to final status
+      recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
+
+      await db.update(tradesTable).set({
+        status: won ? "won" : "lost",
+        payout: String(payout),
+        profit: String(profit),
+        entryPrice: String(entryPrice),
+        exitPrice: String(exitPrice),
+        closedAt: new Date(),
+      }).where(eq(tradesTable.id, openTrade.id));
     }
-
-    // Record outcome in performance feedback agent
-    recordTradeOutcome(
-      bestMarket.symbol,
-      effectiveContractType,
-      effectiveBarrier ?? null,
-      won,
-      profit,
-      stake,
-    );
-
-    const barrierToStore = effectiveContractType.includes("DIGIT") ? (effectiveBarrier ?? null) : null;
-
-    await db.insert(tradesTable).values({
-      symbol: bestMarket.symbol,
-      displayName: bestMarket.displayName,
-      contractType: effectiveContractType,
-      barrier: barrierToStore,
-      stake: String(stake),
-      direction: output.direction,
-      status: won ? "won" : "lost",
-      payout: String(payout),
-      profit: String(profit),
-      entryPrice: String(entryPrice),
-      exitPrice: String(exitPrice),
-      aiConfidence: String(rec.winProbability),
-      aiRiskScore: String(output.riskScore),
-      isAutonomous: true,
-      agentReasoning: `${paperTradeMode ? "[PAPER] " : ""}${output.reasoning}`,
-      duration,
-      durationUnit: "t",
-      closedAt: new Date(),
-    });
 
     tradesExecutedToday++;
     lastTradeTime = new Date();

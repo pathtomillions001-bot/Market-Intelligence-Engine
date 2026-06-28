@@ -98,9 +98,11 @@ export function assessEntryTiming(
   }
 
   // ── 5. Regime-appropriate timing ─────────────────────────────────────────
+  // Direction contracts: reduced penalty so they can still fire in choppy markets.
+  // The direction model's own probability already accounts for regime quality.
   if (isDirection && (regime === "choppy" || regime === "volatile")) {
-    score -= 15;
-    reasons.push(`${regime} regime unfavorable for directional bets`);
+    score -= 8; // reduced from -15 — direction model handles regime internally
+    reasons.push(`${regime} regime — direction model accounts for this`);
   }
   if (isDigit && regime === "trending_up") {
     score -= 5; // mild penalty — trending markets slightly less useful for digit
@@ -109,13 +111,16 @@ export function assessEntryTiming(
   // ── 6. Autocorrelation (entry alignment) ─────────────────────────────────
   // Positive ac1 = momentum, good for direction. Negative ac1 = reversal tendency.
   if (isDirection && pf.autocorr1 > 0.15) {
-    score += 8; // momentum market — good entry for direction bets
+    score += 10; // momentum market — good entry for direction bets
   } else if (isDirection && pf.autocorr1 < -0.15) {
-    score -= 8; // strongly mean-reverting — tricky for direction
+    score -= 6; // reduced from -8: mean-reverting is tricky but direction model adapts
   }
 
   score = Math.max(0, Math.min(100, score));
-  const isGoodTiming = score >= 55 && notOnExtreme;
+  // Direction trades use a lower threshold (48 vs 55) because the direction model's
+  // own probability signal is the primary edge, not the timing score.
+  const timingThreshold = isDirection ? 48 : 55;
+  const isGoodTiming = score >= timingThreshold && notOnExtreme;
 
   return {
     isGoodTiming,

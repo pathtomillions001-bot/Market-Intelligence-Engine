@@ -2,30 +2,33 @@
  * Digit Distribution Agent
  *
  * RESPONSIBILITY: Analyze digit sequences exclusively for OVER/UNDER contracts.
- * This agent is completely separated from the direction agent because Over/Under
- * mechanics are fundamentally different from Rise/Fall:
- *   - Only the LAST DIGIT of the exit price matters
- *   - Duration = number of ticks (we only care about the Nth tick)
- *   - Distribution should be near-uniform (0-9, each ~10%) but can have temporary bias
+ *
+ * Selection philosophy (Task 1 redesign):
+ *   - Rank ALL Over and Under barriers by probability-adjusted expected value
+ *   - Prefer CONSERVATIVE options (OVER 1-4, UNDER 6-9) when their EV is within
+ *     CONSERVATIVE_BONUS_THRESHOLD of the best option. This avoids chasing
+ *     high-payout low-probability bets (OVER 7, OVER 8, UNDER 1, UNDER 2)
+ *     that produce poor real-world performance despite occasional high payouts.
+ *   - The chosen contract is always justified by the probability model — we
+ *     never force a particular digit if another has materially better support.
+ *
+ * Conservative definitions:
+ *   OVER barriers 0-4: win probability ≥ 50% by uniform distribution
+ *   UNDER barriers 6-9: win probability ≥ 40% by uniform distribution
+ *   → These are inherently lower risk per-contract
  *
  * Methods:
  *   1. Multinomial frequency model (smoothed counts)
  *   2. First-order Markov chain (transition probabilities)
  *   3. Chi-square test to measure deviation from uniform
- *   4. EV-weighted barrier selection across all possible barriers
- *
- * Key insight: OVER barrier=B wins when digit > B → P(win) = fraction of digits > B.
- * UNDER barrier=B wins when digit < B → P(win) = fraction of digits < B.
- * We pick the barrier that maximizes positive expected value given the actual payout.
+ *   4. EV-weighted barrier selection with conservative preference
  */
 
 import type { AgentOutput, ScanContext } from "./types";
 import { scoreToSignal } from "./types";
 import type { DigitFeatures } from "./feature-engineering";
 
-// ── Deriv payout table (approximate, validated against live Deriv prices) ─────
-// OVER barrier B: wins when last digit > B. B=0 → 9/10 digits win → lowest payout.
-// UNDER barrier B: wins when last digit < B. B=9 → 9/10 digits win → lowest payout.
+// ── Deriv payout table (validated against live Deriv API) ─────────────────────
 const OVER_PAYOUTS: Record<number, number> = {
   0: 1.05, 1: 1.11, 2: 1.19, 3: 1.32, 4: 1.50,
   5: 1.96, 6: 2.65, 7: 4.36, 8: 9.54,
@@ -45,14 +48,28 @@ const UNDER_THEORETICAL: Record<number, number> = {
   6: 6/10, 7: 7/10, 8: 8/10, 9: 9/10,
 };
 
-// ── Markov chain for digit sequences ─────────────────────────────────────────
+// ── Conservative barrier definitions ─────────────────────────────────────────
+// Conservative = higher win probability = lower payout multiplier
+// These are reliable, compounding plays vs gambling on extremes.
+function isConservativeBarrier(contractType: "DIGITOVER" | "DIGITUNDER", barrier: number): boolean {
+  if (contractType === "DIGITOVER") return barrier <= 4;  // OVER 0-4: win prob ≥50%
+  if (contractType === "DIGITUNDER") return barrier >= 6; // UNDER 6-9: win prob ≥40%
+  return false;
+}
+
+// Conservative preference: if a conservative option has EV within this fraction
+// of the best option, prefer it. E.g. 0.25 means "within 25% of best EV".
+const CONSERVATIVE_BONUS_THRESHOLD = 0.25;
+// Extra score multiplier for conservative options to break ties
+const CONSERVATIVE_BONUS_SCORE = 0.15;
+
+// ── Markov chain ──────────────────────────────────────────────────────────────
 
 function buildTransitionMatrix(digits: number[]): number[][] {
   const matrix = Array.from({ length: 10 }, () => Array(10).fill(0));
   for (let i = 1; i < digits.length; i++) {
     matrix[digits[i - 1]][digits[i]]++;
   }
-  // Laplace smoothing
   return matrix.map((row) => {
     const sum = row.reduce((a, b) => a + b, 0) + 10;
     return row.map((c) => (c + 1) / sum);
@@ -63,7 +80,7 @@ function markovNextProbs(trans: number[][], lastDigit: number): number[] {
   return trans[lastDigit];
 }
 
-// ── Chi-square test ──────────────────────────────────────────────────────────
+// ── Chi-square test ───────────────────────────────────────────────────────────
 
 function chiSquare(digits: number[]): number {
   const counts = Array(10).fill(0);
@@ -72,8 +89,7 @@ function chiSquare(digits: number[]): number {
   return counts.reduce((s, c) => s + ((c - expected) ** 2) / expected, 0);
 }
 
-// ── Optimal window selection ─────────────────────────────────────────────────
-// Try multiple windows and pick the one with highest statistical signal
+// ── Optimal window selection ──────────────────────────────────────────────────
 const WINDOWS = [30, 50, 75, 100, 150, 200];
 
 function selectOptimalWindow(digits: number[]): number {
@@ -84,26 +100,26 @@ function selectOptimalWindow(digits: number[]): number {
     const chi2 = chiSquare(window);
     const trans = buildTransitionMatrix(window);
     const last = window[window.length - 1];
-    // Low Markov entropy = more predictable next digit
     const markovEntropy = -trans[last].reduce((s, p) => p > 0 ? s + p * Math.log2(p) : s, 0);
-    // Score: more chi2 deviation + less Markov entropy = better edge
     const score = chi2 * 0.4 - markovEntropy * 0.5 + Math.log(w) * 0.1;
     if (score > bestScore) { bestScore = score; bestWindow = w; }
   }
   return Math.min(bestWindow, digits.length);
 }
 
-// ── Barrier scoring ───────────────────────────────────────────────────────────
+// ── Barrier scoring with conservative preference ───────────────────────────────
 
 export interface BarrierOption {
   contractType: "DIGITOVER" | "DIGITUNDER";
   barrier: number;
-  winProbability: number;      // empirical from combined model
-  theoreticalWinProb: number;  // from uniform assumption
-  edge: number;                // empirical - theoretical (positive = favorable)
+  winProbability: number;
+  theoreticalWinProb: number;
+  edge: number;               // empirical - theoretical
   payout: number;
-  expectedValue: number;       // EV per $1 stake: winProb * payout - 1
-  evScore: number;             // rank metric
+  expectedValue: number;      // EV per $1 stake: winProb * payout - 1
+  evScore: number;            // primary ranking metric
+  isConservative: boolean;    // true for lower-risk barriers
+  adjustedEvScore: number;    // evScore with conservative bonus applied
 }
 
 function scoreAllBarriers(
@@ -116,7 +132,7 @@ function scoreAllBarriers(
     markovProbs[d] * 0.55 + multinomialProbs[d] * 0.45
   );
 
-  const options: BarrierOption[] = [];
+  const rawOptions: BarrierOption[] = [];
 
   // OVER barriers: B from 0 to 8
   for (let b = 0; b <= 8; b++) {
@@ -124,8 +140,10 @@ function scoreAllBarriers(
     const payout = OVER_PAYOUTS[b] ?? 1.1;
     const theoretical = OVER_THEORETICAL[b];
     const edge = pWin - theoretical;
-    const ev = pWin * payout - 1;  // EV per $1 stake
-    options.push({
+    const ev = pWin * payout - 1;
+    const isConservative = isConservativeBarrier("DIGITOVER", b);
+    const baseEvScore = ev > 0 ? edge * (1 + ev) : -1;
+    rawOptions.push({
       contractType: "DIGITOVER",
       barrier: b,
       winProbability: pWin,
@@ -133,7 +151,9 @@ function scoreAllBarriers(
       edge,
       payout,
       expectedValue: ev,
-      evScore: ev > 0 ? edge * (1 + ev) : -1,
+      evScore: baseEvScore,
+      isConservative,
+      adjustedEvScore: baseEvScore, // will be set below
     });
   }
 
@@ -144,7 +164,9 @@ function scoreAllBarriers(
     const theoretical = UNDER_THEORETICAL[b];
     const edge = pWin - theoretical;
     const ev = pWin * payout - 1;
-    options.push({
+    const isConservative = isConservativeBarrier("DIGITUNDER", b);
+    const baseEvScore = ev > 0 ? edge * (1 + ev) : -1;
+    rawOptions.push({
       contractType: "DIGITUNDER",
       barrier: b,
       winProbability: pWin,
@@ -152,38 +174,63 @@ function scoreAllBarriers(
       edge,
       payout,
       expectedValue: ev,
-      evScore: ev > 0 ? edge * (1 + ev) : -1,
+      evScore: baseEvScore,
+      isConservative,
+      adjustedEvScore: baseEvScore,
     });
   }
 
-  return options.sort((a, b) => b.evScore - a.evScore);
+  // ── Apply conservative preference ────────────────────────────────────────
+  const positiveEV = rawOptions.filter((o) => o.expectedValue > 0);
+  if (positiveEV.length === 0) return rawOptions.sort((a, b) => b.evScore - a.evScore);
+
+  const bestEV = positiveEV.reduce((best, o) => o.expectedValue > best.expectedValue ? o : best, positiveEV[0]);
+
+  for (const opt of rawOptions) {
+    if (opt.expectedValue <= 0) {
+      opt.adjustedEvScore = opt.evScore;
+      continue;
+    }
+
+    // Conservative bonus: if this option's EV is within CONSERVATIVE_BONUS_THRESHOLD
+    // of the best option's EV, and it IS conservative, boost its ranking score.
+    const evRatio = opt.expectedValue / Math.max(0.001, bestEV.expectedValue);
+    const isCompetitive = evRatio >= (1 - CONSERVATIVE_BONUS_THRESHOLD);
+
+    if (opt.isConservative && isCompetitive) {
+      // Boost the adjustedEvScore to prefer this conservative option
+      opt.adjustedEvScore = opt.evScore * (1 + CONSERVATIVE_BONUS_SCORE);
+    } else {
+      opt.adjustedEvScore = opt.evScore;
+    }
+  }
+
+  // Sort by adjustedEvScore descending
+  return rawOptions.sort((a, b) => b.adjustedEvScore - a.adjustedEvScore);
 }
 
 // ── Main digit analysis ───────────────────────────────────────────────────────
 
 export interface DigitAnalysisResult {
   bestOption: BarrierOption | null;
-  topOptions: BarrierOption[];  // top 3 by EV
+  topOptions: BarrierOption[];
   windowSize: number;
   chiSquare: number;
   hasEdge: boolean;
   multinomialProbs: number[];
   markovProbs: number[];
   lastDigit: number;
+  conservativeSelected: boolean;  // whether conservative preference was applied
 }
 
 export function analyzeDigitEdge(digitFeatures: DigitFeatures): DigitAnalysisResult {
   const digits = digitFeatures.digits;
   if (digits.length < 30) {
     return {
-      bestOption: null,
-      topOptions: [],
-      windowSize: 0,
-      chiSquare: 0,
-      hasEdge: false,
-      multinomialProbs: Array(10).fill(0.1),
-      markovProbs: Array(10).fill(0.1),
-      lastDigit: digitFeatures.lastDigit,
+      bestOption: null, topOptions: [], windowSize: 0, chiSquare: 0,
+      hasEdge: false, multinomialProbs: Array(10).fill(0.1),
+      markovProbs: Array(10).fill(0.1), lastDigit: digitFeatures.lastDigit,
+      conservativeSelected: false,
     };
   }
 
@@ -193,65 +240,69 @@ export function analyzeDigitEdge(digitFeatures: DigitFeatures): DigitAnalysisRes
   const trans = buildTransitionMatrix(window);
   const lastDigit = window[window.length - 1];
 
-  // Multinomial (frequency model)
   const counts = Array(10).fill(0);
   for (const d of window) counts[d]++;
   const total = window.length;
-  const multinomialProbs = counts.map((c) => (c + 1) / (total + 10)); // Laplace
-
+  const multinomialProbs = counts.map((c) => (c + 1) / (total + 10));
   const markovProbs = markovNextProbs(trans, lastDigit);
 
   const allOptions = scoreAllBarriers(window, markovProbs, multinomialProbs);
-  const positiveEV = allOptions.filter((o) => o.expectedValue > 0.01);
+
+  // Filter to only positive EV options, already sorted by adjustedEvScore
+  const positiveEV = allOptions.filter((o) => o.expectedValue > 0.005);
   const bestOption = positiveEV.length > 0 ? positiveEV[0] : null;
+
+  // Check if conservative preference was applied (i.e., best option is conservative)
+  const conservativeSelected = bestOption?.isConservative ?? false;
 
   return {
     bestOption,
-    topOptions: positiveEV.slice(0, 3),
+    topOptions: positiveEV.slice(0, 5),
     windowSize,
     chiSquare: chi2,
-    hasEdge: bestOption !== null && bestOption.edge > 0.02,
+    hasEdge: bestOption !== null && bestOption.edge > 0.015,
     multinomialProbs,
     markovProbs,
     lastDigit,
+    conservativeSelected,
   };
 }
 
 // ── Agent runner ──────────────────────────────────────────────────────────────
 
-export function runDigitAgent(ctx: ScanContext, digitFeatures: DigitFeatures | null): AgentOutput & { digitResult: DigitAnalysisResult | null } {
+export function runDigitAgent(
+  ctx: ScanContext,
+  digitFeatures: DigitFeatures | null,
+): AgentOutput & { digitResult: DigitAnalysisResult | null } {
   const t0 = Date.now();
 
   if (!digitFeatures || digitFeatures.digits.length < 30) {
     return {
       agentId: "digitDistribution",
-      score: 0,
-      confidence: 0,
-      signal: "neutral",
+      score: 0, confidence: 0, signal: "neutral",
       reasoning: "Insufficient digit data (need ≥30 ticks).",
-      data: {},
-      executionTimeMs: Date.now() - t0,
-      digitResult: null,
+      data: {}, executionTimeMs: Date.now() - t0, digitResult: null,
     };
   }
 
   const result = analyzeDigitEdge(digitFeatures);
   const best = result.bestOption;
 
-  // Agent score: how strong is the digit edge?
   let score = 0;
   let reasoning = "No positive-EV digit setup found.";
 
   if (best) {
-    // Scale score based on EV quality
-    // EV of 0 = breakeven (score ~55), EV of 0.10 = excellent (score ~85)
     const evScore = Math.min(100, 50 + best.expectedValue * 400);
     const edgeScore = Math.min(100, 50 + best.edge * 500);
     const chi2Bonus = Math.min(10, result.chiSquare * 0.5);
     score = Math.round((evScore * 0.6 + edgeScore * 0.3 + chi2Bonus * 0.1));
 
+    const conservativeNote = best.isConservative
+      ? ` [CONSERVATIVE — preferred for stability]`
+      : ` [HIGH-RISK barrier — only selected because EV is materially superior]`;
+
     reasoning = [
-      `Best: ${best.contractType} barrier=${best.barrier}`,
+      `Best: ${best.contractType} barrier=${best.barrier}${conservativeNote}`,
       `WinP=${(best.winProbability * 100).toFixed(1)}%`,
       `(theoretical=${(best.theoreticalWinProb * 100).toFixed(0)}%)`,
       `edge=${(best.edge * 100).toFixed(1)}%`,
@@ -275,6 +326,7 @@ export function runDigitAgent(ctx: ScanContext, digitFeatures: DigitFeatures | n
       windowSize: result.windowSize,
       hasEdge: result.hasEdge,
       lastDigit: result.lastDigit,
+      conservativeSelected: result.conservativeSelected,
     },
     executionTimeMs: Date.now() - t0,
     digitResult: result,
