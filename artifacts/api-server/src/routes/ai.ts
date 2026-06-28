@@ -5,7 +5,7 @@ import { sql, desc, eq } from "drizzle-orm";
 import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo, analyzeDigits, analyzeTrend } from "../lib/deriv";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
-import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
+import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome, updateDigitRecovery } from "../lib/agent-coordinator";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 
 const router = Router();
@@ -302,6 +302,7 @@ async function runAutonomousLoop() {
 
       // Paper trades: insert completed record immediately
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
+      updateDigitRecovery(bestMarket.symbol, effectiveContractType, won, profit, stake);
 
       await db.insert(tradesTable).values({
         symbol: bestMarket.symbol,
@@ -386,6 +387,7 @@ async function runAutonomousLoop() {
 
       // Update the open record to final status
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
+      updateDigitRecovery(bestMarket.symbol, effectiveContractType, won, profit, stake);
 
       await db.update(tradesTable).set({
         status: won ? "won" : "lost",

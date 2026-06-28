@@ -223,6 +223,367 @@ function AgentIntelligencePanel({ agentOutputs, recommendation }: { agentOutputs
   );
 }
 
+// ── AI Trade Panel ────────────────────────────────────────────────────────────
+// Unified recommendation panel synced to all 3 contract types + agent intelligence
+
+function TierBadge({ tier, inRecovery }: { tier: 1 | 2 | 0; inRecovery: boolean }) {
+  if (tier === 1) return <span className="text-[8px] font-bold px-1.5 py-0.5 rounded bg-green-500/15 text-green-400 border border-green-500/20">SAFE</span>;
+  if (tier === 2) return <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded border ${inRecovery ? "bg-amber-500/20 text-amber-400 border-amber-500/30" : "bg-secondary/40 text-zinc-500 border-zinc-700"}`}>RECOVERY</span>;
+  return <span className="text-[8px] font-bold px-1.5 py-0.5 rounded bg-red-500/10 text-red-500 border border-red-500/20">RISKY</span>;
+}
+
+function DigitBarrierButton({
+  option, isRecommended, inRecovery, onClick,
+}: {
+  option: { contractType: string; barrier: number; winProbability: number; expectedValue: number; payout: number; tier: number };
+  isRecommended: boolean;
+  inRecovery: boolean;
+  onClick: () => void;
+}) {
+  const label = option.contractType === "DIGITOVER" ? `OVER ${option.barrier}` : `UNDER ${option.barrier}`;
+  const winPct = Math.round(option.winProbability * 100);
+  const evPct = (option.expectedValue * 100).toFixed(1);
+  const hasEdge = option.expectedValue > 0;
+  const tier = option.tier as 1 | 2 | 0;
+
+  return (
+    <button onClick={onClick}
+      className={`relative flex flex-col items-center p-2 rounded-lg border text-center transition-all hover:scale-[1.03] active:scale-[0.98] ${
+        isRecommended
+          ? "border-primary/60 bg-primary/10 shadow-sm shadow-primary/20"
+          : tier === 1 && !inRecovery
+            ? "border-green-500/25 bg-green-500/5 hover:border-green-500/40"
+            : tier === 2 && inRecovery
+              ? "border-amber-500/30 bg-amber-500/8 hover:border-amber-500/50"
+              : "border-border bg-secondary/15 hover:border-muted-foreground/25"
+      }`}
+    >
+      {isRecommended && <span className="absolute -top-1.5 left-1/2 -translate-x-1/2 text-[7px] font-bold text-primary bg-card px-1.5 rounded-full border border-primary/30">AI ★</span>}
+      <div className="text-[9px] font-mono font-bold text-muted-foreground">{label}</div>
+      <div className={`text-sm font-mono font-bold mt-0.5 ${hasEdge ? "text-green-400" : "text-amber-400"}`}>{winPct}%</div>
+      <div className={`text-[8px] font-mono mt-0.5 ${hasEdge ? "text-green-500/70" : "text-zinc-600"}`}>{hasEdge ? `+${evPct}%` : `${evPct}%`}</div>
+      <div className="mt-1"><TierBadge tier={tier} inRecovery={inRecovery} /></div>
+    </button>
+  );
+}
+
+function AITradePanel({
+  rec, recommendation, trendStats, digitStats, isDigitMarket, openTradeDialog,
+}: {
+  rec: any; recommendation: any; trendStats: any; digitStats: any;
+  isDigitMarket: boolean;
+  openTradeDialog: (ct: string, dir: "up" | "down", barrier?: number, duration?: number) => void;
+}) {
+  if (!recommendation) return null;
+
+  // ── Extract all agent data ───────────────────────────────────────────────
+  const agentOutputs = rec?.agentOutputs ?? {};
+  const masterAgent = agentOutputs["masterDecision"];
+  const dirAgent = agentOutputs["direction"];
+  const digitAgentOutput = agentOutputs["digitDistribution"];
+  const durationOpt = agentOutputs["durationOptimizer"];
+
+  const shouldTrade = rec?.shouldTrade ?? recommendation?.shouldTrade ?? false;
+  const regime = (rec?.regime ?? "unknown").replace(/_/g, " ");
+  const qualityScore = rec?.qualityScore ?? recommendation?.qualityScore ?? 0;
+  const recommendedDuration = durationOpt?.data?.duration ?? rec?.recommendedDuration ?? 5;
+  const recommendedStake = recommendation?.stake ?? 1;
+
+  const bestProduct: string = rec?.recommendedContractType ?? recommendation?.contractType ?? "RISE";
+  const winProbability: number = rec?.winProbability ?? recommendation?.winProbability ?? 50;
+  const expectedValue: number = rec?.expectedValue ?? 0;
+  const payoutMultiplier: number = rec?.payoutMultiplier ?? 1.91;
+  const bestBarrier: number | undefined = rec?.digitBarrier ?? recommendation?.digitBarrier;
+
+  // Direction win probs from trendStats or direction agent
+  const probUp: number = dirAgent?.data?.probUp ?? 0.5;
+  const riseProb = trendStats?.winProb?.rise ?? Math.round(probUp * 100);
+  const fallProb = trendStats?.winProb?.fall ?? Math.round((1 - probUp) * 100);
+  const callProb = trendStats?.winProb?.call ?? riseProb;
+  const putProb  = trendStats?.winProb?.put  ?? fallProb;
+
+  // Digit tier data
+  const inRecovery: boolean = digitAgentOutput?.data?.inRecovery ?? false;
+  const unrecoveredLoss: number = digitAgentOutput?.data?.unrecoveredLoss ?? 0;
+  const tier1Options: any[] = digitAgentOutput?.data?.tier1Options ?? [];
+  const tier2Options: any[] = digitAgentOutput?.data?.tier2Options ?? [];
+
+  // Active tier for highlighting
+  const activeTier = inRecovery ? 2 : 1;
+  const activeOptions = inRecovery ? tier2Options : tier1Options;
+
+  // Best digit option (already tier-filtered by agent)
+  const bestDigitOption = digitAgentOutput?.data?.bestOption ?? null;
+  const isDigitBest = bestProduct?.startsWith("DIGIT");
+
+  // Helper: is this the AI-recommended direction?
+  function isRecDir(ct: string) {
+    if (isDigitBest) return false;
+    return rec?.recommendedContractType === ct || recommendation?.contractType === ct;
+  }
+
+  // EV formatting
+  const evLabel = expectedValue > 0 ? `+$${expectedValue.toFixed(2)}` : expectedValue < 0 ? `-$${Math.abs(expectedValue).toFixed(2)}` : "$0.00";
+  const evColor = expectedValue > 0 ? "text-green-400" : expectedValue < -0.01 ? "text-red-400" : "text-amber-400";
+
+  // Best trade label
+  function bestTradeLabel(): string {
+    if (isDigitBest && bestBarrier !== undefined) {
+      return `${bestProduct.replace("DIGIT", "")} ${bestBarrier}`;
+    }
+    return bestProduct;
+  }
+
+  const directionMap: Record<string, "up" | "down"> = {
+    RISE: "up", CALL: "up", FALL: "down", PUT: "down",
+    DIGITOVER: "up", DIGITUNDER: "down",
+  };
+
+  return (
+    <Card className="bg-card">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Activity className="w-4 h-4 text-primary" />
+            AI Trade Intelligence
+            <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+          </CardTitle>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${shouldTrade ? "bg-green-500/15 text-green-400 border-green-500/30" : "bg-amber-500/10 text-amber-400 border-amber-500/30"}`}>
+              {shouldTrade ? "✓ TRADE" : "⏸ WAIT"}
+            </span>
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-secondary/40 border border-border text-muted-foreground capitalize">{regime}</span>
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-secondary/40 border border-border">Q:{qualityScore}</span>
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-primary/10 border border-primary/20 text-primary font-bold">{recommendedDuration}t</span>
+          </div>
+        </div>
+
+        {/* Recovery mode banner */}
+        {inRecovery && (
+          <div className="mt-2 flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/8 border border-amber-500/25 text-xs text-amber-400">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span><span className="font-bold">Recovery Mode Active</span> — ${unrecoveredLoss.toFixed(2)} to recover · Using Tier 2 barriers (OVER 4-6 / UNDER 4-6) for higher payout</span>
+          </div>
+        )}
+      </CardHeader>
+
+      <CardContent className="space-y-4 pt-0">
+
+        {/* ── HERO: Best AI recommendation ──────────────────────────────── */}
+        <div className={`rounded-xl border p-4 ${shouldTrade ? "border-primary/30 bg-gradient-to-br from-primary/8 to-primary/3" : "border-border bg-secondary/20"}`}>
+          <div className="flex items-start justify-between mb-3">
+            <div>
+              <div className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">AI Best Trade</div>
+              <div className={`text-2xl font-mono font-bold ${shouldTrade ? "text-foreground" : "text-muted-foreground"}`}>{bestTradeLabel()}</div>
+              <div className="text-[10px] text-muted-foreground mt-0.5">{bestProduct.includes("DIGIT") ? "Digit Over/Under" : bestProduct.includes("RISE") || bestProduct.includes("FALL") ? "Rise & Fall" : "Call & Put"}</div>
+            </div>
+            <div className="text-right">
+              <div className="text-[10px] text-muted-foreground mb-0.5">Win Prob</div>
+              <div className={`text-3xl font-mono font-bold ${winProbability >= 60 ? "text-green-400" : winProbability >= 52 ? "text-amber-400" : "text-red-400"}`}>{winProbability.toFixed(0)}%</div>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-2 mb-3">
+            <div className="text-center">
+              <div className="text-[9px] text-muted-foreground">EV</div>
+              <div className={`text-sm font-mono font-bold ${evColor}`}>{evLabel}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-[9px] text-muted-foreground">Payout</div>
+              <div className="text-sm font-mono font-bold">{payoutMultiplier.toFixed(2)}x</div>
+            </div>
+            <div className="text-center">
+              <div className="text-[9px] text-muted-foreground">Stake</div>
+              <div className="text-sm font-mono font-bold text-primary">${recommendedStake.toFixed(2)}</div>
+            </div>
+          </div>
+          <button
+            onClick={() => openTradeDialog(
+              bestProduct,
+              directionMap[bestProduct] ?? "up",
+              bestBarrier,
+              recommendedDuration,
+            )}
+            disabled={!shouldTrade}
+            className={`w-full py-2.5 rounded-lg font-mono font-bold text-sm transition-all ${
+              shouldTrade
+                ? "bg-primary text-primary-foreground hover:bg-primary/90 active:scale-[0.98]"
+                : "bg-secondary/40 text-muted-foreground cursor-not-allowed"
+            }`}
+          >
+            {shouldTrade
+              ? `▶ Execute ${bestTradeLabel()} · ${recommendedDuration} ticks · $${recommendedStake.toFixed(2)}`
+              : `⏸ ${masterAgent?.data?.rejectReasons?.[0] ?? "Waiting for better setup..."}`}
+          </button>
+        </div>
+
+        {/* ── Rise / Fall + Call / Put ──────────────────────────────────── */}
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-2">Direction Contracts</div>
+          <div className="grid grid-cols-4 gap-1.5">
+            {([
+              { ct: "RISE", dir: "up" as const, label: "▲ RISE", prob: riseProb, color: "text-green-400" },
+              { ct: "FALL", dir: "down" as const, label: "▼ FALL", prob: fallProb, color: "text-red-400" },
+              { ct: "CALL", dir: "up" as const, label: "↑ CALL", prob: callProb, color: "text-emerald-400" },
+              { ct: "PUT",  dir: "down" as const, label: "↓ PUT",  prob: putProb,  color: "text-rose-400" },
+            ]).map(({ ct, dir, label, prob, color }) => {
+              const isRec = isRecDir(ct);
+              const p = typeof prob === "number" ? Math.round(prob) : 50;
+              return (
+                <button key={ct}
+                  onClick={() => openTradeDialog(ct, dir, undefined, recommendedDuration)}
+                  className={`flex flex-col items-center p-2.5 rounded-lg border text-center transition-all hover:scale-[1.03] active:scale-[0.97] ${
+                    isRec
+                      ? "border-primary/50 bg-primary/10 shadow-sm"
+                      : "border-border bg-secondary/20 hover:border-muted-foreground/30"
+                  }`}
+                >
+                  {isRec && <div className="text-[7px] font-bold text-primary mb-0.5">AI ★</div>}
+                  <div className={`text-xs font-mono font-bold ${color}`}>{label}</div>
+                  <div className={`text-base font-mono font-bold mt-0.5 ${p >= 55 ? "text-green-400" : p >= 48 ? "text-amber-400" : "text-red-400"}`}>{p}%</div>
+                  <div className="text-[9px] text-muted-foreground">{recommendedDuration}t · ${recommendedStake.toFixed(2)}</div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* ── Over/Under Digit Contracts ────────────────────────────────── */}
+        {isDigitMarket && (
+          <div>
+            {/* Tier 1 — Safe (always shown, dimmed if in recovery) */}
+            <div className="mb-2">
+              <div className="flex items-center gap-2 mb-1.5">
+                <div className={`text-[10px] uppercase tracking-wider font-semibold ${!inRecovery ? "text-green-400" : "text-zinc-500"}`}>
+                  Tier 1 — Safe {!inRecovery ? "(Active)" : "(Suspended — recovering)"}
+                </div>
+                <TierBadge tier={1} inRecovery={false} />
+              </div>
+              <div className="grid grid-cols-6 gap-1">
+                {/* OVER 1, 2, 3 */}
+                {[1, 2, 3].map((b) => {
+                  const opt = tier1Options.find((o: any) => o.contractType === "DIGITOVER" && o.barrier === b);
+                  if (!opt) {
+                    const distPct = digitStats ? Math.round(digitStats.distribution?.find((d: any) => d.digit === b)?.pct ?? 0) : 0;
+                    const winPct = [80, 70, 60][b - 1] ?? 60;
+                    return (
+                      <button key={`o${b}`}
+                        onClick={() => !inRecovery && openTradeDialog("DIGITOVER", "up", b, recommendedDuration)}
+                        className={`flex flex-col items-center p-1.5 rounded-lg border text-center transition-all ${!inRecovery ? "hover:scale-[1.03] border-green-500/20 bg-green-500/5 hover:border-green-500/35" : "border-zinc-800 bg-zinc-900/20 opacity-40"}`}
+                      >
+                        <div className="text-[8px] text-muted-foreground font-mono">OVER {b}</div>
+                        <div className="text-xs font-mono font-bold text-green-400">{winPct}%</div>
+                      </button>
+                    );
+                  }
+                  const isRec = isDigitBest && bestProduct === "DIGITOVER" && bestBarrier === b;
+                  return (
+                    <DigitBarrierButton key={`o${b}`} option={opt} isRecommended={isRec && !inRecovery}
+                      inRecovery={false} onClick={() => !inRecovery && openTradeDialog("DIGITOVER", "up", b, recommendedDuration)} />
+                  );
+                })}
+                {/* UNDER 7, 8, 9 */}
+                {[7, 8, 9].map((b) => {
+                  const opt = tier1Options.find((o: any) => o.contractType === "DIGITUNDER" && o.barrier === b);
+                  if (!opt) {
+                    const winPct = [70, 80, 90][b - 7] ?? 70;
+                    return (
+                      <button key={`u${b}`}
+                        onClick={() => !inRecovery && openTradeDialog("DIGITUNDER", "down", b, recommendedDuration)}
+                        className={`flex flex-col items-center p-1.5 rounded-lg border text-center transition-all ${!inRecovery ? "hover:scale-[1.03] border-green-500/20 bg-green-500/5 hover:border-green-500/35" : "border-zinc-800 bg-zinc-900/20 opacity-40"}`}
+                      >
+                        <div className="text-[8px] text-muted-foreground font-mono">UNDER {b}</div>
+                        <div className="text-xs font-mono font-bold text-green-400">{winPct}%</div>
+                      </button>
+                    );
+                  }
+                  const isRec = isDigitBest && bestProduct === "DIGITUNDER" && bestBarrier === b;
+                  return (
+                    <DigitBarrierButton key={`u${b}`} option={opt} isRecommended={isRec && !inRecovery}
+                      inRecovery={false} onClick={() => !inRecovery && openTradeDialog("DIGITUNDER", "down", b, recommendedDuration)} />
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Tier 2 — Recovery */}
+            <div>
+              <div className="flex items-center gap-2 mb-1.5">
+                <div className={`text-[10px] uppercase tracking-wider font-semibold ${inRecovery ? "text-amber-400" : "text-zinc-500"}`}>
+                  Tier 2 — Recovery {inRecovery ? "(Active)" : "(Standby)"}
+                </div>
+                <TierBadge tier={2} inRecovery={inRecovery} />
+                {inRecovery && <span className="text-[9px] text-amber-400 font-mono">−${unrecoveredLoss.toFixed(2)} to recover</span>}
+              </div>
+              <div className="grid grid-cols-6 gap-1">
+                {/* OVER 4, 5, 6 */}
+                {[4, 5, 6].map((b) => {
+                  const opt = tier2Options.find((o: any) => o.contractType === "DIGITOVER" && o.barrier === b);
+                  if (!opt) {
+                    const winPct = [50, 40, 30][b - 4] ?? 40;
+                    return (
+                      <button key={`o${b}`}
+                        onClick={() => inRecovery && openTradeDialog("DIGITOVER", "up", b, recommendedDuration)}
+                        className={`flex flex-col items-center p-1.5 rounded-lg border text-center transition-all ${inRecovery ? "hover:scale-[1.03] border-amber-500/30 bg-amber-500/8 hover:border-amber-500/50" : "border-zinc-800 bg-zinc-900/20 opacity-35"}`}
+                      >
+                        <div className="text-[8px] text-muted-foreground font-mono">OVER {b}</div>
+                        <div className={`text-xs font-mono font-bold ${inRecovery ? "text-amber-400" : "text-zinc-600"}`}>{winPct}%</div>
+                      </button>
+                    );
+                  }
+                  const isRec = isDigitBest && bestProduct === "DIGITOVER" && bestBarrier === b;
+                  return (
+                    <DigitBarrierButton key={`o${b}`} option={opt} isRecommended={isRec && inRecovery}
+                      inRecovery={inRecovery} onClick={() => inRecovery && openTradeDialog("DIGITOVER", "up", b, recommendedDuration)} />
+                  );
+                })}
+                {/* UNDER 4, 5, 6 */}
+                {[4, 5, 6].map((b) => {
+                  const opt = tier2Options.find((o: any) => o.contractType === "DIGITUNDER" && o.barrier === b);
+                  if (!opt) {
+                    const winPct = [40, 50, 60][b - 4] ?? 50;
+                    return (
+                      <button key={`u${b}`}
+                        onClick={() => inRecovery && openTradeDialog("DIGITUNDER", "down", b, recommendedDuration)}
+                        className={`flex flex-col items-center p-1.5 rounded-lg border text-center transition-all ${inRecovery ? "hover:scale-[1.03] border-amber-500/30 bg-amber-500/8 hover:border-amber-500/50" : "border-zinc-800 bg-zinc-900/20 opacity-35"}`}
+                      >
+                        <div className="text-[8px] text-muted-foreground font-mono">UNDER {b}</div>
+                        <div className={`text-xs font-mono font-bold ${inRecovery ? "text-amber-400" : "text-zinc-600"}`}>{winPct}%</div>
+                      </button>
+                    );
+                  }
+                  const isRec = isDigitBest && bestProduct === "DIGITUNDER" && bestBarrier === b;
+                  return (
+                    <DigitBarrierButton key={`u${b}`} option={opt} isRecommended={isRec && inRecovery}
+                      inRecovery={inRecovery} onClick={() => inRecovery && openTradeDialog("DIGITUNDER", "down", b, recommendedDuration)} />
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Warnings ────────────────────────────────────────────────────── */}
+        {recommendation.warnings && recommendation.warnings.length > 0 && (
+          <div className="space-y-1">
+            {recommendation.warnings.map((w: string, i: number) => (
+              <div key={i} className="flex items-center gap-2 p-2 bg-amber-500/5 border border-amber-500/15 rounded text-[10px] text-amber-400">
+                <AlertTriangle className="w-3 h-3 shrink-0" />{w}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── AI reasoning ─────────────────────────────────────────────────── */}
+        {recommendation.reasoning && (
+          <p className="text-[10px] text-muted-foreground leading-relaxed border-t border-border pt-2">
+            {recommendation.reasoning}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── Digit distribution bar ─────────────────────────────────────────────────────
 function DigitBar({ digit, count, pct, hot, cold, barrier, contractType }: {
   digit: number; count: number; pct: number; hot: boolean; cold: boolean; barrier?: number; contractType?: string;
@@ -393,6 +754,7 @@ export default function MarketDetail() {
   const [tradeContract, setTradeContract] = useState("");
   const [stake, setStake] = useState("");
   const [tradeBarrier, setTradeBarrier] = useState<number | undefined>(undefined);
+  const [tradeDuration, setTradeDuration] = useState(5);
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [priceHistory, setPriceHistory] = useState<{ timestamp: string; price: number }[]>([]);
   const [sseConnected, setSseConnected] = useState(false);
@@ -509,10 +871,11 @@ export default function MarketDetail() {
 
   const pipSize = symbol?.includes("R_100") || symbol?.includes("1HZ100") ? 2 : symbol?.startsWith("1HZ") || symbol?.startsWith("R_") ? 3 : 4;
 
-  function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number) {
+  function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number, duration?: number) {
     setTradeContract(contractType);
     setTradeDir(direction);
     setTradeBarrier(barrier);
+    setTradeDuration(duration ?? (rec as any)?.recommendedDuration ?? 5);
     setStake(String(recommendation?.stake ?? 1));
     setTradeDialog(true);
   }
@@ -520,7 +883,7 @@ export default function MarketDetail() {
   function handleExecuteTrade() {
     if (!symbol || !stake) return;
     executeTrade.mutate({
-      data: { symbol, contractType: tradeContract || (tradeDir === "up" ? "RISE" : "FALL"), direction: tradeDir, stake: Number(stake), duration: 5, durationUnit: "t", barrier: tradeBarrier }
+      data: { symbol, contractType: tradeContract || (tradeDir === "up" ? "RISE" : "FALL"), direction: tradeDir, stake: Number(stake), duration: tradeDuration, durationUnit: "t", barrier: tradeBarrier }
     }, {
       onSuccess: (result: any) => {
         toast.success(`Trade ${result.status === "won" ? "WON 🎉" : "LOST"} — ${result.status === "won" ? "+" : ""}$${Number(result.profit ?? 0).toFixed(2)}`);
@@ -710,140 +1073,15 @@ export default function MarketDetail() {
         </Card>
       )}
 
-      {/* AI Recommendation + Contract Buttons */}
-      {recommendation && (
-        <Card className="bg-card">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <span className={`w-2 h-2 rounded-full ${recommendation.shouldTrade ? "bg-green-500" : "bg-amber-500"}`} />
-              AI Recommendation
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <div className="bg-secondary/30 rounded-lg p-3">
-                <div className="text-[10px] text-muted-foreground uppercase mb-1">Calibrated</div>
-                <div className={`text-xl font-mono font-bold ${(recommendation as any).calibratedConfidence >= 65 ? "text-green-400" : "text-amber-400"}`}>
-                  {(recommendation as any).calibratedConfidence ?? recommendation.confidence}%
-                </div>
-              </div>
-              <div className="bg-secondary/30 rounded-lg p-3">
-                <div className="text-[10px] text-muted-foreground uppercase mb-1">Expected Value</div>
-                <div className={`text-xl font-mono font-bold ${((recommendation as any).expectedValue ?? 0) > 0 ? "text-green-400" : "text-red-400"}`}>
-                  ${((recommendation as any).expectedValue ?? 0).toFixed(2)}
-                </div>
-              </div>
-              <div className="bg-secondary/30 rounded-lg p-3">
-                <div className="text-[10px] text-muted-foreground uppercase mb-1">Breakeven WR</div>
-                <div className="text-xl font-mono font-bold">{(recommendation as any).breakevenWinRate ?? "—"}%</div>
-              </div>
-              <div className="bg-secondary/30 rounded-lg p-3">
-                <div className="text-[10px] text-muted-foreground uppercase mb-1">Win Prob</div>
-                <div className="text-xl font-mono font-bold">{(recommendation as any).winProbability ?? recommendation.confidence}%</div>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <div className="bg-secondary/30 rounded-lg p-3">
-                <div className="text-[10px] text-muted-foreground uppercase mb-1">Confidence</div>
-                <div className={`text-xl font-mono font-bold ${recommendation.confidence >= 65 ? "text-green-400" : recommendation.confidence >= 50 ? "text-amber-400" : "text-red-400"}`}>{recommendation.confidence}%</div>
-              </div>
-              <div className="bg-secondary/30 rounded-lg p-3">
-                <div className="text-[10px] text-muted-foreground uppercase mb-1">Risk</div>
-                <div className={`text-xl font-mono font-bold ${recommendation.riskScore < 40 ? "text-green-400" : recommendation.riskScore < 60 ? "text-amber-400" : "text-red-400"}`}>{recommendation.riskScore}</div>
-              </div>
-              <div className="bg-secondary/30 rounded-lg p-3">
-                <div className="text-[10px] text-muted-foreground uppercase mb-1">Quality</div>
-                <div className="text-xl font-mono font-bold">{market.qualityScore}</div>
-              </div>
-              <div className="bg-secondary/30 rounded-lg p-3">
-                <div className="text-[10px] text-muted-foreground uppercase mb-1">Stake</div>
-                <div className="text-xl font-mono font-bold text-primary">${recommendation.stake.toFixed(2)}</div>
-              </div>
-            </div>
-
-            <p className="text-xs text-muted-foreground leading-relaxed">{recommendation.reasoning}</p>
-
-            {recommendation.warnings && recommendation.warnings.length > 0 && (
-              <div className="space-y-1">
-                {recommendation.warnings.map((w: string, i: number) => (
-                  <div key={i} className="flex items-center gap-2 p-2 bg-amber-500/5 border border-amber-500/20 rounded text-xs text-amber-400">
-                    <AlertTriangle className="w-3 h-3 flex-shrink-0" />
-                    {w}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Quick Trade — all market types */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Quick Trade</div>
-                <div className="text-[10px] font-mono text-muted-foreground">5 ticks · auto-configured</div>
-              </div>
-
-              {/* Rise / Fall and Call / Put — always visible */}
-              <div className="grid grid-cols-2 gap-1.5">
-                {([
-                  { ct: "RISE", dir: "up" as const, label: "▲ RISE", probKey: "rise" },
-                  { ct: "FALL", dir: "down" as const, label: "▼ FALL", probKey: "fall" },
-                  { ct: "CALL", dir: "up" as const, label: "↑ CALL", probKey: "call" },
-                  { ct: "PUT",  dir: "down" as const, label: "↓ PUT",  probKey: "put"  },
-                ] as const).map(({ ct, dir, label, probKey }) => {
-                  const prob: number | undefined = (trendStats as any)?.winProb?.[probKey];
-                  const pct = prob != null ? Math.round(prob) : null;
-                  const isRec = (recommendation as any)?.contractType === ct;
-                  const isUp = dir === "up";
-                  return (
-                    <button key={ct} onClick={() => openTradeDialog(ct, dir)}
-                      className={`relative p-2.5 rounded-lg border text-left transition-all hover:scale-[1.02] active:scale-[0.98] ${
-                        isRec
-                          ? "border-primary/50 bg-primary/10 shadow-sm shadow-primary/20"
-                          : "border-border bg-secondary/30 hover:border-muted-foreground/30"
-                      }`}
-                    >
-                      {isRec && <span className="absolute top-1 right-1.5 text-[8px] font-bold text-primary uppercase tracking-wider">AI ★</span>}
-                      <div className={`font-mono font-bold text-sm ${isUp ? "text-green-400" : "text-red-400"}`}>{label}</div>
-                      {pct != null
-                        ? <div className={`text-[10px] mt-0.5 font-mono ${pct >= 55 ? "text-green-400" : pct >= 45 ? "text-amber-400" : "text-red-400"}`}>{pct}% prob</div>
-                        : <div className="text-[10px] mt-0.5 text-muted-foreground">click to trade</div>}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Digit OVER / UNDER — only for digit-enabled markets */}
-              {isDigitMarket && (
-                <div className="grid grid-cols-2 gap-1.5">
-                  {([
-                    { ct: "DIGITOVER", dir: "up" as const, label: "OVER", barrier: digitBarrier ?? 5, color: "text-violet-400", borderRec: "border-violet-500/50 bg-violet-500/10 shadow-violet-500/20" },
-                    { ct: "DIGITUNDER", dir: "down" as const, label: "UNDER", barrier: digitBarrier ?? 5, color: "text-rose-400", borderRec: "border-rose-500/50 bg-rose-500/10 shadow-rose-500/20" },
-                  ] as const).map(({ ct, dir, label, barrier, color, borderRec }) => {
-                    const isRec = (recommendation as any)?.contractType === ct;
-                    const overPct = digitStats ? Math.round(digitStats.overPct ?? 0) : null;
-                    const underPct = digitStats ? Math.round(digitStats.underPct ?? 0) : null;
-                    const prob = ct === "DIGITOVER" ? overPct : underPct;
-                    return (
-                      <button key={ct} onClick={() => openTradeDialog(ct, dir, barrier)}
-                        className={`relative p-2.5 rounded-lg border text-left transition-all hover:scale-[1.02] active:scale-[0.98] ${
-                          isRec
-                            ? `${borderRec} shadow-sm`
-                            : "border-border bg-secondary/30 hover:border-muted-foreground/30"
-                        }`}
-                      >
-                        {isRec && <span className={`absolute top-1 right-1.5 text-[8px] font-bold uppercase tracking-wider ${color}`}>AI ★</span>}
-                        <div className={`font-mono font-bold text-sm ${color}`}>{label} {barrier}</div>
-                        {prob != null
-                          ? <div className={`text-[10px] mt-0.5 font-mono ${prob >= 50 ? "text-green-400" : "text-amber-400"}`}>{prob}% rate</div>
-                          : <div className="text-[10px] mt-0.5 text-muted-foreground">digit contract</div>}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      {/* AI Trade Intelligence Panel */}
+      <AITradePanel
+        rec={rec}
+        recommendation={recommendation}
+        trendStats={trendStats}
+        digitStats={digitStats}
+        isDigitMarket={isDigitMarket}
+        openTradeDialog={openTradeDialog}
+      />
 
       {/* Agent Intelligence Panel — live 9-agent breakdown */}
       <AgentIntelligencePanel agentOutputs={(rec as any)?.agentOutputs} recommendation={recommendation} />
@@ -880,7 +1118,7 @@ export default function MarketDetail() {
               <span className="px-2 py-1 rounded-md bg-primary/10 border border-primary/30 font-mono font-bold text-primary">
                 {tradeContract.startsWith("DIGIT") ? `${tradeContract.replace("DIGIT", "")} ${tradeBarrier ?? ""}` : tradeContract}
               </span>
-              <span className="px-2 py-1 rounded-md bg-secondary/50 border border-border font-mono text-muted-foreground">5 ticks</span>
+              <span className="px-2 py-1 rounded-md bg-secondary/50 border border-border font-mono text-muted-foreground">{tradeDuration} ticks</span>
               {tradeBarrier != null && !tradeContract.startsWith("DIGIT") === false && (
                 <span className="px-2 py-1 rounded-md bg-violet-500/10 border border-violet-500/30 font-mono text-violet-400 text-[10px]">Barrier: {tradeBarrier}</span>
               )}

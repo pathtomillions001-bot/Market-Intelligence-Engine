@@ -28,6 +28,7 @@ import { runExecutionTimingAgent } from "./agents/execution-timing";
 import { runPerformanceFeedbackAgent, recordTradeOutcome, getStrategyStats } from "./agents/performance-feedback";
 import { makeFinalDecision } from "./agents/master-decision";
 import { selectOptimalDuration } from "./agents/duration-optimizer";
+import { isInDigitRecovery, updateDigitRecovery } from "./agents/digit-agent";
 import { analyzeDigits } from "./deriv";
 import { getContractProposal } from "./deriv";
 import { logger } from "./logger";
@@ -35,6 +36,7 @@ import { logger } from "./logger";
 // ── Re-export for backward compatibility ──────────────────────────────────────
 export type { CoordinatorOutput } from "./agents/types";
 export { recordTradeOutcome, getStrategyStats } from "./agents/performance-feedback";
+export { updateDigitRecovery, isInDigitRecovery } from "./agents/digit-agent";
 
 // ── Payout cache (20 min TTL — avoids Deriv WS round-trip on every scan) ─────
 const payoutCache = new Map<string, { value: number; ts: number }>();
@@ -96,10 +98,12 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   // ── Stage 2: Regime + Direction + Digit (parallel) ────────────────────────
   // Always run direction agent regardless of preferredContractTypes so the
   // Agent Intelligence Panel always has direction data to display.
+  const inDigitRecovery = isInDigitRecovery(ctx.symbol);
+
   const [regimeAgent, dirAgent, digitAgent] = await Promise.all([
     Promise.resolve(runMarketRegimeAgent(ctx, features)),
     Promise.resolve(runDirectionAgent(ctx, features, ctx.settings.tradeDurationSec)),
-    Promise.resolve(runDigitAgent(ctx, features.digit)),
+    Promise.resolve(runDigitAgent(ctx, features.digit, inDigitRecovery)),
   ]);
 
   const regime = regimeAgent.regimeOutput.regime;

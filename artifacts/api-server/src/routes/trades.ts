@@ -4,7 +4,7 @@ import { tradesTable, accountsTable, settingsTable } from "@workspace/db";
 import { eq, desc, and, sql } from "drizzle-orm";
 import { ExecuteTradeBody, GetTradesQueryParams, GetTradeParams } from "@workspace/api-zod";
 import { tickManager, DERIV_MARKETS, getCachedToken, executeLiveTrade, waitForContractResult, getLiveBalance } from "../lib/deriv";
-import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
+import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome, updateDigitRecovery } from "../lib/agent-coordinator";
 import { logger } from "../lib/logger";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 
@@ -300,6 +300,7 @@ router.post("/", async (req, res): Promise<void> => {
     }
 
     recordTradeOutcome(symbol, contractType, barrier ?? null, won, profit, stake);
+    updateDigitRecovery(symbol, contractType, won, profit, stake);
 
     const [closedTrade] = await db.update(tradesTable).set({
       status: won ? "won" : "lost",
@@ -333,6 +334,7 @@ router.post("/", async (req, res): Promise<void> => {
     : direction === "up" ? entryPrice * 0.999 : entryPrice * 1.001;
 
   recordTradeOutcome(symbol, contractType, barrier ?? null, won, profit, stake);
+  updateDigitRecovery(symbol, contractType, won, profit, stake);
 
   const [trade] = await db.insert(tradesTable).values({
     symbol,

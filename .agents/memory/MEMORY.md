@@ -6,3 +6,5 @@
 - [Deriv market pipSizes](deriv-pip-sizes.md) — correct pipSizes verified from live prices: R_10/R_25/R_100/1HZ10V/1HZ25V/1HZ100V/all JD=2; R_50/R_75/1HZ50V/1HZ75V=4. Wrong pipSize causes extractLastDigit to always return 0 (digit 0 = 100%).
 - [Live trade P&L fix](live-trade-pnl.md) — failed live trades must use profit=String(-stake) not "0"; flash-card label should use formatContractLabel() to show "OVER 5" not "DIGITOVER".
 - [Multi-agent system](multi-agent-system.md) — new 9-agent architecture: feature-engineering, market-regime, direction, digit, ev-calculator, risk-manager, execution-timing, performance-feedback, master-decision; coordinator in agent-coordinator.ts.
+- [Deriv contract settlement status](deriv-settlement-status.md) — waitForContractResult must check status "won"/"lost"/"expired" not just "sold"; is_sold can be 1 not true; profit sign determines won when status is ambiguous.
+- [Digit barrier tier system](digit-tier-system.md) — Tier 1 (normal): OVER 1-3 / UNDER 7-9; Tier 2 (recovery): OVER 4-6 / UNDER 4-6; recovery tracked per-symbol in digit-agent.ts updateDigitRecovery(); coordinator passes isInDigitRecovery() to runDigitAgent().

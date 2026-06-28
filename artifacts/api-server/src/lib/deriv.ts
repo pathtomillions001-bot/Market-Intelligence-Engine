@@ -780,16 +780,34 @@ export async function waitForContractResult(token: string, contractId: number, t
 
         if (msg.msg_type === "proposal_open_contracts" && msg.proposal_open_contracts) {
           const contract = msg.proposal_open_contracts;
-          if (contract.is_sold || contract.status === "sold") {
+          // Deriv can return: is_sold=1, status="sold"|"won"|"lost"|"expired"
+          const settled =
+            contract.is_sold ||
+            Number(contract.is_sold) === 1 ||
+            contract.status === "sold" ||
+            contract.status === "won" ||
+            contract.status === "lost" ||
+            contract.status === "expired";
+          if (settled) {
             clearTimeout(timeout);
             ws.close();
-            const profit = Number(contract.profit ?? 0);
+            // profit = net profit (positive for win, negative for loss)
+            // Prefer 'profit' field; fall back to sell_price - buy_price
+            const rawProfit = Number(contract.profit ?? 0);
+            const sellPrice = Number(contract.sell_price ?? 0);
+            const buyPrice = Number(contract.buy_price ?? contract.purchase_price ?? 0);
+            const profit = rawProfit !== 0 ? rawProfit : sellPrice - buyPrice;
+            // Determine win from status first, then profit sign
+            const won =
+              contract.status === "won" ? true :
+              contract.status === "lost" ? false :
+              profit > 0;
             resolve({
               contractId,
-              won: profit > 0,
+              won,
               profit,
               exitSpot: Number(contract.exit_tick ?? contract.current_spot ?? 0),
-              sellPrice: Number(contract.sell_price ?? 0),
+              sellPrice,
               entrySpot: Number(contract.entry_tick ?? contract.entry_spot ?? 0),
             });
           }
