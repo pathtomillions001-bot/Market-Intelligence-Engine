@@ -220,6 +220,7 @@ export default function MarketDetail() {
   // Live analysis state — updated via SSE on every tick
   const [liveDigitStats, setLiveDigitStats] = useState<any | null>(null);
   const [liveTrendStats, setLiveTrendStats] = useState<any | null>(null);
+  const [lastLiveDigit, setLastLiveDigit] = useState<number | null>(null);
   const [dialogCountdown, setDialogCountdown] = useState<number | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const lastTickTimeRef = useRef<number>(Date.now());
@@ -257,6 +258,8 @@ export default function MarketDetail() {
         if (data.symbol !== symbol) return;
         if (data.digitStats) setLiveDigitStats(data.digitStats);
         if (data.trendStats) setLiveTrendStats(data.trendStats);
+        // lastDigit changes on EVERY tick — show it prominently in the digit panel
+        if (typeof data.lastDigit === "number") setLastLiveDigit(data.lastDigit);
       } catch { /* ignore */ }
     });
 
@@ -424,10 +427,26 @@ export default function MarketDetail() {
             <CardTitle className="text-sm flex items-center gap-2">
               <Activity className="w-4 h-4 text-primary" />
               Digit Analysis — OVER/UNDER Intelligence
+              {lastLiveDigit !== null && (
+                <span className="ml-2 flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-primary/15 border border-primary/30">
+                  <span className="text-[10px] text-muted-foreground">LAST</span>
+                  <span className="text-base font-mono font-bold text-primary leading-none">{lastLiveDigit}</span>
+                </span>
+              )}
               <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
+            {/* Last digit highlight row — updates every tick */}
+            {lastLiveDigit !== null && (
+              <div className="grid grid-cols-10 gap-1">
+                {[0,1,2,3,4,5,6,7,8,9].map(d => (
+                  <div key={d} className={`flex items-center justify-center h-7 rounded-md text-sm font-mono font-bold transition-all duration-150 ${
+                    d === lastLiveDigit ? "bg-primary text-primary-foreground scale-110 shadow-md shadow-primary/30" : "bg-secondary/30 text-muted-foreground"
+                  }`}>{d}</div>
+                ))}
+              </div>
+            )}
             <div className="grid grid-cols-10 gap-1">
               {digitStats.distribution.map((d: any) => (
                 <DigitBar

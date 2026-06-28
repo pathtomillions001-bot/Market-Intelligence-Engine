@@ -76,8 +76,14 @@ tickManager.on("tick", (tick) => {
   if (market) {
     const prices = tickManager.getTicks(tick.symbol, 100);
     const trendStats = analyzeTrend(prices);
-    const digitStats = market.digitEnabled ? analyzeDigits(tickManager.getDigits(tick.symbol, 100)) : null;
-    broadcastSSE("market_analysis", { symbol: tick.symbol, trendStats, digitStats, price: tick.price, epoch: tick.epoch });
+    // Use 50-tick window for digit distribution so each new digit shifts 2% (visually responsive)
+    const digits50 = market.digitEnabled ? tickManager.getDigits(tick.symbol, 50) : null;
+    const digitStats = digits50 ? analyzeDigits(digits50) : null;
+    broadcastSSE("market_analysis", {
+      symbol: tick.symbol, trendStats, digitStats,
+      lastDigit: tick.lastDigit,  // always broadcast last digit (changes every tick)
+      price: tick.price, epoch: tick.epoch,
+    });
   }
 });
 
@@ -485,8 +491,8 @@ function formatRecommendation(symbol: string, analysis: Awaited<ReturnType<typeo
 
 function scheduleNext(tradeExecuted = false) {
   if (!engineRunning) return;
-  // Fast adaptive scanning: 1.5s after a trade settles, 800ms when scanning for opportunities
-  const delayMs = tradeExecuted ? 1500 : 800;
+  // Ultra-fast scanning: 1s after a trade settles, 200ms when scanning for opportunities
+  const delayMs = tradeExecuted ? 1000 : 200;
   nextScanIn = Math.ceil(delayMs / 1000);
   loopIntervalSec = nextScanIn;
   autonomousTimer = setTimeout(runAutonomousLoop, delayMs);
@@ -662,18 +668,51 @@ router.get("/insights", async (_req, res): Promise<void> => {
   res.json(insights);
 });
 
+// ── Compute live agent scores from in-memory tick data (fast, no I/O) ─────────
+function getComputedAgentScores(balance: number, settingsObj: { maxRiskPerTrade: number; minConfidenceThreshold: number; riskProfile: string }) {
+  // Use already-computed scores when engine is running, else do a fast in-memory scan
+  if (Object.keys(lastAgentScores).length > 0) return lastAgentScores;
+  const candidateSymbols = ["1HZ100V", "R_100", "R_50", "R_25", "R_10", "frxEURUSD"];
+  const market = candidateSymbols
+    .map(s => ({ symbol: s, count: tickManager.getTicks(s, 100).length }))
+    .sort((a, b) => b.count - a.count)[0];
+  if (!market || market.count < 5) return lastAgentScores;
+  const mInfo = getMarketInfo(market.symbol);
+  if (!mInfo) return lastAgentScores;
+  const prices = tickManager.getTicks(market.symbol, 100);
+  const digits = mInfo.digitEnabled ? tickManager.getDigits(market.symbol, 100) : undefined;
+  const analysis = analyzeMarket(market.symbol, mInfo.category, prices, balance, settingsObj, digits);
+  const s = analysis.agentScores;
+  return {
+    marketScanner: s.marketScanner.score, trendAnalysis: s.trendAnalysis.score,
+    volatilityAnalysis: s.volatilityAnalysis.score, patternRecognition: s.patternRecognition.score,
+    riskManagement: s.riskManagement.score, capitalPreservation: s.capitalPreservation.score,
+    tradeExecution: s.tradeExecution.score, selfLearning: s.selfLearning.score,
+  };
+}
+
 router.get("/engine/status", async (_req, res): Promise<void> => {
   const settings = await db.select().from(settingsTable).limit(1);
+  const { balance } = await getAccountAndSettings();
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
+
+  const quickSettings = {
+    maxRiskPerTrade: settings.length > 0 ? Number(settings[0].maxRiskPerTrade) : 2,
+    minConfidenceThreshold: 50,
+    riskProfile: settings.length > 0 ? settings[0].riskProfile : "moderate",
+  };
+  const liveScores = getComputedAgentScores(balance, quickSettings);
 
   res.json({
     isRunning: engineRunning, mode: engineRunning ? "autonomous" : "manual",
     agentStatuses: AGENT_NAMES.map((name, i) => {
       const key = AGENT_SCORE_KEYS[i] ?? "marketScanner";
-      const score = lastAgentScores[key] ?? (engineRunning ? 68 : 50);
+      const score = liveScores[key] ?? 65;
       return {
-        name, isActive: engineRunning, lastRun: engineRunning ? new Date().toISOString() : null,
+        name,
+        isActive: true, // Agents always analyse market data — engine running/stopped controls autonomous trading only
+        lastRun: new Date().toISOString(),
         confidence: score,
       };
     }),
@@ -712,13 +751,16 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     if (settings.length > 0) await db.update(settingsTable).set({ autonomousEnabled: false });
   }
 
+  const toggleScores = getComputedAgentScores(10000, { maxRiskPerTrade: 2, minConfidenceThreshold: 50, riskProfile: "moderate" });
   res.json({
     isRunning: engineRunning, mode: autonomousMode,
     agentStatuses: AGENT_NAMES.map((name, i) => {
       const key = AGENT_SCORE_KEYS[i] ?? "marketScanner";
-      const score = lastAgentScores[key] ?? (engineRunning ? 68 : 50);
+      const score = toggleScores[key] ?? 65;
       return {
-        name, isActive: engineRunning, lastRun: engineRunning ? new Date().toISOString() : null,
+        name,
+        isActive: true,
+        lastRun: new Date().toISOString(),
         confidence: score,
       };
     }),

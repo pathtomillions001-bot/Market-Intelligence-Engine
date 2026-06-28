@@ -135,7 +135,6 @@ router.post("/", async (req, res): Promise<void> => {
   const settings = await db.select().from(settingsTable).limit(1);
   const balance = accounts.length > 0 ? Number(accounts[0].balance) : DEMO_BALANCE;
   const maxRisk = settings.length > 0 ? Number(settings[0].maxRiskPerTrade) : 2;
-  const isDemo = accounts.length === 0;
   const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
   const requirePositiveEv = settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true;
 
@@ -161,13 +160,14 @@ router.post("/", async (req, res): Promise<void> => {
   });
 
   const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
+  const currency = accounts.length > 0 ? accounts[0].currency : "USD";
   const finalized = await finalizeAnalysis(rawAnalysis, {
     symbol,
-    currency: accounts.length > 0 ? accounts[0].currency : "USD",
+    currency,
     token,
     defaultDuration: rawAnalysis.recommendedDuration ?? (settings.length > 0 ? settings[0].tradeDurationSec : 5),
     barrier: requestBarrier ?? rawAnalysis.digitBarrier,
-    skipProposal: paperTradeMode || isDemo,
+    skipProposal: paperTradeMode || !token,
   });
 
   const tradeDuration = duration ?? finalized.recommendedDuration ?? 5;
@@ -175,9 +175,9 @@ router.post("/", async (req, res): Promise<void> => {
   // For digit contracts, always ensure a valid barrier (user > AI > safe default)
   const defaultBarrier = contractType === "DIGITOVER" ? 5 : contractType === "DIGITUNDER" ? 4 : undefined;
   const barrier = isDigit ? (requestBarrier ?? rawAnalysis.digitBarrier ?? defaultBarrier) : undefined;
-  const currency = accounts.length > 0 ? accounts[0].currency : "USD";
 
-  const isLiveTrade = !isDemo && !paperTradeMode && !!token;
+  // Live trade when Deriv token is available (regardless of whether accounts table has a row)
+  const isLiveTrade = !paperTradeMode && !!token;
 
   let won: boolean, profit: number, payout: number, entryPrice: number, exitPrice: number;
 
@@ -283,7 +283,7 @@ router.post("/", async (req, res): Promise<void> => {
     aiConfidence: String(finalized.calibratedConfidence),
     aiRiskScore: String(finalized.riskScore),
     isAutonomous: isAutonomous ?? false,
-    agentReasoning: `[${isDemo ? "DEMO" : "PAPER"}] ${rawAnalysis.reasoning} EV=$${finalized.expectedValue.toFixed(2)}`,
+    agentReasoning: `[${token ? "PAPER" : "DEMO"}] ${rawAnalysis.reasoning} EV=$${finalized.expectedValue.toFixed(2)}`,
     duration: tradeDuration,
     durationUnit: durationUnit ?? "t",
     closedAt: new Date(),
