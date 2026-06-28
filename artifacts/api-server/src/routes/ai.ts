@@ -2,12 +2,11 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@workspace/db";
 import { sql, desc } from "drizzle-orm";
-import { analyzeMarket, updateSelfLearning, getMarketWinRate } from "../lib/ai-engine";
 import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo, analyzeDigits, analyzeTrend } from "../lib/deriv";
-import { finalizeAnalysis, logTradeFeatures, shouldExecuteTrade } from "../lib/trade-helpers";
-import { loadCalibrationCache } from "../lib/calibration";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
+import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
+import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 
 const router = Router();
 
@@ -19,33 +18,30 @@ let currentMarket: string | null = null;
 let nextScanIn: number | null = null;
 let stopReasons: string[] = [];
 let autonomousTimer: ReturnType<typeof setTimeout> | null = null;
-let loopIntervalSec = 3;
+let loopIntervalSec = 5;
 let lastTradeTime: Date | null = null;
 
 let exploitSymbol: string | null = null;
 let exploitCount = 0;
 let exploitQualityThreshold = 0;
-let recoveryStep = 0;
-let baseStake = 0;
 
-// Recovery cross-learning state
-let lastLossContractType: string | null = null;
-let lastLossBarrier: number | null = null;
-let lastLossSymbol: string | null = null;
-let lastLossAmount = 0;
-
-// Real-time agent confidence scores (updated each scan)
+// Real-time agent scores (updated each scan)
 let lastAgentScores: Record<string, number> = {};
 
+// New-style agent names matching the coordinator agents
 const AGENT_NAMES = [
-  "Market Scanner", "Trend Analysis", "Volatility Analysis", "Pattern Recognition",
-  "Risk Management", "Capital Preservation", "Trade Execution", "Self-Learning Performance",
+  "Feature Engineering", "Market Regime", "Direction Model",
+  "Digit Distribution", "EV Calculator", "Risk Manager",
+  "Execution Timing", "Performance Feedback",
 ];
 
 const AGENT_SCORE_KEYS = [
-  "marketScanner", "trendAnalysis", "volatilityAnalysis", "patternRecognition",
-  "riskManagement", "capitalPreservation", "tradeExecution", "selfLearning",
+  "featureEngineering", "marketRegime", "direction",
+  "digitDistribution", "evCalculator", "riskManager",
+  "executionTiming", "performanceFeedback",
 ];
+
+// ── Settings builders ─────────────────────────────────────────────────────────
 
 async function getAccountAndSettings() {
   const accounts = await db.select().from(accountsTable).limit(1);
@@ -55,6 +51,69 @@ async function getAccountAndSettings() {
     settings: settings.length > 0 ? settings[0] : null,
     accountId: accounts.length > 0 ? accounts[0].id : null,
     account: accounts.length > 0 ? accounts[0] : null,
+  };
+}
+
+function buildTradingSettings(s: any, preferredContractTypes: string[]): TradingSettings {
+  return {
+    maxRiskPerTrade:        s ? Number(s.maxRiskPerTrade) : 2,
+    minConfidenceThreshold: s ? Math.min(Number(s.minConfidenceThreshold), 55) : 38,
+    riskProfile:            (s?.riskProfile ?? "moderate") as "conservative" | "moderate" | "aggressive",
+    preferredContractTypes,
+    tradeDurationSec:       s?.tradeDurationSec ?? 5,
+    maxTradeStake:          s ? Number(s.maxTradeStake) : 500,
+    dailyLossLimit:         s ? Number(s.dailyLossLimit) : 30,
+    dailyTarget:            s ? Number(s.dailyTarget) : 50,
+    consecutiveLossLimit:   s?.consecutiveLossLimit ?? 3,
+    maxDrawdown:            s ? Number(s.maxDrawdown ?? 20) : 20,
+    requirePositiveEv:      s?.requirePositiveEv ?? true,
+    paperTradeMode:         s?.paperTradeMode ?? false,
+  };
+}
+
+function buildDailyStats(
+  closedToday: any[],
+  consecutiveLosses: number,
+): DailyStats {
+  const wins = closedToday.filter((t) => t.status === "won").length;
+  const losses = closedToday.filter((t) => t.status === "lost").length;
+  const profit = closedToday.reduce((s: number, t: any) => s + Number(t.profit ?? 0), 0);
+  // Consecutive wins (for completeness)
+  let consecutiveWins = 0;
+  const sorted = [...closedToday].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  for (const t of sorted) { if (t.status === "won") consecutiveWins++; else break; }
+
+  return {
+    tradesCount: closedToday.length,
+    wins,
+    losses,
+    profit,
+    consecutiveLosses,
+    consecutiveWins,
+  };
+}
+
+function buildScanContext(
+  market: { symbol: string; displayName: string; category: string; digitEnabled?: boolean },
+  balance: number,
+  settings: TradingSettings,
+  daily: DailyStats,
+  token: string | null,
+  currency: string,
+): ScanContext {
+  const prices = tickManager.getTicks(market.symbol, 100);
+  const digits = market.digitEnabled ? tickManager.getDigits(market.symbol, 300) : [];
+  return {
+    symbol:      market.symbol,
+    displayName: market.displayName,
+    category:    market.category,
+    prices,
+    digits,
+    balance,
+    settings,
+    daily,
+    token,
+    currency,
   };
 }
 
@@ -71,17 +130,15 @@ export function broadcastSSE(event: string, data: unknown) {
 // ── Wire up TickManager → SSE for live prices + live analysis ─────────────────
 tickManager.on("tick", (tick) => {
   broadcastSSE("tick", tick);
-  // Broadcast live digit + trend analysis on every tick for the symbol
   const market = getMarketInfo(tick.symbol);
   if (market) {
     const prices = tickManager.getTicks(tick.symbol, 100);
     const trendStats = analyzeTrend(prices);
-    // Use 50-tick window for digit distribution so each new digit shifts 2% (visually responsive)
     const digits50 = market.digitEnabled ? tickManager.getDigits(tick.symbol, 50) : null;
     const digitStats = digits50 ? analyzeDigits(digits50) : null;
     broadcastSSE("market_analysis", {
       symbol: tick.symbol, trendStats, digitStats,
-      lastDigit: tick.lastDigit,  // always broadcast last digit (changes every tick)
+      lastDigit: tick.lastDigit,
       price: tick.price, epoch: tick.epoch,
     });
   }
@@ -96,10 +153,6 @@ function stopEngine(reason: string) {
   nextScanIn = null;
   exploitSymbol = null;
   exploitCount = 0;
-  recoveryStep = 0;
-  lastLossContractType = null;
-  lastLossBarrier = null;
-  lastLossSymbol = null;
   if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
   logger.info({ reason }, "Autonomous engine stopped");
   broadcastSSE("engine_stopped", { reason });
@@ -112,46 +165,6 @@ async function syncLiveBalance(token: string) {
   } catch { /* ignore */ }
 }
 
-// ── Recovery stake calculation ────────────────────────────────────────────────
-function calcRecoveryStake(lossAmount: number, payoutMultiplier: number, baseAmount: number, maxStake: number): number {
-  if (lossAmount <= 0) return baseAmount;
-  // Stake needed to recover the loss + small profit margin
-  const needed = lossAmount / (payoutMultiplier - 1) * 1.1;
-  return Math.min(Math.max(needed, baseAmount), maxStake);
-}
-
-// ── Alternative contract type for cross-recovery ──────────────────────────────
-function getAlternativeContractType(
-  lostContractType: string,
-  lostBarrier: number | null,
-  preferredTypes: string[],
-): { contractType: string; barrier?: number } {
-  const isDigit = lostContractType.includes("DIGIT");
-
-  if (isDigit) {
-    // Lost on DIGITOVER/UNDER → try RISE/FALL or opposite digit with different barrier
-    if (preferredTypes.some(p => ["RISE", "FALL", "CALL", "PUT"].includes(p))) {
-      return { contractType: "RISE" };
-    }
-    // Flip to opposite digit direction with adjusted barrier
-    if (lostContractType === "DIGITOVER") {
-      const altBarrier = lostBarrier !== null ? Math.min(9, lostBarrier + 2) : 5;
-      return { contractType: "DIGITUNDER", barrier: altBarrier };
-    }
-    const altBarrier = lostBarrier !== null ? Math.max(0, lostBarrier - 2) : 3;
-    return { contractType: "DIGITOVER", barrier: altBarrier };
-  }
-
-  // Lost on RISE/FALL/CALL/PUT → try digits if allowed, else opposite direction
-  if (preferredTypes.some(p => p.startsWith("DIGIT"))) {
-    return { contractType: "DIGITOVER", barrier: 2 };
-  }
-  if (lostContractType === "RISE") return { contractType: "FALL" };
-  if (lostContractType === "FALL") return { contractType: "RISE" };
-  if (lostContractType === "CALL") return { contractType: "PUT" };
-  return { contractType: "CALL" };
-}
-
 // ── Autonomous loop ───────────────────────────────────────────────────────────
 async function runAutonomousLoop() {
   if (!engineRunning) return;
@@ -160,26 +173,17 @@ async function runAutonomousLoop() {
     const { balance, settings, account } = await getAccountAndSettings();
     const token = getCachedToken() ?? account?.token ?? null;
 
-    const dailyLossLimit = settings ? Number(settings.dailyLossLimit) : 30;
-    const dailyTarget = settings ? Number(settings.dailyTarget) : 50;
-    const consecutiveLossLimit = settings?.consecutiveLossLimit ?? 3;
-    const recoveryModeEnabled = settings?.recoveryMode ?? false;
-    const recoveryMultiplier = settings ? Number(settings.recoveryMultiplier) : 1.2;
-    const maxRecoverySteps = settings?.maxRecoverySteps ?? 3;
-    const marketRotationAfter = settings?.marketRotationAfter ?? 5;
-    const tradeDurationSec = settings?.tradeDurationSec ?? 5;
-    const maxTradeStake = settings ? Number(settings.maxTradeStake) : 500;
     const preferredContractTypes = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
-    const paperTradeMode = (settings as any)?.paperTradeMode ?? false;
-    const requirePositiveEv = (settings as any)?.requirePositiveEv ?? true;
+    const tradingSettings = buildTradingSettings(settings, preferredContractTypes);
+    const marketRotationAfter = settings?.marketRotationAfter ?? 5;
+    const paperTradeMode = tradingSettings.paperTradeMode;
 
-    // Market filter: allowed markets from settings
     const allowedMarketSymbols: string[] | null =
       (settings as any)?.allowedMarkets
         ? ((settings as any).allowedMarkets as string).split(",").filter(Boolean)
         : null;
     const availableMarkets = allowedMarketSymbols && allowedMarketSymbols.length > 0
-      ? DERIV_MARKETS.filter(m => allowedMarketSymbols.includes(m.symbol))
+      ? DERIV_MARKETS.filter((m) => allowedMarketSymbols.includes(m.symbol))
       : DERIV_MARKETS;
 
     if (settings?.loopIntervalSec) loopIntervalSec = settings.loopIntervalSec;
@@ -188,60 +192,31 @@ async function runAutonomousLoop() {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
     const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
-    const todayProfit = closedToday.reduce((s, t) => s + Number(t.profit ?? 0), 0);
     tradesExecutedToday = closedToday.length;
 
-    // Stop conditions
-    if (todayProfit <= -dailyLossLimit) { stopEngine(`Daily loss limit $${dailyLossLimit} reached`); return; }
-    if (todayProfit >= dailyTarget) { stopEngine(`Daily target $${dailyTarget} reached!`); return; }
-
-    const sorted = [...closedToday].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const sortedByTime = [...closedToday].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     let consecutiveLosses = 0;
-    for (const t of sorted) { if (t.status === "lost") consecutiveLosses++; else break; }
-    if (consecutiveLosses >= consecutiveLossLimit) { stopEngine(`${consecutiveLosses} consecutive losses — cooldown`); return; }
+    for (const t of sortedByTime) { if (t.status === "lost") consecutiveLosses++; else break; }
 
-    // Track recovery state
-    const lastWasLoss = sorted[0]?.status === "lost";
-    if (lastWasLoss && recoveryModeEnabled) {
-      recoveryStep = Math.min(recoveryStep + 1, maxRecoverySteps);
-      if (sorted[0]) {
-        lastLossContractType = sorted[0].contractType;
-        lastLossBarrier = (sorted[0] as any).barrier ?? null;
-        lastLossSymbol = sorted[0].symbol;
-        lastLossAmount = Math.abs(Number(sorted[0].profit ?? 0));
-      }
-    } else if (!lastWasLoss) {
-      recoveryStep = 0;
-      lastLossContractType = null;
-      lastLossBarrier = null;
-      lastLossSymbol = null;
-      lastLossAmount = 0;
-    }
+    const daily = buildDailyStats(closedToday, consecutiveLosses);
+    const todayProfit = daily.profit;
 
-    const settingsObj = {
-      maxRiskPerTrade: settings ? Number(settings.maxRiskPerTrade) : 2,
-      minConfidenceThreshold: settings ? Math.min(Number(settings.minConfidenceThreshold), 38) : 30,
-      riskProfile: settings?.riskProfile ?? "moderate",
-      preferredContractTypes,
-      tradeDurationSec,
-      maxTradeStake,
-    };
+    // Hard stop conditions (also handled inside risk manager, but stop the loop early)
+    if (todayProfit <= -tradingSettings.dailyLossLimit) { stopEngine(`Daily loss limit $${tradingSettings.dailyLossLimit} reached`); return; }
+    if (todayProfit >= tradingSettings.dailyTarget) { stopEngine(`Daily target $${tradingSettings.dailyTarget} reached!`); return; }
+    if (consecutiveLosses >= tradingSettings.consecutiveLossLimit) { stopEngine(`${consecutiveLosses} consecutive losses — cooldown`); return; }
 
     // ── Market selection ─────────────────────────────────────────────────────
-    let bestMarket: {
-      symbol: string; category: string; displayName: string; digitEnabled?: boolean;
-      analysis: ReturnType<typeof analyzeMarket>; prices: number[];
-    } | null = null;
+    let bestResult: { market: typeof availableMarkets[0]; output: Awaited<ReturnType<typeof runCoordinator>>; ctx: ScanContext } | null = null;
 
-    // Exploit mode: keep trading hot market unless quality drops
-    if (exploitSymbol && exploitCount < marketRotationAfter && availableMarkets.some(m => m.symbol === exploitSymbol)) {
+    // Exploit mode: stay on the hot market
+    if (exploitSymbol && exploitCount < marketRotationAfter && availableMarkets.some((m) => m.symbol === exploitSymbol)) {
       const market = getMarketInfo(exploitSymbol);
       if (market) {
-        const prices = tickManager.getTicks(market.symbol, 100);
-        const digits = market.digitEnabled ? tickManager.getDigits(market.symbol, 300) : undefined;
-        const analysis = analyzeMarket(market.symbol, market.category, prices, balance, settingsObj, digits);
-        if (analysis.qualityScore >= exploitQualityThreshold - 10 && analysis.shouldTrade) {
-          bestMarket = { ...market, analysis, prices };
+        const ctx = buildScanContext(market, balance, tradingSettings, daily, token, account?.currency ?? "USD");
+        const output = await runCoordinator(ctx);
+        if (output.qualityScore >= exploitQualityThreshold - 10 && output.shouldTrade) {
+          bestResult = { market, output, ctx };
           exploitCount++;
         } else {
           exploitSymbol = null; exploitCount = 0;
@@ -249,205 +224,156 @@ async function runAutonomousLoop() {
       }
     }
 
-    if (!bestMarket) {
-      // Parallel scan all allowed markets — near-zero latency (in-memory tick buffers)
+    if (!bestResult) {
+      // Parallel scan all available markets
       const scanResults = await Promise.all(
         availableMarkets.map(async (m) => {
-          const prices = tickManager.getTicks(m.symbol, 100);
-          const digits = m.digitEnabled ? tickManager.getDigits(m.symbol, 300) : undefined;
-          const analysis = analyzeMarket(m.symbol, m.category, prices, balance, settingsObj, digits);
-          return { ...m, analysis, prices };
+          const ctx = buildScanContext(m, balance, tradingSettings, daily, token, account?.currency ?? "USD");
+          const output = await runCoordinator(ctx);
+          return { market: m, output, ctx };
         })
       );
 
-      // In recovery mode, also score by win rate for alternative contract types
-      if (recoveryModeEnabled && recoveryStep > 0 && lastLossContractType) {
-        const alt = getAlternativeContractType(lastLossContractType, lastLossBarrier, preferredContractTypes);
-        // Boost markets that have a good win rate for the alternative contract type
-        scanResults.sort((a, b) => {
-          const aWr = getMarketWinRate(a.symbol, alt.contractType);
-          const bWr = getMarketWinRate(b.symbol, alt.contractType);
-          const aScore = b.analysis.qualityScore * 0.7 + aWr * 30;
-          const bScore = b.analysis.qualityScore * 0.7 + bWr * 30;
-          return bScore - aScore;
-        });
-      } else {
-        scanResults.sort((a, b) => b.analysis.qualityScore - a.analysis.qualityScore);
-      }
-
+      scanResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore);
       const top = scanResults[0];
       if (top) {
-        bestMarket = top;
-        if (top.analysis.shouldTrade) {
-          exploitSymbol = top.symbol;
-          exploitQualityThreshold = top.analysis.qualityScore;
+        bestResult = top;
+        if (top.output.shouldTrade) {
+          exploitSymbol = top.market.symbol;
+          exploitQualityThreshold = top.output.qualityScore;
           exploitCount = 1;
         }
       }
     }
 
-    if (!bestMarket) { scheduleNext(); return; }
+    if (!bestResult) { scheduleNext(); return; }
 
+    const { market: bestMarket, output, ctx } = bestResult;
     currentMarket = bestMarket.symbol;
 
-    // Update agent scores from this scan
-    const scores = bestMarket.analysis.agentScores;
-    lastAgentScores = {
-      marketScanner: scores.marketScanner.score,
-      trendAnalysis: scores.trendAnalysis.score,
-      volatilityAnalysis: scores.volatilityAnalysis.score,
-      patternRecognition: scores.patternRecognition.score,
-      riskManagement: scores.riskManagement.score,
-      capitalPreservation: scores.capitalPreservation.score,
-      tradeExecution: scores.tradeExecution.score,
-      selfLearning: scores.selfLearning.score,
-    };
+    // Build legacy analysis for backward-compat fields
+    const analysis = buildLegacyAnalysis(output);
+
+    // Update agent scores
+    const agentOutputs = output.agents;
+    lastAgentScores = Object.fromEntries(
+      AGENT_SCORE_KEYS.map((k) => [k, agentOutputs[k]?.score ?? 65])
+    );
 
     broadcastSSE("scan_complete", {
       symbol: bestMarket.symbol,
-      quality: bestMarket.analysis.qualityScore,
-      confidence: bestMarket.analysis.confidenceScore,
+      quality: output.qualityScore,
+      confidence: output.confidenceScore,
       agentScores: lastAgentScores,
       marketsScanned: availableMarkets.length,
+      regime: output.regime,
+      shouldTrade: output.shouldTrade,
+      rejectReason: output.rejectReason,
     });
 
-    const { analysis: rawAnalysis } = bestMarket;
-    const duration = rawAnalysis.recommendedDuration ?? tradeDurationSec;
-
-    // In recovery mode, try alternative contract type
-    let effectiveContractType = rawAnalysis.recommendedContractType;
-    let effectiveBarrier = rawAnalysis.digitBarrier;
-
-    if (recoveryModeEnabled && recoveryStep > 0 && lastLossContractType) {
-      const alt = getAlternativeContractType(lastLossContractType, lastLossBarrier, preferredContractTypes);
-      effectiveContractType = alt.contractType;
-      if (alt.barrier !== undefined) effectiveBarrier = alt.barrier;
-      logger.info({ recovery: true, from: lastLossContractType, to: effectiveContractType, barrier: effectiveBarrier }, "Recovery: switching contract type");
-    }
-
-    const analysis = await finalizeAnalysis(rawAnalysis, {
-      symbol: bestMarket.symbol,
-      currency: account?.currency ?? "USD",
-      token,
-      defaultDuration: duration,
-      barrier: effectiveBarrier,
-      skipProposal: paperTradeMode || !token,
-    });
-
-    logger.info({
-      symbol: bestMarket.symbol,
-      confidence: analysis.confidenceScore,
-      calibrated: analysis.calibratedConfidence,
-      ev: analysis.expectedValue,
-      quality: analysis.qualityScore,
-      contract: effectiveContractType,
-      shouldTrade: analysis.shouldTrade,
-      recovery: recoveryStep > 0,
-    }, "Autonomous scan");
-
-    // Agent's own intelligence decides if conditions are favourable enough to trade
-    const canTrade = analysis.shouldTrade && (analysis.expectedValue > 0 || (recoveryModeEnabled && recoveryStep > 0));
-
-    if (!canTrade) {
-      logger.info({ quality: analysis.qualityScore, ev: analysis.expectedValue, shouldTrade: analysis.shouldTrade }, "Conditions not favourable — scanning next");
+    if (!output.shouldTrade) {
+      logger.info({
+        symbol: bestMarket.symbol,
+        quality: output.qualityScore,
+        reason: output.rejectReason,
+      }, "Conditions not favourable — scanning next");
       scheduleNext(false);
       return;
     }
 
     // ── Trade execution ──────────────────────────────────────────────────────
-    {
-      let stake = analysis.recommendedStake;
-      if (baseStake === 0) baseStake = stake;
+    const rec = output.recommendation;
+    const stake = rec.stake;
+    const effectiveContractType = rec.product;
+    const effectiveBarrier = rec.barrier;
+    const duration = rec.duration;
+    const payout = stake * rec.payoutMultiplier;
 
-      // Recovery stake calculation: enough to cover lost amount + margin
-      if (recoveryModeEnabled && recoveryStep > 0 && lastLossAmount > 0) {
-        stake = calcRecoveryStake(lastLossAmount, analysis.payoutMultiplier, baseStake, maxTradeStake);
-        logger.info({ recoveryStake: stake, lossAmount: lastLossAmount, step: recoveryStep }, "Recovery stake calculated");
-      } else {
-        stake = Math.min(stake, maxTradeStake);
+    let won: boolean, profit: number, entryPrice: number, exitPrice: number;
+
+    if (paperTradeMode || !token) {
+      const winProb = rec.winProbability / 100;
+      won = Math.random() < winProb;
+      profit = won ? payout - stake : -stake;
+      entryPrice = ctx.prices[ctx.prices.length - 1] ?? 100;
+      exitPrice = entryPrice;
+      logger.info({ symbol: bestMarket.symbol, paper: true, won, ev: analysis.expectedValue }, "Paper trade");
+    } else {
+      try {
+        const liveResult = await executeLiveTrade(token, {
+          symbol: bestMarket.symbol,
+          contractType: effectiveContractType,
+          stake,
+          duration,
+          durationUnit: "t",
+          currency: account?.currency ?? "USD",
+          barrier: effectiveContractType.includes("DIGIT") ? effectiveBarrier : undefined,
+        });
+        entryPrice = liveResult.buyPrice;
+        const contractResult = await waitForContractResult(token, liveResult.contractId, (duration + 5) * 1000);
+        won = contractResult.won;
+        profit = contractResult.profit;
+        exitPrice = contractResult.exitSpot;
+        await syncLiveBalance(token);
+      } catch (liveErr) {
+        logger.warn({ liveErrMsg: liveErr instanceof Error ? liveErr.message : String(liveErr) }, "Live trade failed — skipping");
+        scheduleNext(false);
+        return;
       }
-
-      let won: boolean, profit: number, entryPrice: number, exitPrice: number;
-      const payout = stake * analysis.payoutMultiplier;
-
-      if (paperTradeMode || !token) {
-        const winProb = analysis.winProbability / 100;
-        won = Math.random() < winProb;
-        profit = won ? payout - stake : -stake;
-        entryPrice = bestMarket.prices[bestMarket.prices.length - 1] ?? 100;
-        exitPrice = entryPrice;
-        logger.info({ symbol: bestMarket.symbol, paper: true, won, ev: analysis.expectedValue }, "Paper trade logged");
-      } else {
-        try {
-          const liveResult = await executeLiveTrade(token, {
-            symbol: bestMarket.symbol,
-            contractType: effectiveContractType,
-            stake,
-            duration,
-            durationUnit: "t",
-            currency: account?.currency ?? "USD",
-            barrier: effectiveContractType.includes("DIGIT") ? effectiveBarrier : undefined,
-          });
-          entryPrice = liveResult.buyPrice;
-          const contractResult = await waitForContractResult(token, liveResult.contractId, (duration + 5) * 1000);
-          won = contractResult.won;
-          profit = contractResult.profit;
-          exitPrice = contractResult.exitSpot;
-          await syncLiveBalance(token);
-        } catch (liveErr) {
-          logger.warn({ liveErrMsg: liveErr instanceof Error ? liveErr.message : String(liveErr) }, "Live trade failed — skipping");
-          scheduleNext(false);
-          return;
-        }
-      }
-
-      await updateSelfLearning(bestMarket.symbol, effectiveContractType, effectiveBarrier, won);
-
-      const barrierToStore = effectiveContractType.includes("DIGIT") ? (effectiveBarrier ?? null) : null;
-
-      const [trade] = await db.insert(tradesTable).values({
-        symbol: bestMarket.symbol,
-        displayName: bestMarket.displayName,
-        contractType: effectiveContractType,
-        barrier: barrierToStore,
-        stake: String(stake),
-        direction: analysis.direction,
-        status: won ? "won" : "lost",
-        payout: String(payout),
-        profit: String(profit),
-        entryPrice: String(entryPrice),
-        exitPrice: String(exitPrice),
-        aiConfidence: String(analysis.calibratedConfidence),
-        aiRiskScore: String(analysis.riskScore),
-        isAutonomous: true,
-        agentReasoning: `${paperTradeMode ? "[PAPER] " : ""}${recoveryStep > 0 ? `[RECOVERY×${recoveryStep}] ` : ""}${analysis.reasoning} EV=$${analysis.expectedValue.toFixed(2)}`,
-        duration,
-        durationUnit: "t",
-        closedAt: new Date(),
-      }).returning();
-
-      await logTradeFeatures(trade.id, analysis, {
-        symbol: bestMarket.symbol,
-        barrier: barrierToStore,
-        tickWindow: analysis.tickWindow,
-        duration,
-        featuresJson: { mlModels: analysis.mlModels, winProbability: analysis.winProbability, recoveryStep },
-        isPaperTrade: paperTradeMode,
-      });
-
-      tradesExecutedToday++;
-      lastTradeTime = new Date();
-
-      broadcastSSE("trade_completed", {
-        symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
-        contract: effectiveContractType,
-        barrier: barrierToStore,
-        stake,
-        live: !!token && !paperTradeMode, paper: paperTradeMode, ev: analysis.expectedValue,
-        recoveryStep,
-      });
-      logger.info({ symbol: bestMarket.symbol, won, profit: profit.toFixed(2), stake, ev: analysis.expectedValue, recovery: recoveryStep > 0 }, "Trade executed");
     }
+
+    // Record outcome in performance feedback agent
+    recordTradeOutcome(
+      bestMarket.symbol,
+      effectiveContractType,
+      effectiveBarrier ?? null,
+      won,
+      profit,
+      stake,
+    );
+
+    const barrierToStore = effectiveContractType.includes("DIGIT") ? (effectiveBarrier ?? null) : null;
+
+    await db.insert(tradesTable).values({
+      symbol: bestMarket.symbol,
+      displayName: bestMarket.displayName,
+      contractType: effectiveContractType,
+      barrier: barrierToStore,
+      stake: String(stake),
+      direction: output.direction,
+      status: won ? "won" : "lost",
+      payout: String(payout),
+      profit: String(profit),
+      entryPrice: String(entryPrice),
+      exitPrice: String(exitPrice),
+      aiConfidence: String(rec.winProbability),
+      aiRiskScore: String(output.riskScore),
+      isAutonomous: true,
+      agentReasoning: `${paperTradeMode ? "[PAPER] " : ""}${output.reasoning}`,
+      duration,
+      durationUnit: "t",
+      closedAt: new Date(),
+    });
+
+    tradesExecutedToday++;
+    lastTradeTime = new Date();
+
+    broadcastSSE("trade_completed", {
+      symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
+      contract: effectiveContractType,
+      barrier: barrierToStore,
+      stake,
+      live: !!token && !paperTradeMode,
+      paper: paperTradeMode,
+      ev: analysis.expectedValue,
+      regime: output.regime,
+    });
+    logger.info({
+      symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
+      stake, ev: analysis.expectedValue,
+      contract: effectiveContractType,
+    }, "Trade executed");
+
   } catch (err) {
     logger.error({ err }, "Autonomous loop error");
   }
@@ -455,11 +381,35 @@ async function runAutonomousLoop() {
   scheduleNext(true);
 }
 
-function formatRecommendation(symbol: string, analysis: Awaited<ReturnType<typeof finalizeAnalysis>>) {
-  const market = getMarketInfo(symbol);
-  const prices = tickManager.getTicks(symbol, 100);
+function scheduleNext(tradeExecuted = false) {
+  if (!engineRunning) return;
+  // Minimum 2s between scans to prevent concurrent trade stacking
+  const delayMs = tradeExecuted ? 2000 : 2000;
+  nextScanIn = Math.ceil(delayMs / 1000);
+  loopIntervalSec = nextScanIn;
+  autonomousTimer = setTimeout(runAutonomousLoop, delayMs);
+}
+
+// ── Helper: build recommendation payload for /recommendation route ─────────────
+async function buildRecommendationPayload(symbol: string, market: ReturnType<typeof getMarketInfo>, balance: number, settings: any, preferredContractTypes: string[], token: string | null, currency: string) {
+  if (!market) return null;
+
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
+  const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
+  const sortedByTime = [...closedToday].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  let consecutiveLosses = 0;
+  for (const t of sortedByTime) { if (t.status === "lost") consecutiveLosses++; else break; }
+
+  const tradingSettings = buildTradingSettings(settings, preferredContractTypes);
+  const daily = buildDailyStats(closedToday, consecutiveLosses);
+  const ctx = buildScanContext(market, balance, tradingSettings, daily, token, currency);
+  const output = await runCoordinator(ctx);
+  const analysis = buildLegacyAnalysis(output);
+
+  const prices = ctx.prices;
   const trendStats = analyzeTrend(prices);
-  const digits = market?.digitEnabled ? tickManager.getDigits(symbol, 100) : [];
+  const digits = market.digitEnabled ? tickManager.getDigits(symbol, 100) : [];
   const liveDigitStats = digits.length > 10 ? analyzeDigits(digits) : null;
 
   return {
@@ -474,7 +424,7 @@ function formatRecommendation(symbol: string, analysis: Awaited<ReturnType<typeo
     breakevenWinRate: analysis.breakevenWinRate,
     payoutMultiplier: analysis.payoutMultiplier,
     recommendedDuration: analysis.recommendedDuration,
-    tickWindow: analysis.tickWindow ?? null,
+    tickWindow: null,
     riskScore: analysis.riskScore,
     profitability: analysis.profitability,
     agentScores: analysis.agentScores,
@@ -485,17 +435,43 @@ function formatRecommendation(symbol: string, analysis: Awaited<ReturnType<typeo
     digitStats: liveDigitStats ?? analysis.digitStats ?? null,
     digitBarrier: analysis.digitBarrier ?? null,
     trendStats,
+    regime: output.regime,
+    agentOutputs: output.agents,
     generatedAt: new Date().toISOString(),
   };
 }
 
-function scheduleNext(tradeExecuted = false) {
-  if (!engineRunning) return;
-  // Ultra-fast scanning: 1s after a trade settles, 200ms when scanning for opportunities
-  const delayMs = tradeExecuted ? 1000 : 200;
-  nextScanIn = Math.ceil(delayMs / 1000);
-  loopIntervalSec = nextScanIn;
-  autonomousTimer = setTimeout(runAutonomousLoop, delayMs);
+// ── Fast agent score computation for engine status ────────────────────────────
+async function getComputedAgentScores(): Promise<Record<string, number>> {
+  if (Object.keys(lastAgentScores).length > 0) return lastAgentScores;
+  // Quick scan on the best-buffered market
+  const candidateSymbols = ["1HZ100V", "R_100", "R_50", "R_25", "R_10"];
+  const best = candidateSymbols
+    .map((s) => ({ symbol: s, count: tickManager.getTicks(s, 100).length }))
+    .filter((x) => x.count >= 5)
+    .sort((a, b) => b.count - a.count)[0];
+  if (!best) return {};
+  const mInfo = getMarketInfo(best.symbol);
+  if (!mInfo) return {};
+
+  try {
+    const ctx: ScanContext = {
+      symbol: mInfo.symbol,
+      displayName: mInfo.displayName,
+      category: mInfo.category,
+      prices: tickManager.getTicks(mInfo.symbol, 100),
+      digits: mInfo.digitEnabled ? tickManager.getDigits(mInfo.symbol, 100) : [],
+      balance: 10000,
+      settings: buildTradingSettings(null, ["RISE", "FALL", "DIGITOVER", "DIGITUNDER"]),
+      daily: { tradesCount: 0, wins: 0, losses: 0, profit: 0, consecutiveLosses: 0, consecutiveWins: 0 },
+      token: null,
+      currency: "USD",
+    };
+    const output = await runCoordinator(ctx);
+    return Object.fromEntries(
+      AGENT_SCORE_KEYS.map((k) => [k, output.agents[k]?.score ?? 65])
+    );
+  } catch { return {}; }
 }
 
 // ── Routes ─────────────────────────────────────────────────────────────────────
@@ -520,44 +496,24 @@ router.get("/events", (req, res) => {
 router.get("/recommendation", async (_req, res): Promise<void> => {
   const { balance, settings, account } = await getAccountAndSettings();
   const token = getCachedToken() ?? account?.token ?? null;
-  const settingsObj = {
-    maxRiskPerTrade: settings ? Number(settings.maxRiskPerTrade) : 2,
-    minConfidenceThreshold: settings ? Number(settings.minConfidenceThreshold) : 55,
-    riskProfile: settings?.riskProfile ?? "moderate",
-    preferredContractTypes: settings?.preferredContractTypes?.split(",").filter(Boolean),
-    tradeDurationSec: settings?.tradeDurationSec ?? 5,
-    maxTradeStake: settings ? Number(settings.maxTradeStake) : 500,
-  };
+  const preferredContractTypes = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
 
   const allowedSymbols = (settings as any)?.allowedMarkets
     ? ((settings as any).allowedMarkets as string).split(",").filter(Boolean)
     : null;
   const marketsToScan = allowedSymbols && allowedSymbols.length > 0
-    ? DERIV_MARKETS.filter(m => allowedSymbols.includes(m.symbol))
+    ? DERIV_MARKETS.filter((m) => allowedSymbols.includes(m.symbol))
     : DERIV_MARKETS;
 
   const results = await Promise.all(
-    marketsToScan.map(async (m) => {
-      const prices = tickManager.getTicks(m.symbol, 100);
-      const digits = m.digitEnabled ? tickManager.getDigits(m.symbol, 300) : undefined;
-      const raw = analyzeMarket(m.symbol, m.category, prices, balance, settingsObj, digits);
-      const analysis = await finalizeAnalysis(raw, {
-        symbol: m.symbol,
-        currency: account?.currency ?? "USD",
-        token,
-        defaultDuration: raw.recommendedDuration ?? settingsObj.tradeDurationSec ?? 5,
-        barrier: raw.digitBarrier,
-        skipProposal: !token,
-      });
-      return { ...m, analysis, prices };
-    })
+    marketsToScan.map((m) => buildRecommendationPayload(m.symbol, m, balance, settings, preferredContractTypes, token, account?.currency ?? "USD"))
   );
 
-  results.sort((a, b) => b.analysis.expectedValue - a.analysis.expectedValue);
-  const best = results[0];
+  const valid = results.filter(Boolean) as NonNullable<typeof results[0]>[];
+  valid.sort((a, b) => (b?.expectedValue ?? 0) - (a?.expectedValue ?? 0));
+  const best = valid[0];
   if (!best) { res.status(404).json({ error: "No markets available" }); return; }
-
-  res.json(formatRecommendation(best.symbol, best.analysis));
+  res.json(best);
 });
 
 router.get("/recommendation/:symbol", async (req, res): Promise<void> => {
@@ -567,28 +523,11 @@ router.get("/recommendation/:symbol", async (req, res): Promise<void> => {
 
   const { balance, settings, account } = await getAccountAndSettings();
   const token = getCachedToken() ?? account?.token ?? null;
-  const s = {
-    maxRiskPerTrade: settings ? Number(settings.maxRiskPerTrade) : 2,
-    minConfidenceThreshold: settings ? Number(settings.minConfidenceThreshold) : 55,
-    riskProfile: settings?.riskProfile ?? "moderate",
-    preferredContractTypes: settings?.preferredContractTypes?.split(",").filter(Boolean),
-    tradeDurationSec: settings?.tradeDurationSec ?? 5,
-    maxTradeStake: settings ? Number(settings.maxTradeStake) : 500,
-  };
+  const preferredContractTypes = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
 
-  const prices = tickManager.getTicks(symbol, 100);
-  const digits = market.digitEnabled ? tickManager.getDigits(symbol, 300) : undefined;
-  const raw = analyzeMarket(symbol, market.category, prices, balance, s, digits);
-  const analysis = await finalizeAnalysis(raw, {
-    symbol,
-    currency: account?.currency ?? "USD",
-    token,
-    defaultDuration: raw.recommendedDuration ?? s.tradeDurationSec ?? 5,
-    barrier: raw.digitBarrier,
-    skipProposal: !token,
-  });
-
-  res.json(formatRecommendation(symbol, analysis));
+  const payload = await buildRecommendationPayload(symbol, market, balance, settings, preferredContractTypes, token, account?.currency ?? "USD");
+  if (!payload) { res.status(500).json({ error: "Analysis failed" }); return; }
+  res.json(payload);
 });
 
 router.get("/insights", async (_req, res): Promise<void> => {
@@ -620,9 +559,8 @@ router.get("/insights", async (_req, res): Promise<void> => {
   const worstMarket = [...marketEntries].sort((a, b) => (a[1].won / a[1].total) - (b[1].won / b[1].total))[0];
 
   const sorted = [...trades].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  let currentConsecLosses = 0, maxLossStreak = 0, curStreak = 0;
+  let currentConsecLosses = 0;
   for (const t of sorted) { if (t.status === "lost") currentConsecLosses++; else break; }
-  for (const t of sorted) { if (t.status === "lost") { curStreak++; maxLossStreak = Math.max(maxLossStreak, curStreak); } else curStreak = 0; }
 
   const highConf = trades.filter((t) => Number(t.aiConfidence ?? 0) >= 65);
   const highConfWinRate = highConf.length > 0 ? highConf.filter((t) => t.status === "won").length / highConf.length : 0;
@@ -635,95 +573,64 @@ router.get("/insights", async (_req, res): Promise<void> => {
   const riseFallWinRate = riseFallTrades.length > 0 ? riseFallTrades.filter((t) => t.status === "won").length / riseFallTrades.length : 0;
 
   const liveStatus = `Deriv WS ${tickManager.getConnectionStatus() ? "connected" : "disconnected"} — ${tickManager.getLiveTickCount()} ticks buffered`;
-
   const insights = [];
 
   if (trades.length === 0) {
     insights.push({ id: 1, type: "improvement", title: "Start Trading to Build AI Insights", description: `${liveStatus}. Start the autonomous engine to begin generating personalized trade analysis.`, priority: "medium", actionable: true, relatedMarket: null });
   } else {
-    insights.push({ id: 1, type: "pattern", title: `${(winRate * 100).toFixed(1)}% win rate — ${trades.length} total trades`, description: `Won: ${won.length}, Lost: ${lost.length}. Avg P&L: ${avgProfit >= 0 ? "+" : ""}$${avgProfit.toFixed(2)}. ${winRate > 0.55 ? "You have a profitable edge." : winRate > 0.45 ? "Near break-even — try raising confidence threshold." : "Below break-even — review settings."}`, priority: winRate > 0.55 ? "low" : "high", actionable: winRate <= 0.55, relatedMarket: null });
+    insights.push({ id: 1, type: "pattern", title: `${(winRate * 100).toFixed(1)}% win rate — ${trades.length} total trades`, description: `Won: ${won.length}, Lost: ${lost.length}. Avg P&L: ${avgProfit >= 0 ? "+" : ""}$${avgProfit.toFixed(2)}. ${winRate > 0.55 ? "You have a profitable edge." : winRate > 0.45 ? "Near break-even — review confidence threshold." : "Below break-even — review settings."}`, priority: winRate > 0.55 ? "low" : "high", actionable: winRate <= 0.55, relatedMarket: null });
 
     if (digitTrades.length > 5 && riseFallTrades.length > 5) {
       const betterType = digitWinRate > riseFallWinRate ? "DIGIT OVER/UNDER" : "RISE/FALL";
-      insights.push({ id: 2, type: "pattern", title: `${betterType} contracts are outperforming`, description: `DIGIT contracts: ${(digitWinRate * 100).toFixed(1)}% win rate. RISE/FALL: ${(riseFallWinRate * 100).toFixed(1)}%. Adjust preferred contract types in Settings for better results.`, priority: Math.abs(digitWinRate - riseFallWinRate) > 0.1 ? "high" : "medium", actionable: true, relatedMarket: null });
+      insights.push({ id: 2, type: "pattern", title: `${betterType} contracts outperforming`, description: `DIGIT: ${(digitWinRate * 100).toFixed(1)}% WR. RISE/FALL: ${(riseFallWinRate * 100).toFixed(1)}%. Adjust preferred contract types in Settings.`, priority: Math.abs(digitWinRate - riseFallWinRate) > 0.1 ? "high" : "medium", actionable: true, relatedMarket: null });
     }
 
     if (bestMarket) {
-      insights.push({ id: 3, type: "milestone", title: `Best market: ${bestMarket[0]} at ${((bestMarket[1].won / bestMarket[1].total) * 100).toFixed(0)}% win rate`, description: `${bestMarket[1].won}/${bestMarket[1].total} wins, $${bestMarket[1].profit.toFixed(2)} profit. Engine prioritises this market in exploit mode.`, priority: "low", actionable: false, relatedMarket: bestMarket[0] });
+      insights.push({ id: 3, type: "milestone", title: `Best market: ${bestMarket[0]} at ${((bestMarket[1].won / bestMarket[1].total) * 100).toFixed(0)}% win rate`, description: `${bestMarket[1].won}/${bestMarket[1].total} wins, $${bestMarket[1].profit.toFixed(2)} profit.`, priority: "low", actionable: false, relatedMarket: bestMarket[0] });
     }
 
     if (currentConsecLosses >= 2) {
-      insights.push({ id: 4, type: "warning", title: `⚠ Active losing streak: ${currentConsecLosses} consecutive losses`, description: `Consider pausing the engine. Recovery Mode is ${currentConsecLosses >= 3 ? "strongly " : ""}recommended to manage stake sizing automatically. Engine will switch to alternative contract types on recovery.`, priority: currentConsecLosses >= 3 ? "high" : "medium", actionable: true, relatedMarket: null });
+      insights.push({ id: 4, type: "warning", title: `⚠ Active losing streak: ${currentConsecLosses} consecutive losses`, description: `Consider pausing the engine. The Risk Manager will automatically reduce stakes as losses accumulate.`, priority: currentConsecLosses >= 3 ? "high" : "medium", actionable: true, relatedMarket: null });
     }
 
     if (highConf.length > 3 && lowConf.length > 3) {
-      insights.push({ id: 5, type: "improvement", title: `High-confidence trades: ${(highConfWinRate * 100).toFixed(1)}% vs low-confidence: ${(lowConfWinRate * 100).toFixed(1)}%`, description: highConfWinRate > lowConfWinRate + 0.05 ? "Raise confidence threshold to 65+ for significantly better results." : "Your confidence threshold is well-calibrated.", priority: highConfWinRate > lowConfWinRate + 0.1 ? "high" : "low", actionable: highConfWinRate > lowConfWinRate + 0.05, relatedMarket: null });
+      insights.push({ id: 5, type: "improvement", title: `High-confidence trades: ${(highConfWinRate * 100).toFixed(1)}% vs low-confidence: ${(lowConfWinRate * 100).toFixed(1)}%`, description: highConfWinRate > lowConfWinRate + 0.05 ? "Raise confidence threshold to 65+ for better results." : "Your confidence threshold is well-calibrated.", priority: highConfWinRate > lowConfWinRate + 0.1 ? "high" : "low", actionable: highConfWinRate > lowConfWinRate + 0.05, relatedMarket: null });
     }
 
     if (worstMarket && worstMarket[1].total >= 3 && worstMarket[1].won / worstMarket[1].total < 0.4) {
-      insights.push({ id: 6, type: "warning", title: `Avoid ${worstMarket[0]}: ${((worstMarket[1].won / worstMarket[1].total) * 100).toFixed(0)}% win rate`, description: `Only ${worstMarket[1].won}/${worstMarket[1].total} wins. Consider removing it from your allowed markets in Settings.`, priority: "medium", actionable: true, relatedMarket: worstMarket[0] });
+      insights.push({ id: 6, type: "warning", title: `Avoid ${worstMarket[0]}: ${((worstMarket[1].won / worstMarket[1].total) * 100).toFixed(0)}% win rate`, description: `Only ${worstMarket[1].won}/${worstMarket[1].total} wins. Consider removing from allowed markets in Settings.`, priority: "medium", actionable: true, relatedMarket: worstMarket[0] });
     }
   }
 
   res.json(insights);
 });
 
-// ── Compute live agent scores from in-memory tick data (fast, no I/O) ─────────
-function getComputedAgentScores(balance: number, settingsObj: { maxRiskPerTrade: number; minConfidenceThreshold: number; riskProfile: string }) {
-  // Use already-computed scores when engine is running, else do a fast in-memory scan
-  if (Object.keys(lastAgentScores).length > 0) return lastAgentScores;
-  const candidateSymbols = ["1HZ100V", "R_100", "R_50", "R_25", "R_10", "frxEURUSD"];
-  const market = candidateSymbols
-    .map(s => ({ symbol: s, count: tickManager.getTicks(s, 100).length }))
-    .sort((a, b) => b.count - a.count)[0];
-  if (!market || market.count < 5) return lastAgentScores;
-  const mInfo = getMarketInfo(market.symbol);
-  if (!mInfo) return lastAgentScores;
-  const prices = tickManager.getTicks(market.symbol, 100);
-  const digits = mInfo.digitEnabled ? tickManager.getDigits(market.symbol, 100) : undefined;
-  const analysis = analyzeMarket(market.symbol, mInfo.category, prices, balance, settingsObj, digits);
-  const s = analysis.agentScores;
-  return {
-    marketScanner: s.marketScanner.score, trendAnalysis: s.trendAnalysis.score,
-    volatilityAnalysis: s.volatilityAnalysis.score, patternRecognition: s.patternRecognition.score,
-    riskManagement: s.riskManagement.score, capitalPreservation: s.capitalPreservation.score,
-    tradeExecution: s.tradeExecution.score, selfLearning: s.selfLearning.score,
-  };
-}
-
 router.get("/engine/status", async (_req, res): Promise<void> => {
   const settings = await db.select().from(settingsTable).limit(1);
-  const { balance } = await getAccountAndSettings();
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
-
-  const quickSettings = {
-    maxRiskPerTrade: settings.length > 0 ? Number(settings[0].maxRiskPerTrade) : 2,
-    minConfidenceThreshold: 50,
-    riskProfile: settings.length > 0 ? settings[0].riskProfile : "moderate",
-  };
-  const liveScores = getComputedAgentScores(balance, quickSettings);
+  const liveScores = await getComputedAgentScores();
 
   res.json({
     isRunning: engineRunning, mode: engineRunning ? "autonomous" : "manual",
     agentStatuses: AGENT_NAMES.map((name, i) => {
-      const key = AGENT_SCORE_KEYS[i] ?? "marketScanner";
+      const key = AGENT_SCORE_KEYS[i] ?? "featureEngineering";
       const score = liveScores[key] ?? 65;
       return {
         name,
-        isActive: true, // Agents always analyse market data — engine running/stopped controls autonomous trading only
+        isActive: true,
         lastRun: new Date().toISOString(),
         confidence: score,
       };
     }),
     tradesExecutedToday: todayTrades.length,
     currentMarket, nextScanIn: engineRunning ? nextScanIn : null, stopReasons, loopIntervalSec,
-    lastTradeTime: lastTradeTime?.toISOString() ?? null, exploitSymbol, exploitCount, recoveryStep,
+    lastTradeTime: lastTradeTime?.toISOString() ?? null, exploitSymbol, exploitCount,
     wsConnected: tickManager.getConnectionStatus(),
     liveTickCount: tickManager.getLiveTickCount(),
     tickHealth: tickManager.getTickHealth(),
-    paperTradeMode: settings.length > 0 ? (settings[0] as { paperTradeMode?: boolean }).paperTradeMode ?? false : false,
-    requirePositiveEv: settings.length > 0 ? (settings[0] as { requirePositiveEv?: boolean }).requirePositiveEv ?? true : true,
+    paperTradeMode: settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false,
+    requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
   });
 });
 
@@ -737,40 +644,33 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
 
   if (running) {
     engineRunning = true; autonomousMode = "autonomous"; stopReasons = []; nextScanIn = loopIntervalSec;
-    exploitSymbol = null; exploitCount = 0; recoveryStep = 0; baseStake = 0;
-    lastLossContractType = null; lastLossBarrier = null; lastLossSymbol = null; lastLossAmount = 0;
+    exploitSymbol = null; exploitCount = 0;
     if (settings.length > 0) await db.update(settingsTable).set({ autonomousEnabled: true });
     if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
     autonomousTimer = setTimeout(runAutonomousLoop, 2000);
     logger.info({ loopIntervalSec }, "Autonomous engine started");
   } else {
     engineRunning = false; autonomousMode = "manual"; currentMarket = null; nextScanIn = null;
-    exploitSymbol = null; recoveryStep = 0;
-    lastAgentScores = {};
+    exploitSymbol = null; lastAgentScores = {};
     if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
     if (settings.length > 0) await db.update(settingsTable).set({ autonomousEnabled: false });
   }
 
-  const toggleScores = getComputedAgentScores(10000, { maxRiskPerTrade: 2, minConfidenceThreshold: 50, riskProfile: "moderate" });
+  const toggleScores = await getComputedAgentScores();
   res.json({
     isRunning: engineRunning, mode: autonomousMode,
     agentStatuses: AGENT_NAMES.map((name, i) => {
-      const key = AGENT_SCORE_KEYS[i] ?? "marketScanner";
+      const key = AGENT_SCORE_KEYS[i] ?? "featureEngineering";
       const score = toggleScores[key] ?? 65;
-      return {
-        name,
-        isActive: true,
-        lastRun: new Date().toISOString(),
-        confidence: score,
-      };
+      return { name, isActive: true, lastRun: new Date().toISOString(), confidence: score };
     }),
     tradesExecutedToday, currentMarket, nextScanIn, stopReasons, loopIntervalSec,
-    lastTradeTime: lastTradeTime?.toISOString() ?? null, exploitSymbol, exploitCount, recoveryStep,
+    lastTradeTime: lastTradeTime?.toISOString() ?? null, exploitSymbol, exploitCount,
     wsConnected: tickManager.getConnectionStatus(),
     liveTickCount: tickManager.getLiveTickCount(),
     tickHealth: tickManager.getTickHealth(),
-    paperTradeMode: settings.length > 0 ? (settings[0] as { paperTradeMode?: boolean }).paperTradeMode ?? false : false,
-    requirePositiveEv: settings.length > 0 ? (settings[0] as { requirePositiveEv?: boolean }).requirePositiveEv ?? true : true,
+    paperTradeMode: settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false,
+    requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
   });
 });
 

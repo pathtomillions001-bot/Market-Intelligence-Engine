@@ -1,68 +1,123 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { accountsTable, settingsTable } from "@workspace/db";
-import { analyzeMarket } from "../lib/ai-engine";
-import { tickManager, DERIV_MARKETS, getMarketInfo, getCachedToken } from "../lib/deriv";
-import { finalizeAnalysis } from "../lib/trade-helpers";
+import { sql } from "drizzle-orm";
+import { tradesTable } from "@workspace/db";
+import { tickManager, DERIV_MARKETS, getMarketInfo, getCachedToken, analyzeDigits } from "../lib/deriv";
+import { runCoordinator, buildLegacyAnalysis } from "../lib/agent-coordinator";
+import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 import { GetMarketsQueryParams } from "@workspace/api-zod";
 
 const router = Router();
 
-interface CachedAnalysis {
+interface CachedOutput {
   symbol: string;
   displayName: string;
   category: string;
-  analysis: ReturnType<typeof analyzeMarket>;
+  output: Awaited<ReturnType<typeof runCoordinator>>;
   prices: number[];
   lastUpdated: Date;
 }
 
-const analysisCache = new Map<string, CachedAnalysis>();
+const analysisCache = new Map<string, CachedOutput>();
 let isScanning = false;
+
+// ── Settings builders ─────────────────────────────────────────────────────────
 
 async function getAccountAndSettings() {
   const accounts = await db.select().from(accountsTable).limit(1);
   const settings = await db.select().from(settingsTable).limit(1);
-  const balance = accounts.length > 0 ? Number(accounts[0].balance) : 10000;
-  const s = settings.length > 0 ? settings[0] : null;
   return {
-    balance,
-    settings: {
-      maxRiskPerTrade: s ? Number(s.maxRiskPerTrade) : 2,
-      minConfidenceThreshold: s ? Number(s.minConfidenceThreshold) : 55,
-      riskProfile: s?.riskProfile ?? "moderate",
-      preferredContractTypes: s?.preferredContractTypes?.split(",").filter(Boolean),
-      tradeDurationSec: s?.tradeDurationSec ?? 5,
-      maxTradeStake: s ? Number(s.maxTradeStake) : 500,
-    },
+    balance: accounts.length > 0 ? Number(accounts[0].balance) : 10000,
+    settings: settings.length > 0 ? settings[0] : null,
+    token: getCachedToken() ?? (accounts.length > 0 ? accounts[0].token : null),
+    currency: accounts.length > 0 ? (accounts[0].currency ?? "USD") : "USD",
   };
 }
+
+function buildTradingSettings(s: any, preferredContractTypes: string[]): TradingSettings {
+  return {
+    maxRiskPerTrade:        s ? Number(s.maxRiskPerTrade) : 2,
+    minConfidenceThreshold: s ? Number(s.minConfidenceThreshold) : 38,
+    riskProfile:            (s?.riskProfile ?? "moderate") as "conservative" | "moderate" | "aggressive",
+    preferredContractTypes,
+    tradeDurationSec:       s?.tradeDurationSec ?? 5,
+    maxTradeStake:          s ? Number(s.maxTradeStake) : 500,
+    dailyLossLimit:         s ? Number(s.dailyLossLimit) : 30,
+    dailyTarget:            s ? Number(s.dailyTarget) : 50,
+    consecutiveLossLimit:   s?.consecutiveLossLimit ?? 3,
+    maxDrawdown:            s ? Number(s.maxDrawdown ?? 20) : 20,
+    requirePositiveEv:      s?.requirePositiveEv ?? true,
+    paperTradeMode:         s?.paperTradeMode ?? false,
+  };
+}
+
+async function getDailyStats(): Promise<DailyStats> {
+  try {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
+    const closed = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
+    const sorted = [...closed].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    let consecutiveLosses = 0;
+    for (const t of sorted) { if (t.status === "lost") consecutiveLosses++; else break; }
+    let consecutiveWins = 0;
+    for (const t of sorted) { if (t.status === "won") consecutiveWins++; else break; }
+    return {
+      tradesCount: closed.length,
+      wins: closed.filter((t) => t.status === "won").length,
+      losses: closed.filter((t) => t.status === "lost").length,
+      profit: closed.reduce((s, t) => s + Number(t.profit ?? 0), 0),
+      consecutiveLosses,
+      consecutiveWins,
+    };
+  } catch {
+    return { tradesCount: 0, wins: 0, losses: 0, profit: 0, consecutiveLosses: 0, consecutiveWins: 0 };
+  }
+}
+
+function buildScanContext(
+  market: { symbol: string; displayName: string; category: string; digitEnabled?: boolean },
+  balance: number,
+  settings: TradingSettings,
+  daily: DailyStats,
+  token: string | null,
+  currency: string,
+): ScanContext {
+  const prices = tickManager.getTicks(market.symbol, 100);
+  const digits = market.digitEnabled ? tickManager.getDigits(market.symbol, 300) : [];
+  return { symbol: market.symbol, displayName: market.displayName, category: market.category, prices, digits, balance, settings, daily, token, currency };
+}
+
+// ── Background scan ───────────────────────────────────────────────────────────
 
 async function analyzeAllMarkets() {
   if (isScanning) return;
   isScanning = true;
   try {
-    const { balance, settings } = await getAccountAndSettings();
+    const { balance, settings, token, currency } = await getAccountAndSettings();
+    const preferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER"];
+    const tradingSettings = buildTradingSettings(settings, preferred);
+    const daily = await getDailyStats();
     const now = new Date();
 
-    // Only re-analyze markets that are stale (> 15 seconds old)
+    // Only re-analyze markets stale (> 15s old)
     const staleMarkets = DERIV_MARKETS.filter((m) => {
       const cached = analysisCache.get(m.symbol);
-      return !cached || (now.getTime() - cached.lastUpdated.getTime()) > 15000;
+      return !cached || now.getTime() - cached.lastUpdated.getTime() > 15_000;
     });
 
-    // All in parallel using live tick data from TickManager (no latency)
     await Promise.all(staleMarkets.map(async (market) => {
       try {
-        const prices = tickManager.getTicks(market.symbol, 100);
-        const digits = market.digitEnabled ? tickManager.getDigits(market.symbol, 200) : undefined;
-        const analysis = analyzeMarket(market.symbol, market.category, prices, balance, settings, digits);
+        const ctx = buildScanContext(market, balance, tradingSettings, daily, token, currency);
+        // For background scans: use a "no live payout" context to avoid 17× WS round-trips
+        const ctxNoPayout = { ...ctx, token: null };
+        const output = await runCoordinator(ctxNoPayout);
         analysisCache.set(market.symbol, {
           symbol: market.symbol,
           displayName: market.displayName,
           category: market.category,
-          analysis,
-          prices,
+          output,
+          prices: ctx.prices,
           lastUpdated: new Date(),
         });
       } catch { /* skip */ }
@@ -75,6 +130,8 @@ async function analyzeAllMarkets() {
 // Warm up cache on startup
 analyzeAllMarkets().catch(() => {});
 
+// ── Routes ─────────────────────────────────────────────────────────────────────
+
 router.get("/", async (req, res): Promise<void> => {
   const parseResult = GetMarketsQueryParams.safeParse(req.query);
   const params = parseResult.success ? parseResult.data : {} as { category?: string; limit?: number };
@@ -82,29 +139,33 @@ router.get("/", async (req, res): Promise<void> => {
 
   analyzeAllMarkets().catch(() => {});
 
-  const { balance, settings } = await getAccountAndSettings();
+  const { balance, settings, token, currency } = await getAccountAndSettings();
+  const preferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER"];
+  const tradingSettings = buildTradingSettings(settings, preferred);
+  const daily = await getDailyStats();
 
   const ranked = await Promise.all(
     DERIV_MARKETS.slice(0, limit).map(async (m) => {
       let cached = analysisCache.get(m.symbol);
       if (!cached) {
-        const prices = tickManager.getTicks(m.symbol, 50);
-        const digits = m.digitEnabled ? tickManager.getDigits(m.symbol, 100) : undefined;
-        const analysis = analyzeMarket(m.symbol, m.category, prices, balance, settings, digits);
-        cached = { symbol: m.symbol, displayName: m.displayName, category: m.category, analysis, prices, lastUpdated: new Date() };
+        const ctx = buildScanContext(m, balance, tradingSettings, daily, token, currency);
+        const output = await runCoordinator({ ...ctx, token: null });
+        cached = { symbol: m.symbol, displayName: m.displayName, category: m.category, output, prices: ctx.prices, lastUpdated: new Date() };
         analysisCache.set(m.symbol, cached);
       }
-      const { analysis, prices } = cached;
+      const { output, prices } = cached;
       return {
         symbol: m.symbol,
         displayName: m.displayName,
         category: m.category,
-        qualityScore: analysis.qualityScore,
-        confidenceScore: analysis.confidenceScore,
-        riskScore: analysis.riskScore,
-        trend: analysis.trend,
-        volatility: analysis.volatility,
-        recommendedContractType: analysis.recommendedContractType,
+        qualityScore: output.qualityScore,
+        confidenceScore: output.confidenceScore,
+        riskScore: output.riskScore,
+        trend: output.trend,
+        volatility: output.volatility,
+        recommendedContractType: output.recommendation.product,
+        regime: output.regime,
+        shouldTrade: output.shouldTrade,
         lastPrice: tickManager.getLatestPrice(m.symbol) ?? prices[prices.length - 1] ?? null,
         priceChange24h: prices.length > 1 ? ((prices[prices.length - 1] - prices[0]) / prices[0]) * 100 : null,
         rank: 0,
@@ -114,29 +175,30 @@ router.get("/", async (req, res): Promise<void> => {
 
   ranked.sort((a, b) => b.qualityScore - a.qualityScore);
   ranked.forEach((m, i) => { m.rank = i + 1; });
-
   res.json(ranked);
 });
 
 router.get("/top", async (_req, res): Promise<void> => {
   analyzeAllMarkets().catch(() => {});
-  const { balance, settings } = await getAccountAndSettings();
+  const { balance, settings, token, currency } = await getAccountAndSettings();
+  const preferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER"];
+  const tradingSettings = buildTradingSettings(settings, preferred);
+  const daily = await getDailyStats();
 
-  let best: CachedAnalysis | null = null;
+  let best: CachedOutput | null = null;
   for (const [, cached] of analysisCache) {
-    if (!best || cached.analysis.qualityScore > best.analysis.qualityScore) best = cached;
+    if (!best || cached.output.qualityScore > best.output.qualityScore) best = cached;
   }
 
   if (!best) {
     const market = DERIV_MARKETS[0];
-    const prices = tickManager.getTicks(market.symbol, 50);
-    const digits = market.digitEnabled ? tickManager.getDigits(market.symbol, 100) : undefined;
-    const analysis = analyzeMarket(market.symbol, market.category, prices, balance, settings, digits);
-    best = { symbol: market.symbol, displayName: market.displayName, category: market.category, analysis, prices, lastUpdated: new Date() };
+    const ctx = buildScanContext(market, balance, tradingSettings, daily, token, currency);
+    const output = await runCoordinator(ctx);
+    best = { symbol: market.symbol, displayName: market.displayName, category: market.category, output, prices: ctx.prices, lastUpdated: new Date() };
     analysisCache.set(market.symbol, best);
   }
 
-  res.json(buildMarketDetail(best.symbol, best.displayName, best.category, best.analysis as any, best.prices));
+  res.json(buildMarketDetail(best.symbol, best.displayName, best.category, best.output, best.prices));
 });
 
 router.get("/scan", async (_req, res): Promise<void> => {
@@ -157,43 +219,50 @@ router.post("/scan", async (_req, res): Promise<void> => {
 router.get("/:symbol", async (req, res): Promise<void> => {
   const { symbol } = req.params;
   const market = getMarketInfo(symbol);
-  if (!market) {
-    res.status(404).json({ error: "Market not found" });
-    return;
-  }
+  if (!market) { res.status(404).json({ error: "Market not found" }); return; }
 
-  const accounts = await db.select().from(accountsTable).limit(1);
-  const { balance, settings } = await getAccountAndSettings();
-  const prices = tickManager.getTicks(symbol, 100);
-  const digits = market.digitEnabled ? tickManager.getDigits(symbol, 300) : undefined;
-  const raw = analyzeMarket(symbol, market.category, prices, balance, settings, digits);
-  const token = getCachedToken();
-  const analysis = await finalizeAnalysis(raw, {
-    symbol,
-    currency: accounts[0]?.currency ?? "USD",
-    token,
-    defaultDuration: raw.recommendedDuration ?? settings.tradeDurationSec ?? 5,
-    barrier: raw.digitBarrier,
-  });
-  analysisCache.set(symbol, { symbol, displayName: market.displayName, category: market.category, analysis: raw, prices, lastUpdated: new Date() });
+  const { balance, settings, token, currency } = await getAccountAndSettings();
+  const preferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER"];
+  const tradingSettings = buildTradingSettings(settings, preferred);
+  const daily = await getDailyStats();
 
-  res.json(buildMarketDetail(symbol, market.displayName, market.category, analysis, prices));
+  const ctx = buildScanContext(market, balance, tradingSettings, daily, token, currency);
+  const output = await runCoordinator(ctx);
+  analysisCache.set(symbol, { symbol, displayName: market.displayName, category: market.category, output, prices: ctx.prices, lastUpdated: new Date() });
+
+  res.json(buildMarketDetail(symbol, market.displayName, market.category, output, ctx.prices));
 });
 
-function buildMarketDetail(symbol: string, displayName: string, category: string, analysis: Awaited<ReturnType<typeof finalizeAnalysis>>, prices: number[]) {
+// ── Response builder ───────────────────────────────────────────────────────────
+
+function buildMarketDetail(
+  symbol: string,
+  displayName: string,
+  category: string,
+  output: Awaited<ReturnType<typeof runCoordinator>>,
+  prices: number[],
+) {
+  const analysis = buildLegacyAnalysis(output);
   const now = new Date();
   const priceHistory = prices.slice(-60).map((p, i) => ({
     timestamp: new Date(now.getTime() - (59 - i) * 1000).toISOString(),
     price: p,
   }));
 
+  // Live digit stats from the 50-tick window (more responsive than 200-tick)
+  const market = getMarketInfo(symbol);
+  const digits50 = market?.digitEnabled ? tickManager.getDigits(symbol, 50) : [];
+  const liveDigitStats = digits50.length > 10 ? analyzeDigits(digits50) : null;
+
   return {
     symbol,
     displayName,
     category,
-    qualityScore: analysis.qualityScore,
+    qualityScore: output.qualityScore,
+    regime: output.regime,
     agentScores: analysis.agentScores,
-    digitStats: analysis.digitStats ?? null,
+    agentOutputs: output.agents,
+    digitStats: liveDigitStats ?? output.digitStats ?? null,
     digitBarrier: analysis.digitBarrier ?? null,
     recommendation: {
       symbol,
@@ -207,7 +276,7 @@ function buildMarketDetail(symbol: string, displayName: string, category: string
       breakevenWinRate: analysis.breakevenWinRate,
       payoutMultiplier: analysis.payoutMultiplier,
       recommendedDuration: analysis.recommendedDuration,
-      tickWindow: analysis.tickWindow ?? null,
+      tickWindow: null,
       riskScore: analysis.riskScore,
       profitability: analysis.profitability,
       agentScores: analysis.agentScores,
