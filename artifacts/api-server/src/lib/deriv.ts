@@ -24,22 +24,26 @@ const DERIV_WS_URL = `wss://ws.binaryws.com/websockets/v3?app_id=${APP_ID}`;
 
 // ── Market definitions (synthetics only) ──────────────────────────────────────
 export const DERIV_MARKETS = [
-  { symbol: "R_10",    displayName: "Volatility 10 Index",       category: "synthetic", pipSize: 3, digitEnabled: true },
-  { symbol: "R_25",    displayName: "Volatility 25 Index",       category: "synthetic", pipSize: 3, digitEnabled: true },
+  // Pip sizes verified against Deriv active_symbols API (pip = smallest price increment):
+  // R_10/R_25/R_100/1HZ10V/1HZ25V/1HZ100V → pip=0.01 (2 d.p.) → pipSize=2
+  // R_50/R_75/1HZ50V/1HZ75V → pip=0.0001 (4 d.p.) → pipSize=4
+  // ALL Jump indices → pip=0.01 (2 d.p.) → pipSize=2
+  { symbol: "R_10",    displayName: "Volatility 10 Index",       category: "synthetic", pipSize: 2, digitEnabled: true },
+  { symbol: "R_25",    displayName: "Volatility 25 Index",       category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "R_50",    displayName: "Volatility 50 Index",       category: "synthetic", pipSize: 4, digitEnabled: true },
   { symbol: "R_75",    displayName: "Volatility 75 Index",       category: "synthetic", pipSize: 4, digitEnabled: true },
   { symbol: "R_100",   displayName: "Volatility 100 Index",      category: "synthetic", pipSize: 2, digitEnabled: true },
-  { symbol: "1HZ10V",  displayName: "Volatility 10 (1s) Index",  category: "synthetic", pipSize: 3, digitEnabled: true },
-  { symbol: "1HZ25V",  displayName: "Volatility 25 (1s) Index",  category: "synthetic", pipSize: 3, digitEnabled: true },
+  { symbol: "1HZ10V",  displayName: "Volatility 10 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
+  { symbol: "1HZ25V",  displayName: "Volatility 25 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ50V",  displayName: "Volatility 50 (1s) Index",  category: "synthetic", pipSize: 4, digitEnabled: true },
   { symbol: "1HZ75V",  displayName: "Volatility 75 (1s) Index",  category: "synthetic", pipSize: 4, digitEnabled: true },
   { symbol: "1HZ100V", displayName: "Volatility 100 (1s) Index", category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "RDBULL",  displayName: "Bull Market Index",         category: "synthetic", pipSize: 4, digitEnabled: false },
   { symbol: "RDBEAR",  displayName: "Bear Market Index",         category: "synthetic", pipSize: 4, digitEnabled: false },
-  { symbol: "JD10",    displayName: "Jump 10 Index",             category: "synthetic", pipSize: 3, digitEnabled: true },
-  { symbol: "JD25",    displayName: "Jump 25 Index",             category: "synthetic", pipSize: 3, digitEnabled: true },
-  { symbol: "JD50",    displayName: "Jump 50 Index",             category: "synthetic", pipSize: 4, digitEnabled: true },
-  { symbol: "JD75",    displayName: "Jump 75 Index",             category: "synthetic", pipSize: 4, digitEnabled: true },
+  { symbol: "JD10",    displayName: "Jump 10 Index",             category: "synthetic", pipSize: 2, digitEnabled: true },
+  { symbol: "JD25",    displayName: "Jump 25 Index",             category: "synthetic", pipSize: 2, digitEnabled: true },
+  { symbol: "JD50",    displayName: "Jump 50 Index",             category: "synthetic", pipSize: 2, digitEnabled: true },
+  { symbol: "JD75",    displayName: "Jump 75 Index",             category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "JD100",   displayName: "Jump 100 Index",            category: "synthetic", pipSize: 2, digitEnabled: true },
 ];
 
@@ -387,8 +391,8 @@ class DerivTickManager extends EventEmitter {
     }
 
     if (msg.error) {
-      logger.warn({ code: msg.error.code, message: msg.error.message }, "TickManager: Deriv error");
-      // If authorization error, just warn — we use app_id for public tick data
+      const sym = msg.echo_req?.ticks ?? msg.echo_req?.symbol ?? "?";
+      logger.warn({ code: msg.error.code, message: msg.error.message, symbol: sym }, "TickManager: Deriv subscription error");
     }
   }
 
