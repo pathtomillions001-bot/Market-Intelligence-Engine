@@ -324,7 +324,17 @@ router.post("/", async (req, res): Promise<void> => {
       }
     } catch { /* ignore */ }
 
-    broadcastSSE("trade_completed", { symbol, contractType, won, profit: profit.toFixed(2), stake });
+    broadcastSSE("trade_completed", {
+      trade: {
+        id: closedTrade.id, symbol, displayName, contractType: normalizeDerivContractType(contractType),
+        barrier: barrier ?? null, stake, payout: actualPayout,
+        profit: Math.round(profit * 100) / 100, won,
+        status: won ? "won" : "lost", duration: tradeDuration,
+        durationUnit: durationUnit ?? "t",
+        createdAt: new Date().toISOString(), closedAt: new Date().toISOString(),
+        aiConfidence: winProbability, isAutonomous: isAutonomous ?? false, source: "live",
+      }
+    });
     res.status(201).json(formatTrade(closedTrade));
     return;
   }
@@ -371,60 +381,129 @@ router.post("/", async (req, res): Promise<void> => {
     }
   } catch { /* ignore */ }
 
-  broadcastSSE("trade_completed", { symbol, contractType, won, profit: profit.toFixed(2), stake });
+  broadcastSSE("trade_completed", {
+    trade: {
+      id: trade.id, symbol, displayName, contractType: normalizeDerivContractType(contractType),
+      barrier: barrier ?? null, stake, payout: Number(payout.toFixed(2)),
+      profit: Math.round(profit * 100) / 100, won,
+      status: won ? "won" : "lost", duration: tradeDuration,
+      durationUnit: durationUnit ?? "t",
+      createdAt: new Date().toISOString(), closedAt: new Date().toISOString(),
+      aiConfidence: winProbability, isAutonomous: isAutonomous ?? false, source: "paper",
+    }
+  });
   res.status(201).json(formatTrade(trade));
 });
 
-// ── Deriv profit_table journal ─────────────────────────────────────────────────
+// ── Shared: compute stats from a trade list ────────────────────────────────────
+function computeJournalStats(trades: any[]) {
+  const won = trades.filter((t) => t.won);
+  const lost = trades.filter((t) => !t.won);
+  const totalProfit = trades.reduce((s, t) => s + (t.profit ?? 0), 0);
+
+  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+  const today = trades.filter((t) => new Date(t.createdAt) >= todayStart);
+
+  // Streak (from newest to oldest)
+  let currentStreak = 0;
+  for (const t of [...trades].reverse()) {
+    if (currentStreak === 0) currentStreak = t.won ? 1 : -1;
+    else if (t.won && currentStreak > 0) currentStreak++;
+    else if (!t.won && currentStreak < 0) currentStreak--;
+    else break;
+  }
+
+  let longestWin = 0, longestLoss = 0, runLen = 0, runWon: boolean | null = null;
+  for (const t of trades) {
+    if (runWon === null || runWon !== t.won) {
+      if (runWon === true) longestWin = Math.max(longestWin, runLen);
+      if (runWon === false) longestLoss = Math.max(longestLoss, runLen);
+      runLen = 1; runWon = t.won;
+    } else { runLen++; }
+  }
+  if (runWon === true) longestWin = Math.max(longestWin, runLen);
+  if (runWon === false) longestLoss = Math.max(longestLoss, runLen);
+
+  return {
+    totalTrades: trades.length,
+    wonTrades: won.length,
+    lostTrades: lost.length,
+    winRate: trades.length > 0 ? won.length / trades.length : 0,
+    totalProfit: Math.round(totalProfit * 100) / 100,
+    avgProfit: trades.length > 0 ? Math.round((totalProfit / trades.length) * 100) / 100 : 0,
+    bestTrade: won.length > 0 ? Math.max(...won.map((t) => t.profit ?? 0)) : 0,
+    worstTrade: lost.length > 0 ? Math.min(...lost.map((t) => t.profit ?? 0)) : 0,
+    todayProfit: Math.round(today.reduce((s, t) => s + (t.profit ?? 0), 0) * 100) / 100,
+    todayTrades: today.length,
+    todayWon: today.filter((t) => t.won).length,
+    todayLost: today.filter((t) => !t.won).length,
+    currentStreak,
+    longestWinStreak: longestWin,
+    longestLoseStreak: longestLoss,
+  };
+}
+
+function normalizeDerivContractType(ct: string): string {
+  if (ct === "CALL") return "RISE";
+  if (ct === "PUT") return "FALL";
+  return ct;
+}
+
+// ── Deriv profit_table journal (source of truth for all P&L / win stats) ───────
 router.get("/deriv-journal", async (_req, res): Promise<void> => {
   const accounts = await db.select().from(accountsTable).limit(1);
   const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
 
+  const mapLocal = (trades: any[]) => {
+    const list = trades.map(formatTrade).map((t) => ({ ...t, contractType: normalizeDerivContractType(t.contractType) }));
+    return { source: "local" as const, trades: list, stats: computeJournalStats(list) };
+  };
+
   if (!token) {
-    const trades = await db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(100);
-    res.json({ source: "local", trades: trades.map(formatTrade) });
+    const trades = await db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(200);
+    res.json(mapLocal(trades));
     return;
   }
 
   try {
-    const transactions = await fetchDerivProfitTable(token, 100);
+    const transactions = await fetchDerivProfitTable(token, 200);
     if (transactions.length === 0) {
-      const trades = await db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(100);
-      res.json({ source: "local", trades: trades.map(formatTrade) });
+      const trades = await db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(200);
+      res.json(mapLocal(trades));
       return;
     }
-    res.json({
-      source: "deriv",
-      trades: transactions.map((t: any) => {
-        const buyPrice = Number(t.buy_price ?? 0);
-        const sellPrice = Number(t.sell_price ?? 0);
-        const profit = sellPrice - buyPrice;
-        return {
-          id: t.transaction_id,
-          symbol: t.underlying_symbol ?? "—",
-          displayName: t.underlying_symbol,
-          contractType: t.contract_type ?? "UNKNOWN",
-          barrier: null,
-          stake: buyPrice,
-          payout: sellPrice,
-          profit,
-          won: profit > 0,
-          status: profit > 0 ? "won" : "lost",
-          duration: t.duration,
-          durationUnit: t.duration_unit,
-          createdAt: t.purchase_time ? new Date(t.purchase_time * 1000).toISOString() : new Date().toISOString(),
-          closedAt: t.sell_time ? new Date(t.sell_time * 1000).toISOString() : null,
-          shortcode: t.shortcode,
-          longcode: t.longcode,
-          isAutonomous: false,
-          aiConfidence: null,
-          source: "deriv",
-        };
-      }),
+
+    const mapped = transactions.map((t: any) => {
+      const buyPrice = Number(t.buy_price ?? 0);
+      const sellPrice = Number(t.sell_price ?? 0);
+      const profit = Math.round((sellPrice - buyPrice) * 100) / 100;
+      const market = DERIV_MARKETS.find((m) => m.symbol === t.underlying_symbol);
+      return {
+        id: t.transaction_id,
+        symbol: t.underlying_symbol ?? "—",
+        displayName: market?.displayName ?? t.underlying_symbol ?? "—",
+        contractType: normalizeDerivContractType(t.contract_type ?? "UNKNOWN"),
+        barrier: null,
+        stake: buyPrice,
+        payout: sellPrice,
+        profit,
+        won: profit > 0,
+        status: profit > 0 ? "won" : "lost",
+        duration: t.duration,
+        durationUnit: t.duration_unit,
+        createdAt: t.purchase_time ? new Date(t.purchase_time * 1000).toISOString() : new Date().toISOString(),
+        closedAt: t.sell_time ? new Date(t.sell_time * 1000).toISOString() : null,
+        longcode: t.longcode ?? null,
+        isAutonomous: false,
+        aiConfidence: null,
+        source: "deriv",
+      };
     });
+
+    res.json({ source: "deriv" as const, trades: mapped, stats: computeJournalStats(mapped) });
   } catch {
-    const trades = await db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(100);
-    res.json({ source: "local", trades: trades.map(formatTrade) });
+    const trades = await db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(200);
+    res.json(mapLocal(trades));
   }
 });
 

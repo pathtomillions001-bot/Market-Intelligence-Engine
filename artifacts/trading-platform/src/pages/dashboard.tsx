@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   useGetDailySummary,
   useGetTopMarket,
   useGetAiEngineStatus,
-  useGetTradeStats,
   useGetAiInsights,
   useGetAccount,
   useExecuteTrade,

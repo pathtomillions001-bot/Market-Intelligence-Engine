@@ -1,20 +1,49 @@
-import { useState, useEffect } from "react";
-import { useGetTrades, useGetTradeStats } from "@workspace/api-client-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useState, useEffect, useRef } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { motion } from "framer-motion";
-import { format } from "date-fns";
-import { Activity } from "lucide-react";
+import { format, isToday } from "date-fns";
+import { Activity, RefreshCw, Database, Wifi } from "lucide-react";
 
-type StatusFilter = "all" | "won" | "lost" | "open";
+interface JournalTrade {
+  id: string | number;
+  symbol: string;
+  displayName: string;
+  contractType: string;
+  barrier: number | null;
+  stake: number;
+  payout: number;
+  profit: number;
+  won: boolean;
+  status: string;
+  duration: number | null;
+  durationUnit: string | null;
+  createdAt: string;
+  closedAt: string | null;
+  longcode: string | null;
+  isAutonomous: boolean;
+  aiConfidence: number | null;
+  source?: string;
+}
 
-const STATUS_FILTERS: { key: StatusFilter; label: string }[] = [
-  { key: "all", label: "All" },
-  { key: "won", label: "Won" },
-  { key: "lost", label: "Lost" },
-  { key: "open", label: "Open" },
-];
+interface JournalStats {
+  totalTrades: number;
+  wonTrades: number;
+  lostTrades: number;
+  winRate: number;
+  totalProfit: number;
+  avgProfit: number;
+  bestTrade: number;
+  worstTrade: number;
+  todayProfit: number;
+  todayTrades: number;
+  todayWon: number;
+  todayLost: number;
+  currentStreak: number;
+  longestWinStreak: number;
+  longestLoseStreak: number;
+}
 
 function formatContractLabel(contractType: string, barrier: number | null): string {
   if (contractType === "DIGITOVER" && barrier !== null) return `OVER ${barrier}`;
@@ -28,36 +57,106 @@ function formatContractLabel(contractType: string, barrier: number | null): stri
   return contractType;
 }
 
+function contractBadgeClass(contractType: string): string {
+  if (contractType === "DIGITEVEN" || contractType === "DIGITODD") return "bg-cyan-500/10 text-cyan-400";
+  if (contractType.startsWith("DIGIT")) return "bg-purple-500/10 text-purple-400";
+  if (contractType === "RISE" || contractType === "FALL") return "bg-blue-500/10 text-blue-400";
+  return "bg-zinc-500/10 text-zinc-400";
+}
+
+async function fetchDerivJournal() {
+  const res = await fetch("/api/trades/deriv-journal");
+  if (!res.ok) throw new Error("Failed to fetch journal");
+  return res.json() as Promise<{ source: "deriv" | "local" | "paper"; trades: JournalTrade[]; stats: JournalStats }>;
+}
+
 export default function Trades() {
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const queryClient = useQueryClient();
+  const [tooltipId, setTooltipId] = useState<string | number | null>(null);
+  // Instant SSE trades — prepended immediately on trade_completed before Deriv's profit_table syncs
+  const pendingRef = useRef<JournalTrade[]>([]);
+  const [pendingTrades, setPendingTrades] = useState<JournalTrade[]>([]);
 
-  const { data: trades } = useGetTrades(
-    { status: statusFilter },
-    { query: { refetchInterval: statusFilter === "open" ? 3000 : 8000 } } as { query: any }
-  );
-  const { data: stats } = useGetTradeStats({ query: { refetchInterval: 10000 } } as { query: any });
+  const { data, isLoading, isFetching, refetch } = useQuery({
+    queryKey: ["derivJournal"],
+    queryFn: fetchDerivJournal,
+    refetchInterval: 20000,
+    staleTime: 5000,
+  });
 
+  // SSE: zero-latency trade insertion
   useEffect(() => {
     const es = new EventSource("/api/ai/events");
-    es.addEventListener("trade_completed", () => {
-      queryClient.invalidateQueries({ queryKey: ["getTrades"] });
-      queryClient.invalidateQueries({ queryKey: ["getTradeStats"] });
+    es.addEventListener("trade_completed", (e: MessageEvent) => {
+      try {
+        const payload = JSON.parse(e.data);
+        const trade: JournalTrade | null = payload?.trade ?? null;
+        if (trade) {
+          // Prepend to pending immediately — dedupe by id
+          pendingRef.current = [trade, ...pendingRef.current.filter((t) => t.id !== trade.id)];
+          setPendingTrades([...pendingRef.current]);
+        }
+        // Also trigger background refresh from Deriv (catches cases where token is live)
+        setTimeout(() => queryClient.invalidateQueries({ queryKey: ["derivJournal"] }), 3000);
+      } catch { /* ignore */ }
     });
     es.addEventListener("trade_started", () => {
-      queryClient.invalidateQueries({ queryKey: ["getTrades"] });
+      queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
     });
     return () => es.close();
   }, [queryClient]);
 
+  // Once fresh journal data arrives, drop pending trades that are now in the journal
+  useEffect(() => {
+    if (!data?.trades?.length) return;
+    const journalIds = new Set(data.trades.map((t) => String(t.id)));
+    const remaining = pendingRef.current.filter((t) => !journalIds.has(String(t.id)));
+    if (remaining.length !== pendingRef.current.length) {
+      pendingRef.current = remaining;
+      setPendingTrades([...remaining]);
+    }
+  }, [data]);
+
+  const journalTrades = data?.trades ?? [];
+  // Merge pending (newest first) with journal, deduped by id
+  const journalIds = new Set(journalTrades.map((t) => String(t.id)));
+  const allTrades = [
+    ...pendingTrades.filter((t) => !journalIds.has(String(t.id))),
+    ...journalTrades,
+  ];
+
+  const stats = data?.stats;
+  const isDerivSource = data?.source === "deriv";
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-6 max-w-7xl mx-auto space-y-5">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Trade Journal</h1>
-        <p className="text-muted-foreground text-sm mt-0.5">Complete history of manual and autonomous executions.</p>
+
+      {/* Header */}
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Trade Journal</h1>
+          <p className="text-muted-foreground text-sm mt-0.5">
+            {isDerivSource
+              ? "Live Deriv account history — source of truth for all P&L."
+              : "Local records (no Deriv token connected)."}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className={`text-[10px] gap-1 px-2 py-0.5 ${isDerivSource ? "border-green-500/40 text-green-400" : "border-amber-500/40 text-amber-400"}`}>
+            {isDerivSource ? <><Wifi className="w-2.5 h-2.5" /> DERIV LIVE</> : <><Database className="w-2.5 h-2.5" /> LOCAL</>}
+          </Badge>
+          <button
+            onClick={() => refetch()}
+            disabled={isFetching}
+            className="p-1.5 rounded-md hover:bg-secondary/50 transition-colors text-muted-foreground hover:text-foreground disabled:opacity-40"
+            title="Refresh from Deriv"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isFetching ? "animate-spin" : ""}`} />
+          </button>
+        </div>
       </div>
 
-      {/* Stats strip */}
+      {/* Stats strip — from Deriv journal */}
       {stats && (
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           <Card className="bg-card">
@@ -80,9 +179,11 @@ export default function Trades() {
           </Card>
           <Card className="bg-card">
             <CardContent className="p-3">
-              <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Best Trade</div>
-              <div className="text-xl font-mono font-bold text-green-500">+{stats.bestTrade.toFixed(2)}</div>
-              <div className="text-[10px] text-muted-foreground">worst: {stats.worstTrade.toFixed(2)}</div>
+              <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Today</div>
+              <div className={`text-xl font-mono font-bold ${stats.todayProfit >= 0 ? "text-green-500" : "text-red-500"}`}>
+                {stats.todayProfit >= 0 ? "+" : ""}{stats.todayProfit.toFixed(2)}
+              </div>
+              <div className="text-[10px] text-muted-foreground">{stats.todayWon}W / {stats.todayLost}L today</div>
             </CardContent>
           </Card>
           <Card className="bg-card">
@@ -98,35 +199,15 @@ export default function Trades() {
           </Card>
           <Card className="bg-card">
             <CardContent className="p-3">
-              <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Total Trades</div>
-              <div className="text-xl font-mono font-bold">{stats.totalTrades}</div>
-              <div className="text-[10px] text-muted-foreground">all time</div>
+              <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Best / Worst</div>
+              <div className="text-xl font-mono font-bold text-green-500">+{stats.bestTrade.toFixed(2)}</div>
+              <div className="text-[10px] text-muted-foreground">worst: {stats.worstTrade.toFixed(2)}</div>
             </CardContent>
           </Card>
         </div>
       )}
 
-      {/* Status filter */}
-      <div className="flex gap-1.5">
-        {STATUS_FILTERS.map((f) => (
-          <button
-            key={f.key}
-            onClick={() => setStatusFilter(f.key)}
-            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-              statusFilter === f.key
-                ? "bg-primary/20 text-primary border border-primary/40"
-                : "bg-secondary/50 text-muted-foreground border border-border hover:text-foreground"
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
-        {trades && (
-          <span className="ml-auto text-xs text-muted-foreground self-center">{trades.length} records</span>
-        )}
-      </div>
-
-      {/* Trade list — horizontal scroll on mobile */}
+      {/* Trade list */}
       <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
         <div className="min-w-[640px]">
           {/* Column headers */}
@@ -136,94 +217,110 @@ export default function Trades() {
             <div className="col-span-2">Contract</div>
             <div className="col-span-1">Stake</div>
             <div className="col-span-1">Ticks</div>
-            <div className="col-span-2">AI Conf</div>
-            <div className="col-span-1">Mode</div>
-            <div className="col-span-1">P/L</div>
+            <div className="col-span-2">Payout</div>
+            <div className="col-span-1">Source</div>
+            <div className="col-span-1 text-right">P/L</div>
           </div>
 
           <div className="space-y-1">
-            {trades?.map((trade) => {
-              const isWon = trade.status === "won";
-              const isOpen = trade.status === "open";
-              const profitColor = isWon ? "text-green-500" : isOpen ? "text-amber-500" : "text-red-500";
-              const confVal = trade.aiConfidence ?? 0;
-              const confColor = confVal >= 70 ? "text-green-500" : confVal >= 50 ? "text-amber-500" : "text-red-500";
-              const contractLabel = formatContractLabel(trade.contractType, (trade as any).barrier ?? null);
-              const isDigitType = trade.contractType.includes("DIGIT");
-              const isEvenOdd = trade.contractType === "DIGITEVEN" || trade.contractType === "DIGITODD";
-              const ticks = (trade as any).duration ?? "—";
+            {isLoading && pendingTrades.length === 0 ? (
+              <div className="text-center py-12 text-muted-foreground">
+                <RefreshCw className="w-6 h-6 mx-auto mb-3 animate-spin opacity-40" />
+                <div className="text-sm">Loading from Deriv…</div>
+              </div>
+            ) : allTrades.length === 0 ? (
+              <div className="text-center py-16 text-muted-foreground">
+                <Activity className="w-8 h-8 mx-auto mb-3 opacity-30" />
+                <div className="text-sm">No trades in your Deriv account yet.</div>
+                <div className="text-xs mt-1">Execute a trade on any market to see it here instantly.</div>
+              </div>
+            ) : allTrades.map((trade) => {
+              const isWon = trade.won;
+              const isPending = pendingRef.current.some((p) => String(p.id) === String(trade.id));
+              const contractLabel = formatContractLabel(trade.contractType, trade.barrier);
+              const profitColor = isWon ? "text-green-500" : "text-red-500";
+              const tradeIsToday = isToday(new Date(trade.createdAt));
 
               return (
-                <Card key={trade.id} className={`bg-card hover:bg-secondary/20 transition-colors border ${isWon ? "border-green-500/10" : isOpen ? "border-amber-500/10 animate-pulse" : "border-red-500/10"}`}>
-                  <CardContent className="p-2.5 grid grid-cols-12 gap-2 items-center">
-                    <div className="col-span-2">
-                      <div className="text-[11px] font-mono text-muted-foreground">{format(new Date(trade.createdAt), "HH:mm:ss")}</div>
-                      <div className="text-[10px] text-zinc-600">{format(new Date(trade.createdAt), "MMM d")}</div>
-                    </div>
+                <Card
+                  key={`${trade.id}-${trade.createdAt}`}
+                  className={`bg-card hover:bg-secondary/20 transition-colors border ${
+                    isPending ? "border-amber-500/30 shadow-[0_0_8px_rgba(251,191,36,0.15)]"
+                    : isWon ? "border-green-500/10" : "border-red-500/10"
+                  }`}
+                  onClick={() => setTooltipId(tooltipId === trade.id ? null : trade.id)}
+                >
+                  <CardContent className="p-2.5">
+                    <div className="grid grid-cols-12 gap-2 items-center">
+                      <div className="col-span-2">
+                        <div className="text-[11px] font-mono text-muted-foreground">{format(new Date(trade.createdAt), "HH:mm:ss")}</div>
+                        <div className={`text-[10px] ${tradeIsToday ? "text-primary" : "text-zinc-600"}`}>{format(new Date(trade.createdAt), "MMM d")}</div>
+                      </div>
 
-                    <div className="col-span-2">
-                      <div className="text-xs font-bold truncate">{(trade as any).displayName ?? trade.symbol}</div>
-                      <div className="text-[10px] text-zinc-600 font-mono">{trade.symbol}</div>
-                    </div>
+                      <div className="col-span-2">
+                        <div className="text-xs font-bold truncate">{trade.displayName ?? trade.symbol}</div>
+                        <div className="text-[10px] text-zinc-600 font-mono">{trade.symbol}</div>
+                      </div>
 
-                    <div className="col-span-2">
-                      <span className={`text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded ${
-                        isEvenOdd ? "bg-cyan-500/10 text-cyan-400"
-                        : isDigitType ? "bg-purple-500/10 text-purple-400"
-                        : "bg-blue-500/10 text-blue-400"
-                      }`}>
-                        {contractLabel}
-                      </span>
-                    </div>
+                      <div className="col-span-2">
+                        <span className={`text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded ${contractBadgeClass(trade.contractType)}`}>
+                          {contractLabel}
+                        </span>
+                      </div>
 
-                    <div className="col-span-1">
-                      <span className="text-xs font-mono">${trade.stake.toFixed(2)}</span>
-                    </div>
+                      <div className="col-span-1">
+                        <span className="text-xs font-mono">${trade.stake.toFixed(2)}</span>
+                      </div>
 
-                    <div className="col-span-1">
-                      <span className="text-[11px] font-mono text-muted-foreground">{ticks}{typeof ticks === "number" ? "t" : ""}</span>
-                    </div>
+                      <div className="col-span-1">
+                        <span className="text-[11px] font-mono text-muted-foreground">
+                          {trade.duration != null ? `${trade.duration}${trade.durationUnit ?? "t"}` : "—"}
+                        </span>
+                      </div>
 
-                    <div className="col-span-2">
-                      <div className="flex items-center gap-1.5">
-                        <div className={`text-xs font-mono font-bold ${confColor}`}>{confVal.toFixed(0)}%</div>
-                        <div className="flex-1 h-1 bg-secondary rounded-full overflow-hidden">
-                          <div className={`h-full rounded-full ${confVal >= 70 ? "bg-green-500" : confVal >= 50 ? "bg-amber-500" : "bg-red-500"}`}
-                            style={{ width: `${confVal}%` }} />
+                      <div className="col-span-2">
+                        <div className={`text-xs font-mono font-semibold ${isWon ? "text-green-500" : "text-red-500"}`}>
+                          ${trade.payout.toFixed(2)}
+                        </div>
+                        <div className="text-[10px] text-muted-foreground">{isWon ? "won" : "lost"}</div>
+                      </div>
+
+                      <div className="col-span-1">
+                        <Badge variant="outline" className={`text-[9px] px-1 py-0 ${
+                          trade.source === "live" ? "border-green-500/30 text-green-400"
+                          : trade.source === "paper" ? "border-amber-500/30 text-amber-400"
+                          : "border-border text-muted-foreground"
+                        }`}>
+                          {trade.source === "live" ? "LIVE" : trade.source === "paper" ? "PAPER" : "—"}
+                        </Badge>
+                      </div>
+
+                      <div className="col-span-1 text-right">
+                        <div className={`text-xs font-mono font-bold ${profitColor}`}>
+                          {isWon ? "+" : ""}{trade.profit.toFixed(2)}
                         </div>
                       </div>
                     </div>
 
-                    <div className="col-span-1">
-                      <Badge variant="outline" className="text-[9px] px-1 py-0 text-muted-foreground border-border">
-                        {trade.isAutonomous ? "AUTO" : "MAN"}
-                      </Badge>
-                    </div>
-
-                    <div className="col-span-1">
-                      {isOpen ? (
-                        <div className="flex items-center gap-0.5 text-amber-500">
-                          <Activity className="w-3 h-3 animate-pulse" />
-                          <span className="text-[10px] font-mono">Live</span>
-                        </div>
-                      ) : (
-                        <div className={`text-xs font-mono font-bold ${profitColor}`}>
-                          {isWon ? "+" : ""}{trade.profit?.toFixed(2) ?? "—"}
-                        </div>
-                      )}
-                    </div>
+                    {/* Expandable longcode */}
+                    {tooltipId === trade.id && trade.longcode && (
+                      <div className="mt-2 pt-2 border-t border-border text-[10px] text-muted-foreground leading-relaxed">
+                        {trade.longcode}
+                      </div>
+                    )}
                   </CardContent>
                 </Card>
               );
             })}
-            {trades?.length === 0 && (
-              <div className="text-center py-16 text-muted-foreground">
-                <Activity className="w-8 h-8 mx-auto mb-3 opacity-30" />
-                <div className="text-sm">No trades recorded yet.</div>
-                <div className="text-xs mt-1">Go to Markets and execute your first trade.</div>
-              </div>
-            )}
           </div>
+
+          {allTrades.length > 0 && (
+            <div className="text-center py-3 text-[10px] text-zinc-600">
+              {allTrades.length} trade{allTrades.length !== 1 ? "s" : ""} shown
+              {isDerivSource ? " · from Deriv account" : " · from local records"}
+              {isFetching && " · syncing…"}
+            </div>
+          )}
         </div>
       </div>
     </motion.div>

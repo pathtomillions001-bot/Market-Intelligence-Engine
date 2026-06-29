@@ -771,7 +771,7 @@ export default function MarketDetail() {
   const lastTickTimeRef = useRef<number>(Date.now());
 
   const { data: market, isLoading, refetch } = useGetMarketDetail(symbol || "", { query: { refetchInterval: 8000, enabled: !!symbol } } as { query: any });
-  const { data: rec, refetch: refetchRec } = useGetAiRecommendationForMarket(symbol || "", { query: { refetchInterval: 12000, enabled: !!symbol } } as { query: any });
+  const { data: rec, refetch: refetchRec } = useGetAiRecommendationForMarket(symbol || "", { query: { refetchInterval: 3000, enabled: !!symbol } } as { query: any });
   const { data: engineStatus } = useGetAiEngineStatus({ query: { refetchInterval: 5000 } } as { query: any });
   const isPaperMode = (engineStatus as any)?.paperTradeMode ?? false;
   const executeTrade = useExecuteTrade();
