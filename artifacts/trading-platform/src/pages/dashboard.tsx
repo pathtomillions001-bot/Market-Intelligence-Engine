@@ -85,20 +85,6 @@ export default function Dashboard() {
   const targetPct = summary ? Math.max(0, Math.min(100, (summary.totalProfit / summary.dailyTarget) * 100)) : 0;
   const isProfit = (summary?.totalProfit ?? 0) >= 0;
 
-  const handleQuickTrade = () => {
-    if (!topMarket) return;
-    executeTrade.mutate({
-      data: {
-        symbol: topMarket.symbol,
-        contractType: topMarket.recommendation?.contractType ?? "CALL",
-        stake: topMarket.recommendation?.stake ?? 1,
-        direction: topMarket.recommendation?.direction ?? "up",
-      }
-    }, {
-      onSuccess: (trade) => toast.success(`${trade.status === "won" ? "Won" : "Lost"} $${Math.abs(trade.profit ?? 0).toFixed(2)} on ${trade.symbol}`),
-      onError: () => toast.error("Trade failed — check account settings"),
-    });
-  };
 
   return (
     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-6 max-w-7xl mx-auto space-y-5">
@@ -254,11 +240,7 @@ export default function Dashboard() {
         </Card>
 
         <div className="md:col-span-2">
-          <MarketOpportunityFlashCard
-            topMarket={topMarket as any}
-            onTrade={handleQuickTrade}
-            isTradePending={executeTrade.isPending}
-          />
+          <MarketOpportunityFlashCard />
         </div>
       </div>
 

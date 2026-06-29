@@ -43,181 +43,261 @@ const AGENT_LABELS: Record<string, string> = {
   tradeExecution: "Trade Execution", selfLearning: "Self-Learning Performance",
 };
 
-// ── Agent Intelligence Panel ───────────────────────────────────────────────────
+// ── AI Smart Pick Panel ────────────────────────────────────────────────────────
+// Simplified execution panel — combines all 9 agents + all contract types to surface
+// the single best trade for this specific market with configurable inputs.
 
-const AGENT_META: Record<string, { label: string; icon: string; description: string }> = {
-  featureEngineering: { label: "Feature Engineering", icon: "⚙", description: "Extracts multi-horizon price/digit features" },
-  marketRegime:       { label: "Market Regime",       icon: "📊", description: "Classifies trend/volatility/regime state" },
-  direction:          { label: "Direction Model",     icon: "🧭", description: "ML ensemble: RF + GB directional probability" },
-  digitDistribution:  { label: "Digit Distribution",  icon: "🔢", description: "Multinomial + Markov EV-ranked barrier scoring" },
-  evCalculator:       { label: "EV Calculator",       icon: "💰", description: "Expected value vs Deriv payout analysis" },
-  riskManager:        { label: "Risk Manager",        icon: "🛡", description: "Portfolio risk, drawdown, stake sizing" },
-  executionTiming:    { label: "Execution Timing",    icon: "⏱", description: "Entry quality: velocity, momentum, z-score" },
-  performanceFeedback:{ label: "Performance Feedback",icon: "📈", description: "Historical win rates and strategy drift" },
-  masterDecision:     { label: "Master Decision",     icon: "🎯", description: "Final gate: EV + timing + consensus aggregation" },
-  durationOptimizer:  { label: "Duration Optimizer",  icon: "⌛", description: "Optimal tick duration: volatility + regime + Hurst" },
-};
-
-const AGENT_ORDER = [
-  "featureEngineering", "marketRegime", "direction", "digitDistribution",
-  "evCalculator", "riskManager", "executionTiming", "performanceFeedback",
-  "durationOptimizer", "masterDecision",
-];
-
-function AgentSignalBadge({ signal }: { signal: string }) {
-  const map: Record<string, string> = {
-    strong_buy: "bg-green-500/15 text-green-400 border-green-500/30",
-    buy: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
-    neutral: "bg-zinc-500/15 text-zinc-400 border-zinc-600/30",
-    sell: "bg-red-500/15 text-red-400 border-red-500/30",
-    strong_sell: "bg-rose-500/15 text-rose-500 border-rose-500/30",
-  };
-  const label: Record<string, string> = {
-    strong_buy: "STRONG BUY", buy: "BUY", neutral: "NEUTRAL", sell: "SELL", strong_sell: "STRONG SELL",
-  };
+function ContractPill({ label, winPct, ev, isWinner, color }: { label: string; winPct: number; ev: number; isWinner: boolean; color: string }) {
   return (
-    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${map[signal] ?? map["neutral"]}`}>
-      {label[signal] ?? signal.toUpperCase()}
-    </span>
+    <div
+      className={`flex flex-col items-center p-2 rounded-xl border transition-all ${
+        isWinner ? "border-opacity-60 scale-[1.04]" : "border-white/[0.08] bg-white/[0.02] opacity-60"
+      }`}
+      style={isWinner ? { borderColor: `${color}50`, background: `${color}10` } : {}}
+    >
+      {isWinner && <span className="text-[7px] font-bold mb-1" style={{ color }}>★ BEST</span>}
+      <span className="text-[9px] font-mono font-bold" style={{ color: isWinner ? color : undefined }}>{label}</span>
+      <span className={`text-sm font-mono font-bold mt-0.5 ${winPct >= 60 ? "text-green-400" : winPct >= 50 ? "text-amber-400" : "text-red-400"}`}>{winPct}%</span>
+      <span className={`text-[8px] font-mono ${ev > 0 ? "text-green-500/70" : "text-zinc-500"}`}>{ev > 0 ? `+$${ev.toFixed(2)}` : `$${ev.toFixed(2)}`}</span>
+    </div>
   );
 }
 
-function AgentScoreRing({ score }: { score: number }) {
-  const color = score >= 70 ? "#22c55e" : score >= 50 ? "#f59e0b" : "#ef4444";
-  const r = 12, circ = 2 * Math.PI * r;
-  const fill = (score / 100) * circ;
-  return (
-    <svg width="32" height="32" className="shrink-0">
-      <circle cx="16" cy="16" r={r} fill="none" stroke="hsl(var(--secondary))" strokeWidth="3" />
-      <circle cx="16" cy="16" r={r} fill="none" stroke={color} strokeWidth="3"
-        strokeDasharray={`${fill} ${circ}`} strokeLinecap="round"
-        transform="rotate(-90 16 16)" />
-      <text x="16" y="20" textAnchor="middle" fontSize="8" fontWeight="bold" fill={color}>{score}</text>
-    </svg>
-  );
-}
+function AgentIntelligencePanel({ agentOutputs, recommendation, openTradeDialog }: {
+  agentOutputs: any;
+  recommendation: any;
+  openTradeDialog: (ct: string, dir: "up" | "down", barrier?: number, duration?: number) => void;
+}) {
+  const [stake, setStake] = useState(recommendation?.stake?.toFixed(2) ?? "1.00");
+  const [ticks, setTicks] = useState<number>(recommendation?.recommendedDuration ?? 5);
 
-function AgentIntelligencePanel({ agentOutputs, recommendation }: { agentOutputs: any; recommendation: any }) {
   if (!agentOutputs || Object.keys(agentOutputs).length === 0) {
     return (
       <Card className="bg-card">
         <CardHeader className="pb-2">
           <CardTitle className="text-sm flex items-center gap-2">
             <Activity className="w-4 h-4 text-primary" />
-            Agent Intelligence Panel
+            AI Smart Pick
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="text-xs text-muted-foreground text-center py-4">
-            Loading agent analysis... (refresh in a moment)
-          </div>
+          <div className="text-xs text-muted-foreground text-center py-4">Analysing market…</div>
         </CardContent>
       </Card>
     );
   }
 
-  const masterAgent = agentOutputs["masterDecision"];
-  const shouldTrade = masterAgent?.data?.shouldTrade ?? false;
-  const rejectReasons: string[] = masterAgent?.data?.rejectReasons ?? [];
-  const weightedScore = masterAgent?.data?.weightedScore ?? 0;
-  const qualityScore = masterAgent?.data?.qualityScore ?? 0;
-  const optimizedDuration = masterAgent?.data?.optimizedDuration ?? recommendation?.recommendedDuration ?? 5;
+  const master = agentOutputs["masterDecision"];
+  const dirAgent = agentOutputs["direction"];
+  const digitAgent = agentOutputs["digitDistribution"];
+  const eoAgent = agentOutputs["evenOdd"] ?? agentOutputs["digitDistribution"];
+  const durationAgent = agentOutputs["durationOptimizer"];
 
-  const orderedAgents = AGENT_ORDER.filter((k) => agentOutputs[k]);
+  const shouldTrade: boolean = master?.data?.shouldTrade ?? false;
+  const weightedScore: number = master?.data?.weightedScore ?? 0;
+  const rejectReasons: string[] = master?.data?.rejectReasons ?? [];
+  const optimizedDuration: number = durationAgent?.data?.duration ?? recommendation?.recommendedDuration ?? 5;
+  const regime: string = (recommendation?.regime ?? "").replace(/_/g, " ");
+
+  // Best trade from coordinator
+  const bestCt: string = recommendation?.contractType ?? "CALL";
+  const bestWinPct: number = Math.round(recommendation?.winProbability ?? 50);
+  const bestEv: number = recommendation?.expectedValue ?? 0;
+  const bestBarrier: number | undefined = recommendation?.digitBarrier ?? undefined;
+  const bestPayoutMult: number = recommendation?.payoutMultiplier ?? 1.91;
+
+  // Rise/Fall signal
+  const probUp: number = dirAgent?.data?.probUp ?? 0.5;
+  const risePct = Math.round(probUp * 100);
+  const fallPct = 100 - risePct;
+  const bestRF = risePct >= fallPct ? { label: "RISE", winPct: risePct, ct: "CALL" } : { label: "FALL", winPct: fallPct, ct: "PUT" };
+  const rfEv = bestRF.winPct / 100 * bestPayoutMult - 1;
+
+  // Even/Odd signal
+  const eoStats = digitAgent?.data?.eoStats ?? {};
+  const evenPct = Math.round((eoStats.evenPct ?? 0.5) * 100);
+  const oddPct = 100 - evenPct;
+  const bestEO = evenPct >= oddPct ? { label: "EVEN", winPct: evenPct, ct: "DIGITEVEN" } : { label: "ODD", winPct: oddPct, ct: "DIGITODD" };
+  const eoWinProb = Math.max(evenPct, oddPct) / 100;
+  const eoEv = eoWinProb * bestPayoutMult - 1;
+
+  // Over/Under signal (from bestOption in digit agent)
+  const bestDigitOpt = digitAgent?.data?.bestOption;
+  const ouLabel = bestDigitOpt
+    ? `${bestDigitOpt.contractType === "DIGITOVER" ? "OVER" : "UNDER"} ${bestDigitOpt.barrier}`
+    : "OVER 3";
+  const ouWinPct = bestDigitOpt ? Math.round(bestDigitOpt.winProbability * 100) : 50;
+  const ouEv = bestDigitOpt ? bestDigitOpt.expectedValue : 0;
+  const ouCt = bestDigitOpt?.contractType ?? "DIGITOVER";
+  const ouBarrier = bestDigitOpt?.barrier;
+
+  // Determine which category is best
+  type Category = "rf" | "eo" | "ou";
+  const cats: { id: Category; label: string; winPct: number; ev: number; ct: string; barrier?: number }[] = [
+    { id: "rf", label: bestRF.label, winPct: bestRF.winPct, ev: rfEv,  ct: bestRF.ct },
+    { id: "eo", label: bestEO.label, winPct: bestEO.winPct, ev: eoEv,  ct: bestEO.ct },
+    { id: "ou", label: ouLabel,      winPct: ouWinPct,       ev: ouEv,  ct: ouCt, barrier: ouBarrier },
+  ];
+
+  // Winner = highest EV with positive EV; fall back to highest win probability
+  const winnerCat = cats.reduce((best, cat) => {
+    if (cat.ev > best.ev) return cat;
+    if (cat.ev === best.ev && cat.winPct > best.winPct) return cat;
+    return best;
+  }, cats[0]);
+
+  const isWinner = (id: Category) => winnerCat.id === id;
+
+  const catColors: Record<Category, string> = {
+    rf: "#10b981",
+    eo: "#8b5cf6",
+    ou: "#06b6d4",
+  };
+
+  const scoreColor = weightedScore >= 70 ? "text-green-400" : weightedScore >= 50 ? "text-amber-400" : "text-red-400";
+
+  const directionMap: Record<string, "up" | "down"> = {
+    CALL: "up", PUT: "down", RISE: "up", FALL: "down",
+    DIGITOVER: "up", DIGITUNDER: "down", DIGITEVEN: "up", DIGITODD: "down",
+  };
 
   return (
-    <Card className="bg-card">
+    <Card className="bg-card border-border">
       <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <CardTitle className="text-sm flex items-center gap-2">
             <Activity className="w-4 h-4 text-primary" />
-            Agent Intelligence Panel
-            <span className="ml-1 w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
+            AI Smart Pick
+            <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
           </CardTitle>
-          <div className="flex items-center gap-2">
-            <div className={`text-[10px] font-bold px-2 py-1 rounded-full border ${
-              shouldTrade
-                ? "bg-green-500/15 text-green-400 border-green-500/30"
-                : "bg-amber-500/10 text-amber-400 border-amber-500/30"
+          <div className="flex items-center gap-1.5">
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+              shouldTrade ? "bg-green-500/15 text-green-400 border-green-500/30" : "bg-amber-500/10 text-amber-400 border-amber-500/30"
             }`}>
               {shouldTrade ? "✓ TRADE" : "⏸ WAIT"}
-            </div>
-            <div className="text-[10px] font-mono text-muted-foreground">
-              Q:{qualityScore} · {optimizedDuration}t
-            </div>
+            </span>
+            {regime && (
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-secondary/40 border border-border text-muted-foreground capitalize">{regime}</span>
+            )}
           </div>
         </div>
-
-        {/* Master summary row */}
-        <div className="mt-2 grid grid-cols-3 gap-2">
-          <div className="text-center p-2 rounded-lg bg-secondary/30 border border-border">
-            <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">Consensus</div>
-            <div className={`text-base font-mono font-bold ${weightedScore >= 60 ? "text-green-400" : weightedScore >= 45 ? "text-amber-400" : "text-red-400"}`}>{weightedScore.toFixed(0)}<span className="text-xs text-muted-foreground">/100</span></div>
-          </div>
-          <div className="text-center p-2 rounded-lg bg-secondary/30 border border-border">
-            <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">Duration</div>
-            <div className="text-base font-mono font-bold text-primary">{optimizedDuration}<span className="text-xs text-muted-foreground"> ticks</span></div>
-          </div>
-          <div className="text-center p-2 rounded-lg bg-secondary/30 border border-border">
-            <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">Agents</div>
-            <div className="text-base font-mono font-bold">{orderedAgents.length}<span className="text-xs text-muted-foreground"> active</span></div>
-          </div>
-        </div>
-
-        {/* Reject reasons */}
-        {rejectReasons.length > 0 && (
-          <div className="mt-2 space-y-1">
-            {rejectReasons.map((r, i) => (
-              <div key={i} className="flex items-start gap-1.5 px-2 py-1.5 rounded bg-amber-500/5 border border-amber-500/15 text-[10px] text-amber-400">
-                <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
-                <span>{r}</span>
-              </div>
-            ))}
-          </div>
-        )}
       </CardHeader>
 
-      <CardContent className="space-y-1.5 pt-0">
-        {orderedAgents.map((key) => {
-          const agent = agentOutputs[key];
-          const meta = AGENT_META[key] ?? { label: key, icon: "◈", description: "" };
-          const isLast = key === "masterDecision";
-          return (
-            <div key={key}
-              className={`flex items-start gap-3 p-2.5 rounded-lg border transition-colors ${
-                isLast
-                  ? "border-primary/30 bg-primary/5"
-                  : agent.score >= 70
-                    ? "border-green-500/15 bg-secondary/20"
-                    : agent.score >= 50
-                      ? "border-border bg-secondary/10"
-                      : "border-red-500/15 bg-red-500/5"
-              }`}
-            >
-              {/* Score ring */}
-              <AgentScoreRing score={agent.score ?? 0} />
+      <CardContent className="space-y-4 pt-0">
+        {/* 9-Agent Consensus bar */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium">9-Agent Consensus</span>
+            <span className={`text-sm font-mono font-bold ${scoreColor}`}>{weightedScore.toFixed(0)}<span className="text-xs text-muted-foreground font-normal">/100</span></span>
+          </div>
+          <div className="h-2 w-full bg-secondary rounded-full overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all duration-700"
+              style={{
+                width: `${weightedScore}%`,
+                background: weightedScore >= 70 ? "linear-gradient(90deg,#16a34a,#22c55e)" : weightedScore >= 50 ? "linear-gradient(90deg,#d97706,#f59e0b)" : "linear-gradient(90deg,#b91c1c,#ef4444)"
+              }}
+            />
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {rejectReasons.length > 0
+              ? rejectReasons.slice(0, 2).map((r, i) => (
+                  <span key={i} className="flex items-center gap-1 text-[9px] text-amber-400">
+                    <AlertTriangle className="w-2.5 h-2.5" />{r}
+                  </span>
+                ))
+              : <span className="text-[9px] text-muted-foreground">{optimizedDuration}t optimal · {Object.keys(agentOutputs).length} agents active</span>
+            }
+          </div>
+        </div>
 
-              {/* Content */}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
-                  <span className="text-[10px] font-bold text-foreground">{meta.icon} {meta.label}</span>
-                  <AgentSignalBadge signal={agent.signal ?? "neutral"} />
-                  {agent.confidence != null && (
-                    <span className="text-[9px] text-muted-foreground font-mono">
-                      conf:{agent.confidence}%
-                    </span>
-                  )}
-                  {agent.executionTimeMs != null && agent.executionTimeMs > 0 && (
-                    <span className="text-[9px] text-zinc-600 font-mono ml-auto">{agent.executionTimeMs}ms</span>
-                  )}
-                </div>
-                <p className="text-[10px] text-muted-foreground leading-relaxed line-clamp-2" title={agent.reasoning}>
-                  {agent.reasoning || meta.description}
-                </p>
+        {/* Contract type comparison */}
+        <div>
+          <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-2 font-medium">Best Trade by Category</div>
+          <div className="grid grid-cols-3 gap-2">
+            <ContractPill label={bestRF.label}   winPct={bestRF.winPct}  ev={rfEv}  isWinner={isWinner("rf")} color={catColors.rf} />
+            <ContractPill label={bestEO.label}   winPct={bestEO.winPct}  ev={eoEv}  isWinner={isWinner("eo")} color={catColors.eo} />
+            <ContractPill label={ouLabel}        winPct={ouWinPct}       ev={ouEv}  isWinner={isWinner("ou")} color={catColors.ou} />
+          </div>
+        </div>
+
+        {/* Best trade execution block */}
+        <div className={`rounded-xl border p-4 space-y-3 ${shouldTrade ? "border-primary/25 bg-primary/5" : "border-border bg-secondary/20"}`}>
+          <div className="flex items-start justify-between">
+            <div>
+              <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-1">AI Best Trade</div>
+              <div className="text-xl font-mono font-bold">
+                {bestCt === "DIGITOVER" && bestBarrier != null ? `OVER ${bestBarrier}`
+                  : bestCt === "DIGITUNDER" && bestBarrier != null ? `UNDER ${bestBarrier}`
+                  : bestCt === "DIGITEVEN" ? "EVEN"
+                  : bestCt === "DIGITODD" ? "ODD"
+                  : bestCt === "CALL" ? "Rise" : bestCt === "PUT" ? "Fall" : bestCt}
               </div>
             </div>
-          );
-        })}
+            <div className="text-right">
+              <div className="text-[9px] text-muted-foreground mb-0.5">Win Prob</div>
+              <div className={`text-2xl font-mono font-bold ${bestWinPct >= 60 ? "text-green-400" : bestWinPct >= 50 ? "text-amber-400" : "text-red-400"}`}>{bestWinPct}%</div>
+            </div>
+          </div>
+
+          {/* EV + payout */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="text-center p-2 rounded-lg bg-secondary/40 border border-border">
+              <div className="text-[9px] text-muted-foreground">Expected Value</div>
+              <div className={`text-sm font-mono font-bold ${bestEv > 0 ? "text-green-400" : "text-red-400"}`}>
+                {bestEv > 0 ? `+$${bestEv.toFixed(2)}` : `$${bestEv.toFixed(2)}`}
+              </div>
+            </div>
+            <div className="text-center p-2 rounded-lg bg-secondary/40 border border-border">
+              <div className="text-[9px] text-muted-foreground">Payout</div>
+              <div className="text-sm font-mono font-bold">{bestPayoutMult.toFixed(2)}x</div>
+            </div>
+          </div>
+
+          {/* Editable stake + ticks */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="space-y-1">
+              <label className="text-[9px] text-muted-foreground uppercase tracking-wider">Stake ($)</label>
+              <input
+                type="number"
+                value={stake}
+                min="0.35"
+                step="0.5"
+                onChange={(e) => setStake(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                className="w-full px-2.5 py-1.5 rounded-lg bg-secondary/50 border border-border text-sm font-mono font-bold text-center focus:outline-none focus:ring-1 focus:ring-primary/40"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-[9px] text-muted-foreground uppercase tracking-wider">Ticks</label>
+              <input
+                type="number"
+                value={ticks}
+                min="1"
+                max="15"
+                step="1"
+                onChange={(e) => setTicks(Math.max(1, Math.min(15, Number(e.target.value))))}
+                onClick={(e) => e.stopPropagation()}
+                className="w-full px-2.5 py-1.5 rounded-lg bg-secondary/50 border border-border text-sm font-mono font-bold text-center focus:outline-none focus:ring-1 focus:ring-primary/40"
+              />
+            </div>
+          </div>
+
+          {/* Execute button */}
+          <button
+            onClick={() => openTradeDialog(bestCt, directionMap[bestCt] ?? "up", bestBarrier, ticks)}
+            disabled={!shouldTrade}
+            className={`w-full py-2.5 rounded-lg font-mono font-bold text-sm transition-all ${
+              shouldTrade
+                ? "bg-primary text-primary-foreground hover:bg-primary/90 active:scale-[0.98]"
+                : "bg-secondary/40 text-muted-foreground cursor-not-allowed"
+            }`}
+          >
+            {shouldTrade
+              ? `▶ Execute ${bestCt === "CALL" ? "Rise" : bestCt === "PUT" ? "Fall" : bestCt === "DIGITOVER" ? `OVER ${bestBarrier ?? ""}` : bestCt === "DIGITUNDER" ? `UNDER ${bestBarrier ?? ""}` : bestCt === "DIGITEVEN" ? "Even" : "Odd"} · ${ticks}t · $${Number(stake).toFixed(2)}`
+              : `⏸ ${rejectReasons[0] ?? "Waiting for better conditions…"}`}
+          </button>
+        </div>
       </CardContent>
     </Card>
   );
@@ -1208,7 +1288,7 @@ export default function MarketDetail() {
       />
 
       {/* Agent Intelligence Panel — live 9-agent breakdown */}
-      <AgentIntelligencePanel agentOutputs={(rec as any)?.agentOutputs} recommendation={recommendation} />
+      <AgentIntelligencePanel agentOutputs={(rec as any)?.agentOutputs} recommendation={recommendation} openTradeDialog={openTradeDialog} />
 
 
       {/* Trade dialog */}

@@ -26,6 +26,8 @@ let isLoopRunning = false;
 // Cooldown state — set when engine stops due to consecutive losses
 let cooldownUntil: Date | null = null;
 let cooldownResumeTimer: ReturnType<typeof setTimeout> | null = null;
+// Session loss counter — increments on each loss; a win does NOT reset it; only cooldown expiry does
+let sessionLossCount = 0;
 
 let exploitSymbol: string | null = null;
 let exploitCount = 0;
@@ -194,6 +196,8 @@ function stopEngine(reason: string, cooldownMinutes?: number) {
     cooldownResumeTimer = setTimeout(() => {
       cooldownUntil = null;
       cooldownResumeTimer = null;
+      // Reset session loss counter on cooldown expiry — the ONLY reset point
+      sessionLossCount = 0;
       // Auto-resume engine
       engineRunning = true;
       autonomousMode = "autonomous";
@@ -201,8 +205,9 @@ function stopEngine(reason: string, cooldownMinutes?: number) {
       nextScanIn = loopIntervalSec;
       exploitSymbol = null;
       exploitCount = 0;
-      logger.info("Cooldown expired — autonomous engine auto-resuming");
+      logger.info("Cooldown expired — autonomous engine auto-resuming, session loss count reset");
       broadcastSSE("engine_started", { reason: "cooldown_expired" });
+      broadcastSSE("loss_streak_reset", { sessionLossCount: 0 });
       autonomousTimer = setTimeout(runAutonomousLoop, 1000);
     }, cooldownMinutes * 60 * 1000);
     logger.info({ reason, cooldownMinutes, cooldownUntil }, "Engine stopped with cooldown");
@@ -259,6 +264,7 @@ async function runAutonomousLoop() {
     tradesExecutedToday = closedToday.length;
 
     const sortedByTime = [...closedToday].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    // Keep consecutiveLosses for DailyStats context passed to AI agents (unaffected by session counter)
     let consecutiveLosses = 0;
     for (const t of sortedByTime) { if (t.status === "lost") consecutiveLosses++; else break; }
 
@@ -268,51 +274,28 @@ async function runAutonomousLoop() {
     // Hard stop conditions (also handled inside risk manager, but stop the loop early)
     if (todayProfit <= -tradingSettings.dailyLossLimit) { stopEngine(`Daily loss limit $${tradingSettings.dailyLossLimit} reached`); return; }
     if (todayProfit >= tradingSettings.dailyTarget) { stopEngine(`Daily target $${tradingSettings.dailyTarget} reached!`); return; }
-    if (consecutiveLosses >= tradingSettings.consecutiveLossLimit) {
+    // sessionLossCount persists across wins — a win does NOT reset it, only cooldown expiry does
+    if (sessionLossCount >= tradingSettings.consecutiveLossLimit) {
       const cooldownMins = settings?.cooldownMinutes ?? 30;
-      stopEngine(`${consecutiveLosses} consecutive losses — cooling down for ${cooldownMins}m`, cooldownMins);
+      stopEngine(`${sessionLossCount} session losses hit limit of ${tradingSettings.consecutiveLossLimit} — cooling down for ${cooldownMins}m`, cooldownMins);
       return;
     }
 
-    // ── Market selection ─────────────────────────────────────────────────────
+    // ── Market selection: always scan ALL markets in parallel every cycle ────
+    // No exploit mode — every cycle scans all markets for the best opportunity
     let bestResult: { market: typeof availableMarkets[0]; output: Awaited<ReturnType<typeof runCoordinator>>; ctx: ScanContext } | null = null;
 
-    // Exploit mode: stay on the hot market
-    if (exploitSymbol && exploitCount < marketRotationAfter && availableMarkets.some((m) => m.symbol === exploitSymbol)) {
-      const market = getMarketInfo(exploitSymbol);
-      if (market) {
-        const ctx = buildScanContext(market, balance, tradingSettings, daily, token, account?.currency ?? "USD");
+    const scanResults = await Promise.all(
+      availableMarkets.map(async (m) => {
+        const ctx = buildScanContext(m, balance, tradingSettings, daily, token, account?.currency ?? "USD");
         const output = await runCoordinator(ctx);
-        if (output.qualityScore >= exploitQualityThreshold - 10 && output.shouldTrade) {
-          bestResult = { market, output, ctx };
-          exploitCount++;
-        } else {
-          exploitSymbol = null; exploitCount = 0;
-        }
-      }
-    }
+        return { market: m, output, ctx };
+      })
+    );
 
-    if (!bestResult) {
-      // Parallel scan all available markets
-      const scanResults = await Promise.all(
-        availableMarkets.map(async (m) => {
-          const ctx = buildScanContext(m, balance, tradingSettings, daily, token, account?.currency ?? "USD");
-          const output = await runCoordinator(ctx);
-          return { market: m, output, ctx };
-        })
-      );
-
-      scanResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore);
-      const top = scanResults[0];
-      if (top) {
-        bestResult = top;
-        if (top.output.shouldTrade) {
-          exploitSymbol = top.market.symbol;
-          exploitQualityThreshold = top.output.qualityScore;
-          exploitCount = 1;
-        }
-      }
-    }
+    scanResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore);
+    const top = scanResults[0];
+    if (top) bestResult = top;
 
     if (!bestResult) { scheduleNext(); return; }
 
@@ -345,6 +328,8 @@ async function runAutonomousLoop() {
       regime: output.regime,
       shouldTrade: output.shouldTrade,
       rejectReason: output.rejectReason,
+      sessionLossCount,
+      consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
     });
 
     if (!output.shouldTrade) {
@@ -485,6 +470,9 @@ async function runAutonomousLoop() {
         closedAt: new Date(),
       }).where(eq(tradesTable.id, openTrade.id));
     }
+
+    // Increment session loss counter on loss — persists across wins until cooldown resets it
+    if (!won) sessionLossCount++;
 
     tradesExecutedToday++;
     lastTradeTime = new Date();
@@ -765,13 +753,16 @@ router.get("/engine/status", async (_req, res): Promise<void> => {
     }),
     tradesExecutedToday: todayTrades.length,
     currentMarket, nextScanIn: engineRunning ? nextScanIn : null, stopReasons, loopIntervalSec,
-    lastTradeTime: lastTradeTime?.toISOString() ?? null, exploitSymbol, exploitCount,
+    lastTradeTime: lastTradeTime?.toISOString() ?? null,
     wsConnected: tickManager.getConnectionStatus(),
     liveTickCount: tickManager.getLiveTickCount(),
     tickHealth: tickManager.getTickHealth(),
     paperTradeMode: settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false,
     requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
     cooldownUntil: cooldownUntil?.toISOString() ?? null,
+    sessionLossCount,
+    consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
+    marketsScanned: DERIV_MARKETS.length,
   });
 });
 
@@ -811,13 +802,16 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
       return { name, isActive: true, lastRun: new Date().toISOString(), confidence: score };
     }),
     tradesExecutedToday, currentMarket, nextScanIn, stopReasons, loopIntervalSec,
-    lastTradeTime: lastTradeTime?.toISOString() ?? null, exploitSymbol, exploitCount,
+    lastTradeTime: lastTradeTime?.toISOString() ?? null,
     wsConnected: tickManager.getConnectionStatus(),
     liveTickCount: tickManager.getLiveTickCount(),
     tickHealth: tickManager.getTickHealth(),
     paperTradeMode: settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false,
     requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
-    cooldownUntil: cooldownUntil?.toISOString() ?? null,
+    cooldownUntil: null,
+    sessionLossCount,
+    consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
+    marketsScanned: DERIV_MARKETS.length,
   });
 });
 

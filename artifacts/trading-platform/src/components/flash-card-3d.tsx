@@ -1,8 +1,11 @@
 import { useState } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, RotateCcw } from "lucide-react";
+import { useExecuteTrade } from "@workspace/api-client-react";
+import { toast } from "sonner";
+import { RotateCcw, Zap, TrendingUp, TrendingDown, ChevronDown, ChevronUp } from "lucide-react";
 
+// ── Base flip card wrapper ─────────────────────────────────────────────────────
 interface FlashCard3DProps {
   front: React.ReactNode;
   back: React.ReactNode;
@@ -14,10 +17,7 @@ interface FlashCard3DProps {
 
 export function FlashCard3D({ front, back, flipped, onFlip, className = "", glowColor = "rgba(0,255,255,0.35)" }: FlashCard3DProps) {
   return (
-    <div
-      className={`relative select-none ${className}`}
-      style={{ perspective: "1200px" }}
-    >
+    <div className={`relative select-none ${className}`} style={{ perspective: "1200px" }}>
       <motion.div
         animate={{ rotateY: flipped ? 180 : 0 }}
         transition={{ duration: 0.55, ease: [0.4, 0, 0.2, 1] }}
@@ -25,11 +25,7 @@ export function FlashCard3D({ front, back, flipped, onFlip, className = "", glow
       >
         {/* Front */}
         <div
-          style={{
-            backfaceVisibility: "hidden",
-            WebkitBackfaceVisibility: "hidden",
-            pointerEvents: flipped ? "none" : "auto",
-          }}
+          style={{ backfaceVisibility: "hidden", WebkitBackfaceVisibility: "hidden", pointerEvents: flipped ? "none" : "auto" }}
           className="absolute inset-0 rounded-2xl"
         >
           <div
@@ -40,23 +36,16 @@ export function FlashCard3D({ front, back, flipped, onFlip, className = "", glow
             <span className="absolute top-0 right-0 w-6 h-6 border-t-2 border-r-2 border-primary rounded-tr-2xl" />
             <span className="absolute bottom-0 left-0 w-6 h-6 border-b-2 border-l-2 border-primary rounded-bl-2xl" />
             <span className="absolute bottom-0 right-0 w-6 h-6 border-b-2 border-r-2 border-primary rounded-br-2xl" />
-
             <motion.div
               className="absolute inset-x-0 h-px bg-gradient-to-r from-transparent via-primary/60 to-transparent"
               animate={{ top: ["0%", "100%", "0%"] }}
               transition={{ duration: 4, ease: "linear", repeat: Infinity }}
             />
-
             <div className="absolute inset-0 opacity-[0.03]" style={{
               backgroundImage: "linear-gradient(rgba(0,255,255,1) 1px, transparent 1px), linear-gradient(90deg, rgba(0,255,255,1) 1px, transparent 1px)",
               backgroundSize: "24px 24px"
             }} />
-
-            <div className="relative z-10 w-full h-full flex flex-col">
-              {front}
-            </div>
-
-            {/* Flip button — front */}
+            <div className="relative z-10 w-full h-full flex flex-col">{front}</div>
             <button
               onClick={(e) => { e.stopPropagation(); onFlip(); }}
               className="absolute bottom-2.5 right-3 z-20 flex items-center gap-1 text-[10px] font-mono text-primary/50 hover:text-primary transition-colors group"
@@ -70,12 +59,7 @@ export function FlashCard3D({ front, back, flipped, onFlip, className = "", glow
 
         {/* Back */}
         <div
-          style={{
-            backfaceVisibility: "hidden",
-            WebkitBackfaceVisibility: "hidden",
-            transform: "rotateY(180deg)",
-            pointerEvents: flipped ? "auto" : "none",
-          }}
+          style={{ backfaceVisibility: "hidden", WebkitBackfaceVisibility: "hidden", transform: "rotateY(180deg)", pointerEvents: flipped ? "auto" : "none" }}
           className="absolute inset-0 rounded-2xl"
         >
           <div
@@ -86,23 +70,16 @@ export function FlashCard3D({ front, back, flipped, onFlip, className = "", glow
             <span className="absolute top-0 right-0 w-6 h-6 border-t-2 border-r-2 border-primary rounded-tr-2xl" />
             <span className="absolute bottom-0 left-0 w-6 h-6 border-b-2 border-l-2 border-primary rounded-bl-2xl" />
             <span className="absolute bottom-0 right-0 w-6 h-6 border-b-2 border-r-2 border-primary rounded-br-2xl" />
-
             <motion.div
               className="absolute inset-x-0 h-px bg-gradient-to-r from-transparent via-primary/60 to-transparent"
               animate={{ top: ["100%", "0%", "100%"] }}
               transition={{ duration: 4, ease: "linear", repeat: Infinity }}
             />
-
             <div className="absolute inset-0 opacity-[0.03]" style={{
               backgroundImage: "linear-gradient(rgba(0,255,255,1) 1px, transparent 1px), linear-gradient(90deg, rgba(0,255,255,1) 1px, transparent 1px)",
               backgroundSize: "24px 24px"
             }} />
-
-            <div className="relative z-10 w-full h-full flex flex-col overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700 scrollbar-track-transparent">
-              {back}
-            </div>
-
-            {/* Flip button — back */}
+            <div className="relative z-10 w-full h-full flex flex-col overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700 scrollbar-track-transparent">{back}</div>
             <button
               onClick={(e) => { e.stopPropagation(); onFlip(); }}
               className="absolute bottom-2.5 right-3 flex items-center gap-1 text-[10px] font-mono text-primary/50 hover:text-primary transition-colors group z-20"
@@ -118,45 +95,35 @@ export function FlashCard3D({ front, back, flipped, onFlip, className = "", glow
   );
 }
 
-
-interface MarketOpportunityCardProps {
-  topMarket: {
-    symbol: string;
-    displayName: string;
-    category: string;
-    recommendation?: {
-      confidence: number;
-      direction?: string;
-      contractType?: string;
-      stake?: number;
-      shouldTrade?: boolean;
-      digitBarrier?: number | null;
-      barrier?: number | null;
-    } | null;
-  } | undefined;
-  onTrade?: () => void;
-  isTradePending?: boolean;
-}
-
-type FilterType = "auto" | "rise-fall" | "even-odd" | "over-under";
-
-const FILTER_OPTIONS: { id: FilterType; label: string; contractTypes: string }[] = [
-  { id: "auto",       label: "Auto",       contractTypes: "" },
-  { id: "rise-fall",  label: "Rise/Fall",  contractTypes: "CALL,PUT" },
-  { id: "even-odd",   label: "Even/Odd",   contractTypes: "DIGITEVEN,DIGITODD" },
-  { id: "over-under", label: "Over/Under", contractTypes: "DIGITOVER,DIGITUNDER" },
-];
-
-function formatContractLabel(contractType?: string, digitBarrier?: number | null): string {
+// ── Helpers ────────────────────────────────────────────────────────────────────
+function formatContractLabel(contractType?: string, barrier?: number | null): string {
   if (!contractType) return "—";
-  if (contractType === "DIGITOVER")  return digitBarrier != null ? `OVER ${digitBarrier}` : "OVER";
-  if (contractType === "DIGITUNDER") return digitBarrier != null ? `UNDER ${digitBarrier}` : "UNDER";
+  if (contractType === "DIGITOVER")  return barrier != null ? `OVER ${barrier}` : "OVER";
+  if (contractType === "DIGITUNDER") return barrier != null ? `UNDER ${barrier}` : "UNDER";
+  if (contractType === "DIGITEVEN")  return "EVEN";
+  if (contractType === "DIGITODD")   return "ODD";
+  if (contractType === "CALL")       return "RISE";
+  if (contractType === "PUT")        return "FALL";
   return contractType;
 }
 
+function contractToDirection(ct: string): "up" | "down" {
+  if (ct === "CALL" || ct === "RISE" || ct === "DIGITOVER" || ct === "DIGITEVEN") return "up";
+  return "down";
+}
+
+function contractColor(ct: string): string {
+  if (ct === "CALL" || ct === "RISE") return "#10b981";
+  if (ct === "PUT" || ct === "FALL")  return "#ef4444";
+  if (ct === "DIGITOVER")             return "#06b6d4";
+  if (ct === "DIGITUNDER")            return "#f59e0b";
+  if (ct === "DIGITEVEN")             return "#8b5cf6";
+  if (ct === "DIGITODD")              return "#ec4899";
+  return "#00ffff";
+}
+
 function ConfidenceArc({ value }: { value: number }) {
-  const r = 38;
-  const circ = Math.PI * r;
+  const r = 38, circ = Math.PI * r;
   const offset = circ - (value / 100) * circ;
   const color = value >= 70 ? "#10b981" : value >= 50 ? "#f59e0b" : "#ef4444";
   return (
@@ -172,66 +139,107 @@ function ConfidenceArc({ value }: { value: number }) {
   );
 }
 
-export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending }: MarketOpportunityCardProps) {
+// ── Quick Strike Flash Card ────────────────────────────────────────────────────
+interface MarketOpportunityCardProps {
+  topMarket?: any;
+  onTrade?: () => void;
+  isTradePending?: boolean;
+}
+
+export function MarketOpportunityFlashCard({ onTrade }: MarketOpportunityCardProps) {
   const [flipped, setFlipped] = useState(false);
-  const [filterType, setFilterType] = useState<FilterType>("auto");
-  const [marketIndex, setMarketIndex] = useState(0);
+  const [executingSymbol, setExecutingSymbol] = useState<string | null>(null);
+  const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
 
-  const activeFilter = FILTER_OPTIONS.find(f => f.id === filterType)!;
+  const executeTrade = useExecuteTrade();
 
+  // Fetch all markets ranked by AI quality score
   const { data: allMarkets } = useQuery<any[]>({
-    queryKey: ["markets", "list", filterType],
+    queryKey: ["markets", "ranked-all"],
     queryFn: () => fetch("/api/markets?limit=50").then(r => r.json()),
-    refetchInterval: 10000,
-    enabled: filterType !== "auto",
-    select: (data) => {
-      if (!activeFilter.contractTypes) return data;
-      const allowed = new Set(activeFilter.contractTypes.split(","));
-      return (data ?? []).filter((m: any) => m.recommendedContractType && allowed.has(m.recommendedContractType));
-    },
-  });
-
-  const filteredMarkets = filterType !== "auto" ? (allMarkets ?? []) : [];
-  const selectedFiltered = filteredMarkets[Math.min(marketIndex, Math.max(filteredMarkets.length - 1, 0))];
-
-  const { data: filteredDetail } = useQuery<any>({
-    queryKey: ["markets", "detail", selectedFiltered?.symbol],
-    queryFn: () => fetch(`/api/markets/${selectedFiltered!.symbol}`).then(r => r.json()),
     refetchInterval: 8000,
-    enabled: filterType !== "auto" && !!selectedFiltered?.symbol,
   });
 
-  const handleFilterChange = (f: FilterType) => {
-    setFilterType(f);
-    setMarketIndex(0);
+  // Fetch best recommendation (has full detail: stake, ticks, barrier, direction)
+  const { data: bestRec } = useQuery<any>({
+    queryKey: ["ai", "best-recommendation"],
+    queryFn: () => fetch("/api/ai/recommendation").then(r => r.json()),
+    refetchInterval: 8000,
+  });
+
+  // Markets that the AI considers tradeable, sorted by quality
+  const tradeableMarkets = (allMarkets ?? []).filter((m: any) => m.shouldTrade);
+  const top5 = tradeableMarkets.slice(0, 6);
+
+  const bestMarket = allMarkets?.find((m: any) => m.symbol === bestRec?.symbol) ?? allMarkets?.[0];
+  const rec = bestRec;
+
+  const conf = rec?.confidence ?? 0;
+  const contractType = rec?.contractType ?? bestMarket?.recommendedContractType ?? "CALL";
+  const ctColor = contractColor(contractType);
+  const glowColor = `${ctColor}40`;
+  const isUp = contractToDirection(contractType) === "up";
+
+  const handleExecute = (market: any, ct?: string, barrier?: number | null, stake?: number, direction?: string, duration?: number) => {
+    const sym = market.symbol ?? market;
+    const finalCt = ct ?? market.recommendedContractType ?? "CALL";
+    const finalStake = stake ?? rec?.stake ?? 1;
+    const finalDir = (direction ?? contractToDirection(finalCt)) as "up" | "down";
+    const finalBarrier = barrier ?? (finalCt.includes("DIGIT") ? rec?.digitBarrier ?? undefined : undefined);
+    const finalDuration = duration ?? rec?.recommendedDuration ?? 5;
+
+    setExecutingSymbol(sym);
+    executeTrade.mutate({
+      data: {
+        symbol: sym,
+        contractType: finalCt,
+        stake: finalStake,
+        direction: finalDir,
+        ...(finalBarrier != null && { barrier: finalBarrier }),
+        duration: finalDuration,
+        durationUnit: "t",
+      } as any
+    }, {
+      onSuccess: (trade: any) => {
+        const won = trade.status === "won";
+        toast[won ? "success" : "error"](
+          `${won ? "✓ Won" : "✗ Lost"} $${Math.abs(Number(trade.profit ?? 0)).toFixed(2)} on ${market.displayName ?? sym}`
+        );
+        setExecutingSymbol(null);
+        onTrade?.();
+      },
+      onError: () => {
+        toast.error("Trade failed — check account settings");
+        setExecutingSymbol(null);
+      }
+    });
   };
 
-  const handleFlip = () => setFlipped(f => !f);
-
-  const displayMarket = filterType === "auto" ? topMarket : (filteredDetail ?? selectedFiltered);
-  const displayRec = (displayMarket as any)?.recommendation ?? null;
-
-  const conf = displayRec?.confidence ?? 0;
-  const confColor = conf >= 70 ? "#10b981" : conf >= 50 ? "#f59e0b" : "#ef4444";
-  const glowColor = conf >= 70 ? "rgba(16,185,129,0.3)" : conf >= 50 ? "rgba(245,158,11,0.3)" : "rgba(0,255,255,0.3)";
-
-  const canPrev = filterType !== "auto" && marketIndex > 0;
-  const canNext = filterType !== "auto" && marketIndex < filteredMarkets.length - 1;
-
+  // ── Front: Quick Strike card ────────────────────────────────────────────────
   const front = (
     <div className="flex flex-col h-full p-5 gap-3">
-      <div className="flex items-center justify-between">
-        <div className="flex-1 min-w-0 pr-3">
-          <div className="flex items-center gap-2 mb-1">
-            <div className="text-[10px] font-mono uppercase tracking-widest text-primary/70">Best Opportunity</div>
-            {filterType !== "auto" && (
-              <span className="px-1.5 py-0.5 rounded text-[9px] font-mono uppercase tracking-wide bg-primary/10 text-primary border border-primary/20 shrink-0">
-                {activeFilter.label}
-              </span>
-            )}
+      {/* Header */}
+      <div className="flex items-center gap-2">
+        <Zap className="w-3.5 h-3.5 text-primary shrink-0" />
+        <span className="text-[10px] font-mono uppercase tracking-widest text-primary/70">Quick Strike</span>
+        <span className="ml-auto w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+      </div>
+
+      {/* Market + confidence */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="text-base font-bold leading-tight truncate">{bestMarket?.displayName ?? "Scanning…"}</div>
+          <div className="text-[11px] font-mono text-muted-foreground">{bestMarket?.symbol ?? "—"}</div>
+          <div className="mt-1.5 flex items-center gap-1.5">
+            {isUp ? <TrendingUp className="w-3 h-3 shrink-0" style={{ color: ctColor }} /> : <TrendingDown className="w-3 h-3 shrink-0" style={{ color: ctColor }} />}
+            <span
+              className="text-sm font-mono font-bold px-2 py-0.5 rounded-full border"
+              style={{ color: ctColor, borderColor: `${ctColor}40`, background: `${ctColor}12` }}
+            >
+              {formatContractLabel(contractType, rec?.digitBarrier ?? rec?.barrier)}
+            </span>
+            <span className="text-[10px] text-muted-foreground font-mono capitalize">{bestMarket?.regime?.replace(/_/g, " ") ?? "—"}</span>
           </div>
-          <div className="text-lg font-bold leading-tight truncate">{displayMarket?.displayName ?? "Scanning…"}</div>
-          <div className="text-xs font-mono text-muted-foreground">{displayMarket?.symbol ?? "—"}</div>
         </div>
         <div className="flex flex-col items-center shrink-0">
           <ConfidenceArc value={conf} />
@@ -239,153 +247,171 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
         </div>
       </div>
 
-      <div className="flex items-center gap-2 flex-wrap">
-        {displayRec?.direction && (
-          <span
-            className="px-2.5 py-0.5 rounded-full text-[11px] font-bold font-mono border"
-            style={{ color: displayRec.direction === "up" ? "#10b981" : "#ef4444", borderColor: displayRec.direction === "up" ? "rgba(16,185,129,0.3)" : "rgba(239,68,68,0.3)" }}
-          >
-            {displayRec.direction.toUpperCase()} · {formatContractLabel(displayRec.contractType, displayRec.digitBarrier ?? displayRec.barrier)}
-          </span>
-        )}
-        {displayMarket?.category && (
-          <span className="px-2 py-0.5 rounded-full text-[11px] text-muted-foreground border border-border font-mono">
-            {displayMarket.category}
-          </span>
-        )}
-      </div>
-
-      {/* Market navigator (when filter is active) */}
-      {filterType !== "auto" && filteredMarkets.length > 1 && (
-        <div className="flex items-center gap-2 mt-auto">
-          <button
-            onClick={(e) => { e.stopPropagation(); setMarketIndex(i => Math.max(0, i - 1)); }}
-            disabled={!canPrev}
-            className="p-1 rounded-lg border border-white/10 disabled:opacity-30 hover:border-primary/40 hover:bg-primary/5 transition-all"
-          >
-            <ChevronLeft className="w-3.5 h-3.5" />
-          </button>
-          <span className="text-[10px] font-mono text-muted-foreground flex-1 text-center">
-            {marketIndex + 1} / {filteredMarkets.length} markets
-          </span>
-          <button
-            onClick={(e) => { e.stopPropagation(); setMarketIndex(i => Math.min(filteredMarkets.length - 1, i + 1)); }}
-            disabled={!canNext}
-            className="p-1 rounded-lg border border-white/10 disabled:opacity-30 hover:border-primary/40 hover:bg-primary/5 transition-all"
-          >
-            <ChevronRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      )}
-
-      <div className={`flex items-center justify-between ${filterType === "auto" || filteredMarkets.length <= 1 ? "mt-auto" : ""}`}>
-        <div>
-          <div className="text-[10px] text-muted-foreground uppercase">Stake</div>
-          <div className="font-mono font-bold text-lg">${displayRec?.stake?.toFixed(2) ?? "—"}</div>
-        </div>
-
-        <button
-          onClick={(e) => { e.stopPropagation(); onTrade?.(); }}
-          disabled={isTradePending || !displayRec?.shouldTrade}
-          className="px-4 py-2 rounded-xl text-xs font-bold font-mono border transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-          style={{
-            background: displayRec?.shouldTrade ? `${confColor}18` : "transparent",
-            borderColor: displayRec?.shouldTrade ? `${confColor}60` : "rgba(255,255,255,0.1)",
-            color: displayRec?.shouldTrade ? confColor : "rgba(255,255,255,0.3)",
-            boxShadow: displayRec?.shouldTrade ? `0 0 12px ${confColor}30` : "none",
-          }}
-        >
-          {isTradePending ? "EXECUTING…" : displayRec?.shouldTrade ? "EXECUTE" : "LOW CONF"}
-        </button>
-      </div>
-    </div>
-  );
-
-  const back = (
-    <div className="flex flex-col p-5 gap-3 pb-10">
-      {/* Market Type Filter */}
-      <div className="text-[10px] font-mono uppercase tracking-widest text-primary/70">Market Type Filter</div>
-
-      <div className="grid grid-cols-2 gap-2">
-        {FILTER_OPTIONS.map((opt) => {
-          const isActive = filterType === opt.id;
-          return (
-            <button
-              key={opt.id}
-              onClick={(e) => { e.stopPropagation(); handleFilterChange(opt.id); }}
-              className="relative py-2 px-3 rounded-xl text-xs font-bold font-mono border transition-all"
-              style={{
-                background: isActive ? "rgba(0,255,255,0.08)" : "rgba(255,255,255,0.02)",
-                borderColor: isActive ? "rgba(0,255,255,0.4)" : "rgba(255,255,255,0.07)",
-                color: isActive ? "#00ffff" : "rgba(255,255,255,0.45)",
-                boxShadow: isActive ? "0 0 10px rgba(0,255,255,0.15)" : "none",
-              }}
-            >
-              {isActive && (
-                <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-              )}
-              {opt.label}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Signal Analysis */}
-      <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-wide mt-1">Signal Analysis</div>
-      <div className="grid grid-cols-2 gap-2">
+      {/* Stats row */}
+      <div className="grid grid-cols-3 gap-2">
         {[
-          { label: "Market", value: displayMarket?.displayName ?? "—" },
-          { label: "Signal", value: displayRec?.direction?.toUpperCase() ?? "—" },
-          { label: "Type", value: formatContractLabel(displayRec?.contractType, displayRec?.digitBarrier) },
-          { label: "Confidence", value: `${conf.toFixed(1)}%` },
-          { label: "Stake", value: `$${displayRec?.stake?.toFixed(2) ?? "0.00"}` },
-          { label: "Category", value: displayMarket?.category ?? "—" },
-        ].map((item) => (
-          <div key={item.label} className="bg-white/[0.03] rounded-xl p-2.5 border border-white/[0.06]">
-            <div className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">{item.label}</div>
-            <div className="font-mono font-bold text-xs text-foreground truncate">{item.value}</div>
+          { label: "Win Prob", value: rec ? `${rec.winProbability?.toFixed(0) ?? conf.toFixed(0)}%` : "—" },
+          { label: "EV", value: rec ? (rec.expectedValue > 0 ? `+$${rec.expectedValue.toFixed(2)}` : `$${rec.expectedValue?.toFixed(2) ?? "—"}`) : "—" },
+          { label: "Ticks", value: rec ? `${rec.recommendedDuration ?? 5}t` : "—" },
+        ].map(({ label, value }) => (
+          <div key={label} className="text-center p-2 rounded-lg bg-white/[0.04] border border-white/[0.06]">
+            <div className="text-[9px] text-muted-foreground uppercase tracking-wide">{label}</div>
+            <div className="text-xs font-mono font-bold mt-0.5">{value}</div>
           </div>
         ))}
       </div>
 
-      {/* Confidence bar */}
-      <div className="space-y-1">
-        <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-wide">Confidence</div>
-        <div className="h-2 w-full bg-zinc-800 rounded-full overflow-hidden">
-          <motion.div
-            className="h-full rounded-full"
-            initial={{ width: 0 }}
-            animate={{ width: `${conf}%` }}
-            transition={{ duration: 0.8, ease: "easeOut" }}
-            style={{ background: `linear-gradient(90deg, ${confColor}80, ${confColor})` }}
-          />
+      {/* Stake + Execute */}
+      <div className="flex items-center justify-between mt-auto gap-3">
+        <div>
+          <div className="text-[9px] text-muted-foreground uppercase tracking-wide">AI Stake</div>
+          <div className="text-xl font-mono font-bold" style={{ color: ctColor }}>
+            ${rec?.stake?.toFixed(2) ?? "—"}
+          </div>
         </div>
-        <div className="flex justify-between text-[10px] font-mono text-muted-foreground">
-          <span>0%</span><span>50%</span><span>100%</span>
-        </div>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            if (!bestMarket || !rec) return;
+            handleExecute(bestMarket, contractType, rec.digitBarrier ?? rec.barrier, rec.stake, rec.direction, rec.recommendedDuration);
+          }}
+          disabled={!rec?.shouldTrade || executingSymbol === bestMarket?.symbol}
+          className="flex-1 py-3 rounded-xl text-sm font-bold font-mono border transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed"
+          style={{
+            background: rec?.shouldTrade ? `${ctColor}18` : "transparent",
+            borderColor: rec?.shouldTrade ? `${ctColor}60` : "rgba(255,255,255,0.1)",
+            color: rec?.shouldTrade ? ctColor : "rgba(255,255,255,0.3)",
+            boxShadow: rec?.shouldTrade ? `0 0 16px ${ctColor}25` : "none",
+          }}
+        >
+          {executingSymbol === bestMarket?.symbol
+            ? "EXECUTING…"
+            : rec?.shouldTrade
+              ? `⚡ EXECUTE`
+              : "LOW CONF"}
+        </button>
       </div>
 
-      {/* Market navigator on back */}
-      {filterType !== "auto" && filteredMarkets.length > 1 && (
-        <div className="flex items-center gap-2 mt-1">
-          <button
-            onClick={(e) => { e.stopPropagation(); setMarketIndex(i => Math.max(0, i - 1)); }}
-            disabled={!canPrev}
-            className="p-1.5 rounded-lg border border-white/10 disabled:opacity-30 hover:border-primary/40 hover:bg-primary/5 transition-all"
-          >
-            <ChevronLeft className="w-3.5 h-3.5" />
-          </button>
-          <span className="text-[10px] font-mono text-muted-foreground flex-1 text-center">
-            market {marketIndex + 1} of {filteredMarkets.length}
-          </span>
-          <button
-            onClick={(e) => { e.stopPropagation(); setMarketIndex(i => Math.min(filteredMarkets.length - 1, i + 1)); }}
-            disabled={!canNext}
-            className="p-1.5 rounded-lg border border-white/10 disabled:opacity-30 hover:border-primary/40 hover:bg-primary/5 transition-all"
-          >
-            <ChevronRight className="w-3.5 h-3.5" />
-          </button>
+      {/* Markets scanned indicator */}
+      {allMarkets && (
+        <div className="text-[9px] font-mono text-muted-foreground text-center -mt-1">
+          {allMarkets.length} markets scanned · {tradeableMarkets.length} tradeable
         </div>
+      )}
+    </div>
+  );
+
+  // ── Back: Top opportunities ─────────────────────────────────────────────────
+  const back = (
+    <div className="flex flex-col p-4 gap-2 pb-10">
+      <div className="flex items-center gap-2 mb-1">
+        <Zap className="w-3 h-3 text-primary" />
+        <span className="text-[10px] font-mono uppercase tracking-widest text-primary/70">Top Opportunities</span>
+        <span className="text-[9px] text-muted-foreground ml-auto">{allMarkets?.length ?? 0} scanned</span>
+      </div>
+
+      {top5.length === 0 ? (
+        <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground py-8">
+          Scanning markets for opportunities…
+        </div>
+      ) : (
+        top5.map((market: any, idx: number) => {
+          const ct = market.recommendedContractType ?? "CALL";
+          const ctCol = contractColor(ct);
+          const conf2 = market.confidenceScore ?? 0;
+          const isExecuting = executingSymbol === market.symbol;
+          const isExpanded = expandedSymbol === market.symbol;
+
+          return (
+            <div key={market.symbol} className="rounded-xl border border-white/[0.07] bg-white/[0.03] overflow-hidden">
+              <div className="flex items-center gap-2.5 p-2.5">
+                {/* Rank */}
+                <div
+                  className="w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[9px] font-bold"
+                  style={{ background: idx === 0 ? `${ctCol}25` : "rgba(255,255,255,0.05)", color: idx === 0 ? ctCol : "rgba(255,255,255,0.4)" }}
+                >
+                  {idx + 1}
+                </div>
+
+                {/* Market info */}
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-bold leading-tight truncate">{market.displayName}</div>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <span
+                      className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border"
+                      style={{ color: ctCol, borderColor: `${ctCol}40`, background: `${ctCol}10` }}
+                    >
+                      {formatContractLabel(ct)}
+                    </span>
+                    <span className="text-[9px] font-mono text-muted-foreground">{conf2.toFixed(0)}%</span>
+                  </div>
+                </div>
+
+                {/* Quality bar */}
+                <div className="w-12 shrink-0">
+                  <div className="h-1 w-full bg-white/10 rounded-full overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all duration-500"
+                      style={{ width: `${market.qualityScore ?? 0}%`, background: ctCol }}
+                    />
+                  </div>
+                  <div className="text-[8px] font-mono text-center text-muted-foreground mt-0.5">Q:{market.qualityScore?.toFixed(0) ?? 0}</div>
+                </div>
+
+                {/* Execute + expand */}
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setExpandedSymbol(isExpanded ? null : market.symbol); }}
+                    className="p-1 rounded-lg border border-white/10 hover:border-primary/30 transition-colors"
+                  >
+                    {isExpanded ? <ChevronUp className="w-3 h-3 text-muted-foreground" /> : <ChevronDown className="w-3 h-3 text-muted-foreground" />}
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleExecute(market, ct, null, undefined, contractToDirection(ct));
+                    }}
+                    disabled={isExecuting}
+                    className="px-2 py-1 rounded-lg text-[9px] font-bold font-mono border transition-all active:scale-[0.97] disabled:opacity-40"
+                    style={{
+                      background: `${ctCol}15`,
+                      borderColor: `${ctCol}50`,
+                      color: ctCol,
+                    }}
+                  >
+                    {isExecuting ? "…" : "⚡"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Expanded details */}
+              <AnimatePresence>
+                {isExpanded && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.2 }}
+                    className="overflow-hidden"
+                  >
+                    <div className="px-3 pb-2.5 grid grid-cols-3 gap-1.5 border-t border-white/[0.05] pt-2">
+                      {[
+                        { label: "Regime", value: market.regime?.replace(/_/g, " ") ?? "—" },
+                        { label: "Trend", value: market.trend ?? "—" },
+                        { label: "Volatility", value: market.volatility ?? "—" },
+                      ].map(({ label, value }) => (
+                        <div key={label} className="text-center">
+                          <div className="text-[8px] text-muted-foreground uppercase">{label}</div>
+                          <div className="text-[9px] font-mono font-bold capitalize">{value}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          );
+        })
       )}
     </div>
   );
@@ -395,8 +421,8 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
       front={front}
       back={back}
       flipped={flipped}
-      onFlip={handleFlip}
-      glowColor={glowColor}
+      onFlip={() => setFlipped(f => !f)}
+      glowColor={glowColor || "rgba(0,255,255,0.35)"}
       className="h-full min-h-[200px]"
     />
   );
