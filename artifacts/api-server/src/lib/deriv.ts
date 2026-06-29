@@ -490,10 +490,20 @@ function generateSimulatedPrices(symbol: string, count: number): number[] {
     : symbol.includes("R_75") || symbol.includes("1HZ75") ? 0.005
     : 0.002;
 
+  // Determine the decimal precision required for correct digit extraction.
+  // Markets with pipSize=4 need 4 decimal places; pipSize=2 need 2.
+  // Without sufficient precision, extractLastDigit() always returns 0 for pipSize=4 markets.
+  const market = getMarketInfo(symbol);
+  const pipSize = market?.pipSize ?? 2;
+  const decimalFactor = Math.pow(10, pipSize);
+
   const prices: number[] = [base];
   for (let i = 1; i < count; i++) {
     const change = prices[i - 1] * volPct * (Math.random() - 0.5) * 2;
-    prices.push(Math.max(prices[i - 1] + change, 0.0001));
+    const raw = prices[i - 1] + change;
+    // Round to the market's pip precision so digit extraction is meaningful
+    const rounded = Math.round(raw * decimalFactor) / decimalFactor;
+    prices.push(Math.max(rounded, 0.0001));
   }
   return prices;
 }

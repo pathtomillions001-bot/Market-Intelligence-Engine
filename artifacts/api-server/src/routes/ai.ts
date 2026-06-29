@@ -20,6 +20,8 @@ let stopReasons: string[] = [];
 let autonomousTimer: ReturnType<typeof setTimeout> | null = null;
 let loopIntervalSec = 5;
 let lastTradeTime: Date | null = null;
+// Concurrency guard — prevents two loop iterations from running simultaneously
+let isLoopRunning = false;
 
 let exploitSymbol: string | null = null;
 let exploitCount = 0;
@@ -168,6 +170,13 @@ async function syncLiveBalance(token: string) {
 // ── Autonomous loop ───────────────────────────────────────────────────────────
 async function runAutonomousLoop() {
   if (!engineRunning) return;
+  // Prevent concurrent iterations — if a previous loop is still running, skip
+  if (isLoopRunning) {
+    logger.warn("Autonomous loop: previous iteration still running — skipping this tick");
+    scheduleNext(false);
+    return;
+  }
+  isLoopRunning = true;
 
   try {
     const { balance, settings, account } = await getAccountAndSettings();
@@ -251,6 +260,14 @@ async function runAutonomousLoop() {
     const { market: bestMarket, output, ctx } = bestResult;
     currentMarket = bestMarket.symbol;
 
+    // ── Guard: block if there is already an open/in-progress trade ───────────
+    const openTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
+    if (openTrades.length > 0) {
+      logger.info({ openCount: openTrades.length }, "Autonomous: open trade in progress — waiting before next scan");
+      scheduleNext(false);
+      return;
+    }
+
     // Build legacy analysis for backward-compat fields
     const analysis = buildLegacyAnalysis(output);
 
@@ -287,15 +304,19 @@ async function runAutonomousLoop() {
     const effectiveContractType = rec.product;
     const effectiveBarrier = rec.barrier;
     const duration = rec.duration;
-    const payout = stake * rec.payoutMultiplier;
+    // Estimated payout for paper trades (live payout comes from Deriv result)
+    const estimatedPayout = stake * rec.payoutMultiplier;
     const barrierToStore = effectiveContractType.includes("DIGIT") ? (effectiveBarrier ?? null) : null;
 
     let won: boolean, profit: number, entryPrice: number, exitPrice: number;
+    // Actual payout settled (set after trade outcome known)
+    let actualPayout: number;
 
     if (paperTradeMode || !token) {
       const winProb = rec.winProbability / 100;
       won = Math.random() < winProb;
-      profit = won ? payout - stake : -stake;
+      profit = won ? estimatedPayout - stake : -stake;
+      actualPayout = won ? estimatedPayout : 0;
       entryPrice = ctx.prices[ctx.prices.length - 1] ?? 100;
       exitPrice = entryPrice;
       logger.info({ symbol: bestMarket.symbol, paper: true, won, ev: analysis.expectedValue }, "Paper trade");
@@ -312,7 +333,7 @@ async function runAutonomousLoop() {
         stake: String(stake),
         direction: output.direction,
         status: won ? "won" : "lost",
-        payout: String(payout),
+        payout: String(actualPayout),
         profit: String(profit),
         entryPrice: String(entryPrice),
         exitPrice: String(exitPrice),
@@ -366,10 +387,15 @@ async function runAutonomousLoop() {
           barrier: effectiveContractType.includes("DIGIT") ? effectiveBarrier : undefined,
         });
         entryPrice = liveResult.buyPrice;
-        const contractResult = await waitForContractResult(token, liveResult.contractId, (duration + 15) * 1000);
+        // Wait for Deriv to settle the contract — timeout = ticks * 1s + 30s buffer
+        const contractResult = await waitForContractResult(token, liveResult.contractId, (duration + 30) * 1000);
         won = contractResult.won;
+        // Use Deriv's exact profit — this is the ground truth for the journal
         profit = contractResult.profit;
+        // Actual payout = stake returned + net profit (only when won; 0 when lost)
+        actualPayout = won ? stake + profit : 0;
         exitPrice = contractResult.exitSpot;
+        entryPrice = contractResult.entrySpot || liveResult.buyPrice;
         await syncLiveBalance(token);
       } catch (liveErr) {
         const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
@@ -385,13 +411,15 @@ async function runAutonomousLoop() {
         return;
       }
 
-      // Update the open record to final status
+      // Update the open record to Deriv-confirmed final status
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
       updateDigitRecovery(bestMarket.symbol, effectiveContractType, won, profit, stake);
 
       await db.update(tradesTable).set({
         status: won ? "won" : "lost",
-        payout: String(payout),
+        // actualPayout: total returned to account (stake + net profit) when won, 0 when lost
+        payout: String(actualPayout),
+        // profit: exact net P&L from Deriv (positive on win, negative on loss)
         profit: String(profit),
         entryPrice: String(entryPrice),
         exitPrice: String(exitPrice),
@@ -420,15 +448,20 @@ async function runAutonomousLoop() {
 
   } catch (err) {
     logger.error({ err }, "Autonomous loop error");
+  } finally {
+    // Always release the lock so the loop can run again
+    isLoopRunning = false;
   }
 
+  // After a live trade completes, wait at least 5s before next scan so balances
+  // and journal settle — no new trade can start while isLoopRunning=true
   scheduleNext(true);
 }
 
 function scheduleNext(tradeExecuted = false) {
   if (!engineRunning) return;
-  // Minimum 2s between scans to prevent concurrent trade stacking
-  const delayMs = tradeExecuted ? 2000 : 2000;
+  // 5s after a trade (to let Deriv account settle), 3s otherwise
+  const delayMs = tradeExecuted ? 5000 : 3000;
   nextScanIn = Math.ceil(delayMs / 1000);
   loopIntervalSec = nextScanIn;
   autonomousTimer = setTimeout(runAutonomousLoop, delayMs);

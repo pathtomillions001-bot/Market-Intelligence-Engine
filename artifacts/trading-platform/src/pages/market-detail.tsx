@@ -869,7 +869,13 @@ export default function MarketDetail() {
   const startPrice = chartData[0]?.price ?? currentPrice;
   const priceChange = startPrice > 0 ? ((currentPrice - startPrice) / startPrice) * 100 : 0;
 
-  const pipSize = symbol?.includes("R_100") || symbol?.includes("1HZ100") ? 2 : symbol?.startsWith("1HZ") || symbol?.startsWith("R_") ? 3 : 4;
+  // Match the backend DERIV_MARKETS pipSize definitions exactly:
+  // R_50, R_75, RDBULL, RDBEAR → pipSize 4 (4 decimal places)
+  // R_10, R_25, R_100, 1HZ*, JD* → pipSize 2 (2 decimal places)
+  const pipSize = (
+    symbol?.includes("R_50") || symbol?.includes("R_75") ||
+    symbol === "RDBULL" || symbol === "RDBEAR"
+  ) ? 4 : 2;
 
   function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number, duration?: number) {
     setTradeContract(contractType);

@@ -4,20 +4,25 @@
  * BARRIER TIERS (per user specification):
  *
  *   TIER 1 — Normal / Safe compounding:
- *     OVER 1, 2, 3  → theoretical win prob 80%, 70%, 60%
- *     UNDER 7, 8, 9 → theoretical win prob 70%, 80%, 90%
+ *     OVER 1, 2, 3    → theoretical win prob 80%, 70%, 60%
+ *     UNDER 6, 7, 8   → theoretical win prob 60%, 70%, 80%
  *
  *   TIER 2 — Recovery (after a loss, until fully recovered):
- *     OVER 4, 5, 6   → theoretical win prob 50%, 40%, 30%
- *     UNDER 4, 5, 6  → theoretical win prob 40%, 50%, 60%
+ *     OVER 4, 5, 6    → theoretical win prob 50%, 40%, 30%
+ *     UNDER 3, 4, 5   → theoretical win prob 30%, 40%, 50%
  *
  * Within each tier, barriers are ranked by probability-adjusted EV.
  * If no positive-EV option exists in the preferred tier, fallback to
- * any positive-EV barrier from either tier.
+ * any positive-EV barrier from tier 1 or tier 2.
  *
- * NEVER select OVER 7/8 or UNDER 1/2 in normal mode — these are
- * high-payout bets with low win probability that produce volatility
- * without a real edge.
+ * HARD BLOCKED — these are never selected regardless of EV:
+ *   OVER 7, OVER 8   → ultra-low win prob (20%, 10%), too risky
+ *   UNDER 1, UNDER 2 → ultra-low win prob (10%, 20%), too risky
+ *
+ * OVER 0 (90% win, 1.05x payout) and UNDER 9 (90% win, 1.05x payout)
+ * are assigned tier 0 but NOT hard-blocked — they can be a fallback when
+ * nothing else has positive EV (though their very low payout means they
+ * rarely score above tier-1/2 options).
  */
 
 import type { AgentOutput, ScanContext } from "./types";
@@ -46,12 +51,18 @@ const UNDER_THEORETICAL: Record<number, number> = {
 
 // ── Tier definitions ─────────────────────────────────────────────────────────
 // Tier 1: safe compounding (normal mode)
+// OVER 1/2/3 → 80/70/60% win rate; UNDER 6/7/8 → 60/70/80% win rate
 const TIER1_OVER  = new Set([1, 2, 3]);
-const TIER1_UNDER = new Set([7, 8, 9]);
+const TIER1_UNDER = new Set([6, 7, 8]);
 
 // Tier 2: recovery mode (after a loss — more payout to recover faster)
+// OVER 4/5/6 → 50/40/30% win rate; UNDER 3/4/5 → 30/40/50% win rate
 const TIER2_OVER  = new Set([4, 5, 6]);
-const TIER2_UNDER = new Set([4, 5, 6]);
+const TIER2_UNDER = new Set([3, 4, 5]);
+
+// Hard-blocked barriers — NEVER select these; ultra-risky, unacceptable loss rate
+const HARD_BLOCKED_OVER  = new Set([7, 8]);    // OVER 7: 20% win, OVER 8: 10% win
+const HARD_BLOCKED_UNDER = new Set([1, 2]);    // UNDER 1: 10% win, UNDER 2: 20% win
 
 function inPreferredTier(
   contractType: "DIGITOVER" | "DIGITUNDER",
@@ -220,6 +231,19 @@ function scoreAllBarriers(
     });
   }
 
+  // ── Hard-block specific risky barriers — NEVER select these ──────────────
+  // Only block OVER 7/8 (10-20% win) and UNDER 1/2 (10-20% win).
+  // OVER 0 (90% win, 1.05x payout) and UNDER 9 (90% win, 1.05x payout) are
+  // tier-0 but NOT blocked — they can serve as a last-resort fallback.
+  for (const opt of rawOptions) {
+    const isHardBlocked = opt.contractType === "DIGITOVER"
+      ? HARD_BLOCKED_OVER.has(opt.barrier)
+      : HARD_BLOCKED_UNDER.has(opt.barrier);
+    if (isHardBlocked) {
+      opt.adjustedEvScore = -Infinity;
+    }
+  }
+
   // ── Apply tiered preference ───────────────────────────────────────────────
   // 1. First try: positive-EV options in the current preferred tier
   const preferredTier = inRecovery ? 2 : 1;
@@ -233,14 +257,14 @@ function scoreAllBarriers(
       opt.adjustedEvScore = opt.evScore * 10; // guaranteed top
     }
   } else {
-    // Fallback: any tier with positive EV (still exclude tier 0 risky options unless nothing else)
+    // Fallback: any tier 1 or 2 option with positive EV (tier 0 remains blocked)
     const anyPositive = rawOptions.filter((o) => o.expectedValue > 0 && o.tier !== 0);
     if (anyPositive.length > 0) {
       for (const opt of anyPositive) {
         opt.adjustedEvScore = opt.evScore * 2;
       }
     }
-    // Last resort: include tier 0 if absolutely nothing else
+    // If absolutely nothing has positive EV, return empty (no trade is better than a tier-0 trade)
   }
 
   return rawOptions.sort((a, b) => b.adjustedEvScore - a.adjustedEvScore);
@@ -301,7 +325,11 @@ export function analyzeDigitEdge(
     .sort((a, b) => b.evScore - a.evScore);
 
   // Positive EV options sorted by adjustedEvScore (tier preference applied)
-  const positiveEV = allOptions.filter((o) => o.expectedValue > 0.003);
+  // Exclude hard-blocked barriers (OVER 7/8, UNDER 1/2) from the options passed
+  // to the EV calculator — these are never eligible for trade regardless of EV
+  const isHardBlockedOption = (o: BarrierOption) =>
+    o.contractType === "DIGITOVER" ? HARD_BLOCKED_OVER.has(o.barrier) : HARD_BLOCKED_UNDER.has(o.barrier);
+  const positiveEV = allOptions.filter((o) => o.expectedValue > 0.003 && !isHardBlockedOption(o));
   const bestOption = positiveEV.length > 0 ? positiveEV[0] : null;
 
   return {

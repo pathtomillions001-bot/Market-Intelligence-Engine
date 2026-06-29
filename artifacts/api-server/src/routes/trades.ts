@@ -283,8 +283,10 @@ router.post("/", async (req, res): Promise<void> => {
         barrier,
       });
 
-      const contractResult = await waitForContractResult(token!, liveResult.contractId, (tradeDuration + 15) * 1000);
+      // Wait for Deriv to settle the contract — ticks * 1s + 30s safety buffer
+      const contractResult = await waitForContractResult(token!, liveResult.contractId, (tradeDuration + 30) * 1000);
       won = contractResult.won;
+      // Use Deriv's exact profit — ground truth for the journal
       profit = contractResult.profit;
       exitPrice = contractResult.exitSpot;
       entryPrice = contractResult.entrySpot || liveResult.buyPrice;
@@ -302,9 +304,11 @@ router.post("/", async (req, res): Promise<void> => {
     recordTradeOutcome(symbol, contractType, barrier ?? null, won, profit, stake);
     updateDigitRecovery(symbol, contractType, won, profit, stake);
 
+    // actualPayout = total returned to account when won (stake + net profit), 0 when lost
+    const actualPayout = won ? stake + profit : 0;
     const [closedTrade] = await db.update(tradesTable).set({
       status: won ? "won" : "lost",
-      payout: String(stake + Math.max(profit, 0)),
+      payout: String(actualPayout),
       profit: String(profit),
       entryPrice: String(entryPrice),
       exitPrice: String(exitPrice),

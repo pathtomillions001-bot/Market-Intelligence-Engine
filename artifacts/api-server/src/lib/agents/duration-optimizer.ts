@@ -34,6 +34,9 @@ export interface OptimalDuration {
 }
 
 const CANDIDATE_DURATIONS = [1, 3, 5, 7, 10, 15];
+// Digit contracts only care about the FINAL tick's last digit — durations beyond
+// 5 ticks add time exposure without improving odds. Restrict to these candidates.
+const DIGIT_CANDIDATE_DURATIONS = [3, 5];
 
 /**
  * Score a given tick duration for a contract type in the current market conditions.
@@ -164,7 +167,12 @@ export function selectOptimalDuration(
   regime: MarketRegime,
   contractType: string,
 ): OptimalDuration {
-  const allScores: DurationScore[] = CANDIDATE_DURATIONS.map((d) =>
+  // Digit contracts: only consider 3t or 5t — longer durations add exposure
+  // without improving the digit distribution odds (outcome depends on final tick only)
+  const isDigit = contractType.startsWith("DIGIT");
+  const candidates = isDigit ? DIGIT_CANDIDATE_DURATIONS : CANDIDATE_DURATIONS;
+
+  const allScores: DurationScore[] = candidates.map((d) =>
     scoreDuration(d, features, regime, contractType, ctx.symbol)
   );
 

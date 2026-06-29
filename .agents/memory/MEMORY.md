@@ -7,4 +7,5 @@
 - [Live trade P&L fix](live-trade-pnl.md) — failed live trades must use profit=String(-stake) not "0"; flash-card label should use formatContractLabel() to show "OVER 5" not "DIGITOVER".
 - [Multi-agent system](multi-agent-system.md) — new 9-agent architecture: feature-engineering, market-regime, direction, digit, ev-calculator, risk-manager, execution-timing, performance-feedback, master-decision; coordinator in agent-coordinator.ts.
 - [Deriv contract settlement status](deriv-settlement-status.md) — waitForContractResult must check status "won"/"lost"/"expired" not just "sold"; is_sold can be 1 not true; profit sign determines won when status is ambiguous.
-- [Digit barrier tier system](digit-tier-system.md) — Tier 1 (normal): OVER 1-3 / UNDER 7-9; Tier 2 (recovery): OVER 4-6 / UNDER 4-6; recovery tracked per-symbol in digit-agent.ts updateDigitRecovery(); coordinator passes isInDigitRecovery() to runDigitAgent().
+- [Digit barrier tier system](digit-tier-system.md) — Tier 1: OVER 1-3 / UNDER 6-8; Tier 2: OVER 4-6 / UNDER 3-5; hard-blocked: OVER 7/8, UNDER 1/2 (never selected); OVER 0 / UNDER 9 are tier-0 but not blocked.
+- [Autonomous loop safety](autonomous-loop-safety.md) — isLoopRunning flag + open-trade DB guard prevent concurrent trades; Deriv profit used as ground truth for P&L; settlement timeout +30s buffer.
