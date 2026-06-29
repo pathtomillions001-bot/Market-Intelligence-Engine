@@ -95,7 +95,7 @@ async function analyzeAllMarkets() {
   isScanning = true;
   try {
     const { balance, settings, token, currency } = await getAccountAndSettings();
-    const preferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER"];
+    const preferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
     const tradingSettings = buildTradingSettings(settings, preferred);
     const daily = await getDailyStats();
     const now = new Date();
@@ -140,7 +140,7 @@ router.get("/", async (req, res): Promise<void> => {
   analyzeAllMarkets().catch(() => {});
 
   const { balance, settings, token, currency } = await getAccountAndSettings();
-  const preferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER"];
+  const preferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
   const tradingSettings = buildTradingSettings(settings, preferred);
   const daily = await getDailyStats();
 
@@ -181,7 +181,7 @@ router.get("/", async (req, res): Promise<void> => {
 router.get("/top", async (_req, res): Promise<void> => {
   analyzeAllMarkets().catch(() => {});
   const { balance, settings, token, currency } = await getAccountAndSettings();
-  const preferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER"];
+  const preferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
   const tradingSettings = buildTradingSettings(settings, preferred);
   const daily = await getDailyStats();
 
@@ -222,7 +222,7 @@ router.get("/:symbol", async (req, res): Promise<void> => {
   if (!market) { res.status(404).json({ error: "Market not found" }); return; }
 
   const { balance, settings, token, currency } = await getAccountAndSettings();
-  const preferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER"];
+  const preferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
   const tradingSettings = buildTradingSettings(settings, preferred);
   const daily = await getDailyStats();
 
@@ -251,8 +251,8 @@ function buildMarketDetail(
 
   // Live digit stats from the 50-tick window (more responsive than 200-tick)
   const market = getMarketInfo(symbol);
-  const digits50 = market?.digitEnabled ? tickManager.getDigits(symbol, 50) : [];
-  const liveDigitStats = digits50.length > 10 ? analyzeDigits(digits50) : null;
+  const digits100m = market?.digitEnabled ? tickManager.getDigits(symbol, 100) : [];
+  const liveDigitStats = digits100m.length > 10 ? analyzeDigits(digits100m) : null;
 
   return {
     symbol,

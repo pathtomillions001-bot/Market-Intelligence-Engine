@@ -90,9 +90,9 @@ export function classifyRegime(features: FeatureSet): RegimeOutput {
 
   // Product favorability by regime
   const favoredMap: Record<MarketRegime, string[]> = {
-    trending_up: ["RISE", "CALL"],
-    trending_down: ["FALL", "PUT"],
-    mean_reverting: ["DIGITOVER", "DIGITUNDER", "RISE", "FALL"],
+    trending_up: ["CALL"],
+    trending_down: ["PUT"],
+    mean_reverting: ["DIGITOVER", "DIGITUNDER", "CALL", "PUT"],
     choppy: ["DIGITOVER", "DIGITUNDER"],
     volatile: ["DIGITOVER", "DIGITUNDER"],
     quiet: ["DIGITOVER", "DIGITUNDER"],
@@ -101,8 +101,8 @@ export function classifyRegime(features: FeatureSet): RegimeOutput {
     trending_up: ["DIGITOVER", "DIGITUNDER"],
     trending_down: ["DIGITOVER", "DIGITUNDER"],
     mean_reverting: [],
-    choppy: ["RISE", "FALL", "CALL", "PUT"],
-    volatile: ["RISE", "FALL", "CALL", "PUT"],
+    choppy: ["CALL", "PUT"],
+    volatile: ["CALL", "PUT"],
     quiet: [],
   };
 

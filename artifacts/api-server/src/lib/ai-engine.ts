@@ -219,7 +219,7 @@ export function analyzeMarket(
 
   // === 8. Self-Learning (persisted DB win rates) ===
   const persistedWinRate = getWinRate(symbol);
-  const persistedCount = getWinRateCount(symbol, "RISE") + getWinRateCount(symbol, "DIGITOVER");
+  const persistedCount = getWinRateCount(symbol, "CALL") + getWinRateCount(symbol, "DIGITOVER");
   const selfScore = Math.min(Math.round(persistedWinRate * 90 + (persistedCount > 10 ? 9 : persistedCount)), 95);
   const selfLearning: AgentScore = {
     score: selfScore,
@@ -287,8 +287,8 @@ export function analyzeMarket(
   const contractOptions: ContractTypeOption[] = [];
 
   contractOptions.push({
-    contractType: direction === "up" ? "RISE" : "FALL",
-    label: direction === "up" ? "RISE" : "FALL",
+    contractType: direction === "up" ? "CALL" : "PUT",
+    label: direction === "up" ? "Rise" : "Fall",
     description: `ML ensemble: ${(mlDirection.probUp * 100).toFixed(0)}% up probability`,
     suitable: mlDirection.confidence >= 30,
     confidence: confidenceScore,
@@ -319,7 +319,7 @@ export function analyzeMarket(
     });
   }
 
-  const preferred = settings.preferredContractTypes ?? ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
+  const preferred = settings.preferredContractTypes ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
 
   // Contract-specific routing: prefer digit model for digit contracts, direction model for rise/fall
   const digitPreferred = preferred.some((p) => p.startsWith("DIGIT"));

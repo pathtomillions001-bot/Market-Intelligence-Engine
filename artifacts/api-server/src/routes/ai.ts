@@ -132,8 +132,9 @@ tickManager.on("tick", (tick) => {
   if (market) {
     const prices = tickManager.getTicks(tick.symbol, 100);
     const trendStats = analyzeTrend(prices);
-    const digits50 = market.digitEnabled ? tickManager.getDigits(tick.symbol, 50) : null;
-    const digitStats = digits50 ? analyzeDigits(digits50) : null;
+    // Get 100 digits for richer even/odd and digit analysis
+    const digits100 = market.digitEnabled ? tickManager.getDigits(tick.symbol, 100) : null;
+    const digitStats = (digits100 && digits100.length > 10) ? analyzeDigits(digits100) : null;
     broadcastSSE("market_analysis", {
       symbol: tick.symbol, trendStats, digitStats,
       lastDigit: tick.lastDigit,
@@ -157,14 +158,14 @@ setInterval(() => {
   if (now - lastTick < 3000) return;
   const prices = tickManager.getTicks(market.symbol, 100);
   const trendStats = analyzeTrend(prices);
-  const digits50 = market.digitEnabled ? tickManager.getDigits(market.symbol, 50) : null;
-  const digitStats = digits50 ? analyzeDigits(digits50) : null;
+  const digits100h = market.digitEnabled ? tickManager.getDigits(market.symbol, 100) : null;
+  const digitStats = (digits100h && digits100h.length > 10) ? analyzeDigits(digits100h) : null;
   const latestPrice = tickManager.getLatestPrice(market.symbol) ?? prices[prices.length - 1] ?? 0;
   broadcastSSE("market_analysis", {
     symbol: market.symbol,
     trendStats,
     digitStats,
-    lastDigit: digits50 ? digits50[digits50.length - 1] ?? null : null,
+    lastDigit: digits100h ? digits100h[digits100h.length - 1] ?? null : null,
     price: latestPrice,
     epoch: Math.floor(now / 1000),
   });
@@ -206,8 +207,9 @@ async function runAutonomousLoop() {
     const { balance, settings, account } = await getAccountAndSettings();
     const token = getCachedToken() ?? account?.token ?? null;
 
-    const rawPreferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
-    const preferredContractTypes = rawPreferred.map(t => t === "CALL" ? "RISE" : t === "PUT" ? "FALL" : t).filter((v, i, a) => a.indexOf(v) === i);
+    const rawPreferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
+    // Normalize: accept both CALL/PUT and RISE/FALL, unify to CALL/PUT
+    const preferredContractTypes = rawPreferred.map(t => t === "RISE" ? "CALL" : t === "FALL" ? "PUT" : t).filter((v, i, a) => a.indexOf(v) === i);
     const tradingSettings = buildTradingSettings(settings, preferredContractTypes);
     const marketRotationAfter = settings?.marketRotationAfter ?? 5;
     const paperTradeMode = tradingSettings.paperTradeMode;
@@ -566,7 +568,7 @@ async function getComputedAgentScores(): Promise<Record<string, number>> {
       prices: tickManager.getTicks(mInfo.symbol, 100),
       digits: mInfo.digitEnabled ? tickManager.getDigits(mInfo.symbol, 100) : [],
       balance: 10000,
-      settings: buildTradingSettings(null, ["RISE", "FALL", "DIGITOVER", "DIGITUNDER"]),
+      settings: buildTradingSettings(null, ["CALL", "PUT", "DIGITOVER", "DIGITUNDER"]),
       daily: { tradesCount: 0, wins: 0, losses: 0, profit: 0, consecutiveLosses: 0, consecutiveWins: 0 },
       token: null,
       currency: "USD",
@@ -600,8 +602,8 @@ router.get("/events", (req, res) => {
 router.get("/recommendation", async (_req, res): Promise<void> => {
   const { balance, settings, account } = await getAccountAndSettings();
   const token = getCachedToken() ?? account?.token ?? null;
-  const rawPreferred2 = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
-  const preferredContractTypes = rawPreferred2.map((t: string) => t === "CALL" ? "RISE" : t === "PUT" ? "FALL" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
+  const rawPreferred2 = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
+  const preferredContractTypes = rawPreferred2.map((t: string) => t === "RISE" ? "CALL" : t === "FALL" ? "PUT" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
 
   const allowedSymbols = (settings as any)?.allowedMarkets
     ? ((settings as any).allowedMarkets as string).split(",").filter(Boolean)
@@ -628,8 +630,8 @@ router.get("/recommendation/:symbol", async (req, res): Promise<void> => {
 
   const { balance, settings, account } = await getAccountAndSettings();
   const token = getCachedToken() ?? account?.token ?? null;
-  const rawPreferred3 = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
-  const preferredContractTypes = rawPreferred3.map((t: string) => t === "CALL" ? "RISE" : t === "PUT" ? "FALL" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
+  const rawPreferred3 = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
+  const preferredContractTypes = rawPreferred3.map((t: string) => t === "RISE" ? "CALL" : t === "FALL" ? "PUT" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
 
   const payload = await buildRecommendationPayload(symbol, market, balance, settings, preferredContractTypes, token, account?.currency ?? "USD");
   if (!payload) { res.status(500).json({ error: "Analysis failed" }); return; }
@@ -675,7 +677,7 @@ router.get("/insights", async (_req, res): Promise<void> => {
 
   const digitTrades = trades.filter((t) => t.contractType.includes("DIGIT"));
   const digitWinRate = digitTrades.length > 0 ? digitTrades.filter((t) => t.status === "won").length / digitTrades.length : 0;
-  const riseFallTrades = trades.filter((t) => t.contractType === "RISE" || t.contractType === "FALL");
+  const riseFallTrades = trades.filter((t) => ["RISE", "FALL", "CALL", "PUT"].includes(t.contractType));
   const riseFallWinRate = riseFallTrades.length > 0 ? riseFallTrades.filter((t) => t.status === "won").length / riseFallTrades.length : 0;
 
   const liveStatus = `Deriv WS ${tickManager.getConnectionStatus() ? "connected" : "disconnected"} — ${tickManager.getLiveTickCount()} ticks buffered`;
@@ -687,8 +689,8 @@ router.get("/insights", async (_req, res): Promise<void> => {
     insights.push({ id: 1, type: "pattern", title: `${(winRate * 100).toFixed(1)}% win rate — ${trades.length} total trades`, description: `Won: ${won.length}, Lost: ${lost.length}. Avg P&L: ${avgProfit >= 0 ? "+" : ""}$${avgProfit.toFixed(2)}. ${winRate > 0.55 ? "You have a profitable edge." : winRate > 0.45 ? "Near break-even — review confidence threshold." : "Below break-even — review settings."}`, priority: winRate > 0.55 ? "low" : "high", actionable: winRate <= 0.55, relatedMarket: null });
 
     if (digitTrades.length > 5 && riseFallTrades.length > 5) {
-      const betterType = digitWinRate > riseFallWinRate ? "DIGIT OVER/UNDER" : "RISE/FALL";
-      insights.push({ id: 2, type: "pattern", title: `${betterType} contracts outperforming`, description: `DIGIT: ${(digitWinRate * 100).toFixed(1)}% WR. RISE/FALL: ${(riseFallWinRate * 100).toFixed(1)}%. Adjust preferred contract types in Settings.`, priority: Math.abs(digitWinRate - riseFallWinRate) > 0.1 ? "high" : "medium", actionable: true, relatedMarket: null });
+      const betterType = digitWinRate > riseFallWinRate ? "DIGIT OVER/UNDER" : "Rise/Fall";
+      insights.push({ id: 2, type: "pattern", title: `${betterType} contracts outperforming`, description: `DIGIT: ${(digitWinRate * 100).toFixed(1)}% WR. Rise/Fall: ${(riseFallWinRate * 100).toFixed(1)}%. Adjust preferred contract types in Settings.`, priority: Math.abs(digitWinRate - riseFallWinRate) > 0.1 ? "high" : "medium", actionable: true, relatedMarket: null });
     }
 
     if (bestMarket) {

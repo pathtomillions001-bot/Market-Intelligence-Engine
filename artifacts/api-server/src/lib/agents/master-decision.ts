@@ -91,7 +91,7 @@ function computeWeightedScore(agents: Record<string, AgentOutput>): number {
 
 // ── Direction product detection ────────────────────────────────────────────────
 function isDirectionProduct(product: ProductType | string | undefined): boolean {
-  return ["RISE", "FALL"].includes(product ?? "");
+  return ["RISE", "FALL", "CALL", "PUT"].includes(product ?? "");
 }
 
 // ── Trend direction from probabilities ───────────────────────────────────────
@@ -203,7 +203,7 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     // Fallback when no EV found — use direction signal but mark as no-trade
     const dirAgent = agents["direction"];
     const probUpLocal = dirAgent?.data?.["probUp"] as number ?? 0.5;
-    const product: ProductType = probUpLocal >= 0.5 ? "RISE" : "FALL";
+    const product: ProductType = probUpLocal >= 0.5 ? "CALL" : "PUT";
     recommendation = {
       product,
       winProbability: Math.round(probUpLocal * 100),

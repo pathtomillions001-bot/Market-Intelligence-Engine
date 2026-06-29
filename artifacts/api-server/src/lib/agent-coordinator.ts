@@ -112,8 +112,8 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
 
   // Determine which contract types to consider based on preferences + regime
   const preferred = ctx.settings.preferredContractTypes;
-  const wantDirection = preferred.some((t) => t === "RISE" || t === "FALL");
-  const wantDigit = preferred.some((t) => t.startsWith("DIGIT"));
+  const wantDirection = preferred.some((t) => ["RISE", "FALL", "CALL", "PUT"].includes(t));
+  const wantDigit = preferred.some((t) => t.startsWith("DIGIT") && !["DIGITEVEN", "DIGITODD"].includes(t));
   const wantEvenOdd = preferred.some((t) => t === "DIGITEVEN" || t === "DIGITODD");
   const hasDigitEdge = digitResult?.hasEdge ?? false;
 
@@ -121,7 +121,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   // Select the optimal tick duration for the most likely contract type.
   const candidateProduct = wantDigit && hasDigitEdge
     ? (digitResult?.bestOption?.contractType ?? "DIGITOVER")
-    : (wantDirection ? (dirResult.direction === "up" ? "RISE" : "FALL") : "RISE");
+    : (wantDirection ? (dirResult.direction === "up" ? "CALL" : "PUT") : "CALL");
 
   const durationOpt = selectOptimalDuration(ctx, features, regime, candidateProduct);
   const optimizedDuration = durationOpt.duration;
@@ -133,7 +133,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   // ── Stage 3: EV calculation (needs direction + digit + optimal duration) ──
   let livePayouts: Record<string, number> | null = null;
   const contractTypesToFetch = [
-    ...(wantDirection ? ["RISE", "FALL"] : []),
+    ...(wantDirection ? ["CALL", "PUT"] : []),
     ...(wantDigit && hasDigitEdge ? ["DIGITOVER", "DIGITUNDER"] : []),
     ...(wantEvenOdd ? ["DIGITEVEN", "DIGITODD"] : []),
   ];
@@ -170,7 +170,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   const bestEV = evAgent.bestEVResult;
 
   // Determine best contract type for timing + performance lookup
-  const effectiveContractType = bestEV?.product ?? (dirResult.direction === "up" ? "RISE" : "FALL");
+  const effectiveContractType = bestEV?.product ?? (dirResult.direction === "up" ? "CALL" : "PUT");
   const effectiveBarrier = bestEV?.barrier;
 
   // ── Stage 4: Risk + Timing + Performance (parallel) ──────────────────────

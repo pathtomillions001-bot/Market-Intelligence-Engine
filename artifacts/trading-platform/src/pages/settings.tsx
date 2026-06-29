@@ -44,8 +44,8 @@ const CONTRACT_GROUPS = [
     id: "riseFall",
     label: "Rise & Fall",
     icon: <TrendingUp className="w-4 h-4" />,
-    desc: "Tick-to-tick momentum. Price ends higher (Rise) or lower (Fall) than entry at contract expiry.",
-    types: ["RISE", "FALL"],
+    desc: "Tick-to-tick momentum. Price ends higher (Rise = CALL) or lower (Fall = PUT) than entry at contract expiry.",
+    types: ["CALL", "PUT"],
     color: "indigo",
   },
   {
@@ -89,7 +89,7 @@ export default function Settings() {
     scanAllMarkets: true,
     paperTradeMode: false,
     requirePositiveEv: true,
-    preferredContractTypes: ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"],
+    preferredContractTypes: ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"],
     preferredCategories: ["synthetic"],
     allowedMarkets: [] as string[],
   });
@@ -114,8 +114,8 @@ export default function Settings() {
         paperTradeMode: (settings as any).paperTradeMode ?? false,
         requirePositiveEv: (settings as any).requirePositiveEv ?? true,
         preferredContractTypes: settings.preferredContractTypes.length > 0
-          ? settings.preferredContractTypes.map((t: string) => t === "CALL" ? "RISE" : t === "PUT" ? "FALL" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i)
-          : ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"],
+          ? settings.preferredContractTypes.map((t: string) => t === "RISE" ? "CALL" : t === "FALL" ? "PUT" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i)
+          : ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"],
         preferredCategories: (settings as any).preferredCategories?.length > 0
           ? (settings as any).preferredCategories
           : ["synthetic"],

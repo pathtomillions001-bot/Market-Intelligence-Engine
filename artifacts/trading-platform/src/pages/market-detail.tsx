@@ -289,7 +289,7 @@ function AITradePanel({
   const recommendedDuration = durationOpt?.data?.duration ?? rec?.recommendedDuration ?? 5;
   const recommendedStake = recommendation?.stake ?? 1;
 
-  const bestProduct: string = rec?.recommendedContractType ?? recommendation?.contractType ?? "RISE";
+  const bestProduct: string = rec?.recommendedContractType ?? recommendation?.contractType ?? "CALL";
   const winProbability: number = rec?.winProbability ?? recommendation?.winProbability ?? 50;
   const expectedValue: number = rec?.expectedValue ?? 0;
   const payoutMultiplier: number = rec?.payoutMultiplier ?? 1.91;
@@ -317,22 +317,32 @@ function AITradePanel({
   // Helper: is this the AI-recommended direction?
   function isRecDir(ct: string) {
     if (isDigitBest) return false;
-    return rec?.recommendedContractType === ct || recommendation?.contractType === ct;
+    // Normalize: CALL↔RISE and PUT↔FALL are equivalent
+    const normalize = (c: string) => c === "RISE" ? "CALL" : c === "FALL" ? "PUT" : c;
+    const nCt = normalize(ct);
+    const nRec = normalize(rec?.recommendedContractType ?? "");
+    const nContract = normalize(recommendation?.contractType ?? "");
+    return nRec === nCt || nContract === nCt;
   }
 
   // EV formatting
   const evLabel = expectedValue > 0 ? `+$${expectedValue.toFixed(2)}` : expectedValue < 0 ? `-$${Math.abs(expectedValue).toFixed(2)}` : "$0.00";
   const evColor = expectedValue > 0 ? "text-green-400" : expectedValue < -0.01 ? "text-red-400" : "text-amber-400";
 
-  // Best trade label
+  // Best trade label — show user-friendly names
   function bestTradeLabel(): string {
     if (isDigitBest && bestBarrier !== undefined) {
       return `${bestProduct.replace("DIGIT", "")} ${bestBarrier}`;
     }
+    if (bestProduct === "CALL") return "Rise";
+    if (bestProduct === "PUT") return "Fall";
+    if (bestProduct === "RISE") return "Rise";
+    if (bestProduct === "FALL") return "Fall";
     return bestProduct;
   }
 
   const directionMap: Record<string, "up" | "down"> = {
+    CALL: "up", PUT: "down",
     RISE: "up", FALL: "down",
     DIGITOVER: "up", DIGITUNDER: "down", DIGITEVEN: "up", DIGITODD: "down",
   };
@@ -373,7 +383,7 @@ function AITradePanel({
             <div>
               <div className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">AI Best Trade</div>
               <div className={`text-2xl font-mono font-bold ${shouldTrade ? "text-foreground" : "text-muted-foreground"}`}>{bestTradeLabel()}</div>
-              <div className="text-[10px] text-muted-foreground mt-0.5">{bestProduct.includes("DIGIT") ? bestProduct.includes("EVEN") || bestProduct.includes("ODD") ? "Even & Odd" : "Digit Over/Under" : "Rise & Fall"}</div>
+              <div className="text-[10px] text-muted-foreground mt-0.5">{bestProduct.includes("DIGIT") ? bestProduct.includes("EVEN") || bestProduct.includes("ODD") ? "Even & Odd" : "Digit Over/Under" : "Rise & Fall (CALL/PUT)"}</div>
             </div>
             <div className="text-right">
               <div className="text-[10px] text-muted-foreground mb-0.5">Win Prob</div>
@@ -414,13 +424,13 @@ function AITradePanel({
           </button>
         </div>
 
-        {/* ── Rise / Fall ───────────────────────────────────────────────── */}
+        {/* ── Rise / Fall (CALL / PUT) ────────────────────────────────── */}
         <div>
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-2">Direction Contracts</div>
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-2">Direction Contracts (Rise/Fall)</div>
           <div className="grid grid-cols-2 gap-2">
             {([
-              { ct: "RISE", dir: "up" as const, label: "▲ RISE", prob: riseProb, color: "text-green-400", bg: "hover:border-green-500/30" },
-              { ct: "FALL", dir: "down" as const, label: "▼ FALL", prob: fallProb, color: "text-red-400", bg: "hover:border-red-500/30" },
+              { ct: "CALL", dir: "up" as const, label: "▲ Rise", prob: riseProb, color: "text-green-400", bg: "hover:border-green-500/30" },
+              { ct: "PUT",  dir: "down" as const, label: "▼ Fall", prob: fallProb, color: "text-red-400", bg: "hover:border-red-500/30" },
             ]).map(({ ct, dir, label, prob, color, bg }) => {
               const isRec = isRecDir(ct);
               const p = typeof prob === "number" ? Math.round(prob) : 50;
@@ -614,30 +624,30 @@ function RiseFallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (typ
       <CardHeader className="pb-2">
         <CardTitle className="text-sm flex items-center gap-2">
           <TrendingUp className="w-4 h-4 text-indigo-400" />
-          Rise & Fall Analysis
+          Rise &amp; Fall Analysis
           {samples > 0 && <span className="text-[10px] text-muted-foreground font-normal">({samples} ticks)</span>}
           <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        {/* Main direction indicators */}
+        {/* Main direction indicators — uses CALL/PUT internally, labelled Rise/Fall */}
         <div className="grid grid-cols-2 gap-2">
           <button
-            onClick={() => onTrade("RISE", "up")}
+            onClick={() => onTrade("CALL", "up")}
             className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${isRising && isStrong ? "border-green-500/60 bg-green-500/10" : "border-border bg-secondary/30 hover:border-green-500/30"}`}
           >
             <ArrowUp className={`w-6 h-6 mb-1.5 ${isRising && isStrong ? "text-green-400" : "text-muted-foreground"}`} />
-            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">RISE</div>
+            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Rise</div>
             <div className={`text-2xl font-mono font-bold mt-1 ${isRising ? "text-green-400" : "text-foreground"}`}>{risingPct.toFixed(0)}%</div>
             <div className="text-[10px] text-muted-foreground mt-0.5">win probability</div>
             {isRising && isStrong && <Badge className="mt-2 text-[9px] bg-green-500/20 text-green-400 border-green-500/30">AI Favours</Badge>}
           </button>
           <button
-            onClick={() => onTrade("FALL", "down")}
+            onClick={() => onTrade("PUT", "down")}
             className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${!isRising && isStrong ? "border-red-500/60 bg-red-500/10" : "border-border bg-secondary/30 hover:border-red-500/30"}`}
           >
             <ArrowDown className={`w-6 h-6 mb-1.5 ${!isRising && isStrong ? "text-red-400" : "text-muted-foreground"}`} />
-            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">FALL</div>
+            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Fall</div>
             <div className={`text-2xl font-mono font-bold mt-1 ${!isRising ? "text-red-400" : "text-foreground"}`}>{fallingPct.toFixed(0)}%</div>
             <div className="text-[10px] text-muted-foreground mt-0.5">win probability</div>
             {!isRising && isStrong && <Badge className="mt-2 text-[9px] bg-red-500/20 text-red-400 border-red-500/30">AI Favours</Badge>}
@@ -663,8 +673,8 @@ function RiseFallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (typ
         <div className="p-2 rounded-lg bg-secondary/20 border border-border text-xs text-muted-foreground">
           <span className="text-foreground font-medium">Signal: </span>
           {isRising
-            ? `📈 Upward momentum detected (${strength.toFixed(0)}% strength) — RISE favoured`
-            : `📉 Downward momentum detected (${strength.toFixed(0)}% strength) — FALL favoured`}
+            ? `📈 Upward momentum detected (${strength.toFixed(0)}% strength) — Rise favoured`
+            : `📉 Downward momentum detected (${strength.toFixed(0)}% strength) — Fall favoured`}
           {streak >= 3 && <span className="ml-2 text-amber-400">· {streak}-tick {streakDir === "up" ? "↑" : "↓"} streak</span>}
         </div>
       </CardContent>
@@ -676,33 +686,42 @@ function RiseFallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (typ
 function EvenOddPanel({ digitStats, onTrade }: { digitStats: any; onTrade: (type: string, dir: "up" | "down") => void }) {
   if (!digitStats) return null;
 
-  // Support both legacy format (just distribution) and enhanced evenOddStats
   const eoStats = digitStats.evenOddStats;
-  const EVEN = [0, 2, 4, 6, 8];
+  const EVEN_DIGITS = [0, 2, 4, 6, 8];
   const dist: { digit: number; pct: number }[] = digitStats.distribution ?? [];
 
-  // Compute from distribution if no dedicated stats
-  const evenPct100 = eoStats?.evenPct ?? dist.filter((d) => EVEN.includes(d.digit)).reduce((s, d) => s + d.pct, 0);
+  // Frequency data — fixed window labels (always 20/50/100)
+  const evenPct100 = eoStats?.evenPct ?? dist.filter((d) => EVEN_DIGITS.includes(d.digit)).reduce((s: number, d: any) => s + d.pct, 0);
   const oddPct100  = eoStats?.oddPct  ?? (100 - evenPct100);
-  const evenPct20  = eoStats?.recentEvenPct ?? evenPct100;
-  const oddPct20   = eoStats?.recentOddPct  ?? oddPct100;
+  const evenPct20  = eoStats?.recentEvenPct   ?? evenPct100;
+  const oddPct20   = eoStats?.recentOddPct    ?? oddPct100;
   const evenPct50  = eoStats?.recent50EvenPct ?? evenPct100;
   const oddPct50   = eoStats?.recent50OddPct  ?? oddPct100;
 
-  const bias: "even" | "odd" | "neutral" = eoStats?.bias ?? (evenPct100 > 55 ? "even" : oddPct100 > 55 ? "odd" : "neutral");
-  const recommendEven = eoStats?.recommendEven ?? (bias === "even");
-  const recommendOdd  = eoStats?.recommendOdd  ?? (bias === "odd");
+  // Core signals
+  const bias: "even" | "odd" | "neutral" = eoStats?.bias ?? "neutral";
+  const recommendEven = eoStats?.recommendEven ?? false;
+  const recommendOdd  = eoStats?.recommendOdd  ?? false;
   const streak        = eoStats?.currentStreak ?? 0;
   const streakType    = eoStats?.currentStreakType ?? "even";
   const chiSig        = eoStats?.chiSquareSignificant ?? false;
   const chiPval       = eoStats?.chiSquarePvalue ?? 0.5;
-  const edge          = eoStats?.edge ?? Math.abs(evenPct100 - 50);
+  const edge          = eoStats?.edge ?? 0;
   const s100 = eoStats?.samples100 ?? digitStats.samples ?? 0;
-  const s50  = eoStats?.samples50  ?? Math.min(s100, 50);
-  const s20  = eoStats?.samples20  ?? Math.min(s100, 20);
 
-  const isEvenBiased = bias === "even";
-  const isOddBiased  = bias === "odd";
+  // Markov chain data
+  const markovEvenGivenEven  = eoStats?.markovEvenGivenEven ?? 0.5;
+  const markovEvenGivenOdd   = eoStats?.markovEvenGivenOdd  ?? 0.5;
+  const markovNextEvenProb   = eoStats?.markovNextEvenProb  ?? 0.5;
+  const markovSignal         = eoStats?.markovSignal ?? "neutral";
+  const streakReversalSignal = eoStats?.streakReversalSignal ?? "neutral";
+
+  const isEvenRecommended = recommendEven;
+  const isOddRecommended  = recommendOdd;
+
+  // Streak reversal label
+  const isStrongStreak = streak >= 4;
+  const reversalSide = streakType === "even" ? "ODD" : "EVEN";
 
   return (
     <Card className="bg-card">
@@ -726,55 +745,80 @@ function EvenOddPanel({ digitStats, onTrade }: { digitStats: any; onTrade: (type
           <button
             onClick={() => onTrade("DIGITEVEN", "up")}
             className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
-              isEvenBiased ? "border-cyan-500/60 bg-cyan-500/10" : "border-border bg-secondary/30 hover:border-cyan-500/30"
+              isEvenRecommended ? "border-cyan-500/60 bg-cyan-500/10" : "border-border bg-secondary/30 hover:border-cyan-500/30"
             }`}
           >
-            <span className={`text-xs font-mono font-bold tracking-widest mb-1 ${isEvenBiased ? "text-cyan-400" : "text-muted-foreground"}`}>0·2·4·6·8</span>
+            <span className={`text-xs font-mono font-bold tracking-widest mb-1 ${isEvenRecommended ? "text-cyan-400" : "text-muted-foreground"}`}>0·2·4·6·8</span>
             <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">EVEN</div>
-            <div className={`text-2xl font-mono font-bold mt-1 ${isEvenBiased ? "text-cyan-400" : evenPct20 < 45 ? "text-red-400" : "text-foreground"}`}>{evenPct20.toFixed(1)}%</div>
-            <div className="text-[9px] text-muted-foreground">last {s20} ticks</div>
-            {recommendEven && <Badge className="mt-1.5 text-[9px] bg-cyan-500/20 text-cyan-400 border-cyan-500/30">AI FAVOURS</Badge>}
+            <div className={`text-2xl font-mono font-bold mt-1 ${isEvenRecommended ? "text-cyan-400" : "text-foreground"}`}>{evenPct20.toFixed(1)}%</div>
+            <div className="text-[9px] text-muted-foreground">last 20 ticks</div>
+            {isEvenRecommended && <Badge className="mt-1.5 text-[9px] bg-cyan-500/20 text-cyan-400 border-cyan-500/30">AI FAVOURS</Badge>}
           </button>
           <button
             onClick={() => onTrade("DIGITODD", "down")}
             className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
-              isOddBiased ? "border-violet-500/60 bg-violet-500/10" : "border-border bg-secondary/30 hover:border-violet-500/30"
+              isOddRecommended ? "border-violet-500/60 bg-violet-500/10" : "border-border bg-secondary/30 hover:border-violet-500/30"
             }`}
           >
-            <span className={`text-xs font-mono font-bold tracking-widest mb-1 ${isOddBiased ? "text-violet-400" : "text-muted-foreground"}`}>1·3·5·7·9</span>
+            <span className={`text-xs font-mono font-bold tracking-widest mb-1 ${isOddRecommended ? "text-violet-400" : "text-muted-foreground"}`}>1·3·5·7·9</span>
             <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">ODD</div>
-            <div className={`text-2xl font-mono font-bold mt-1 ${isOddBiased ? "text-violet-400" : oddPct20 < 45 ? "text-red-400" : "text-foreground"}`}>{oddPct20.toFixed(1)}%</div>
-            <div className="text-[9px] text-muted-foreground">last {s20} ticks</div>
-            {recommendOdd && <Badge className="mt-1.5 text-[9px] bg-violet-500/20 text-violet-400 border-violet-500/30">AI FAVOURS</Badge>}
+            <div className={`text-2xl font-mono font-bold mt-1 ${isOddRecommended ? "text-violet-400" : "text-foreground"}`}>{oddPct20.toFixed(1)}%</div>
+            <div className="text-[9px] text-muted-foreground">last 20 ticks</div>
+            {isOddRecommended && <Badge className="mt-1.5 text-[9px] bg-violet-500/20 text-violet-400 border-violet-500/30">AI FAVOURS</Badge>}
           </button>
         </div>
 
-        {/* Multi-window frequency table */}
+        {/* Multi-window frequency table — fixed labels (always 20 / 50 / 100) */}
         <div className="grid grid-cols-3 gap-1.5 text-center">
           {[
-            { label: `Last ${s20}`, even: evenPct20, odd: oddPct20 },
-            { label: `Last ${s50}`, even: evenPct50, odd: oddPct50 },
-            { label: `Last ${s100}`, even: evenPct100, odd: oddPct100 },
+            { label: "Last 20",  even: evenPct20,  odd: oddPct20 },
+            { label: "Last 50",  even: evenPct50,  odd: oddPct50 },
+            { label: "Last 100", even: evenPct100, odd: oddPct100 },
           ].map(({ label, even, odd }) => {
             const dominantEven = even > 53;
-            const dominantOdd  = odd > 53;
+            const dominantOdd  = odd  > 53;
             return (
               <div key={label} className="p-2 rounded-lg bg-secondary/30 border border-border">
                 <div className="text-[9px] text-muted-foreground mb-1">{label}</div>
                 <div className={`text-xs font-mono font-bold ${dominantEven ? "text-cyan-400" : "text-muted-foreground"}`}>E {even.toFixed(1)}%</div>
-                <div className={`text-xs font-mono font-bold ${dominantOdd ? "text-violet-400" : "text-muted-foreground"}`}>O {odd.toFixed(1)}%</div>
+                <div className={`text-xs font-mono font-bold ${dominantOdd  ? "text-violet-400" : "text-muted-foreground"}`}>O {odd.toFixed(1)}%</div>
               </div>
             );
           })}
         </div>
 
+        {/* Markov Chain Analysis */}
+        <div className="grid grid-cols-2 gap-1.5">
+          <div className="p-2 rounded-lg border border-border bg-secondary/20">
+            <div className="text-[9px] text-muted-foreground mb-1">Markov P(even|prev=even)</div>
+            <div className={`text-sm font-mono font-bold ${markovEvenGivenEven > 0.55 ? "text-cyan-400" : markovEvenGivenEven < 0.45 ? "text-violet-400" : "text-muted-foreground"}`}>
+              {(markovEvenGivenEven * 100).toFixed(1)}%
+            </div>
+            <div className="text-[8px] text-muted-foreground mt-0.5">
+              {markovEvenGivenEven > 0.55 ? "momentum ↗" : markovEvenGivenEven < 0.45 ? "reversal ↩" : "neutral"}
+            </div>
+          </div>
+          <div className="p-2 rounded-lg border border-border bg-secondary/20">
+            <div className="text-[9px] text-muted-foreground mb-1">Markov P(even|prev=odd)</div>
+            <div className={`text-sm font-mono font-bold ${markovEvenGivenOdd > 0.55 ? "text-cyan-400" : markovEvenGivenOdd < 0.45 ? "text-violet-400" : "text-muted-foreground"}`}>
+              {(markovEvenGivenOdd * 100).toFixed(1)}%
+            </div>
+            <div className="text-[8px] text-muted-foreground mt-0.5">
+              {markovEvenGivenOdd > 0.55 ? "even likely ↗" : markovEvenGivenOdd < 0.45 ? "odd likely ↩" : "neutral"}
+            </div>
+          </div>
+        </div>
+
         {/* Streak + chi-square info */}
         <div className="grid grid-cols-2 gap-1.5">
-          <div className={`p-2 rounded-lg border text-center ${streak >= 4 ? "border-amber-500/30 bg-amber-500/5" : "border-border bg-secondary/20"}`}>
-            <div className="text-[9px] text-muted-foreground mb-0.5">Current Streak</div>
-            <div className={`text-sm font-mono font-bold ${streak >= 4 ? "text-amber-400" : "text-foreground"}`}>
+          <div className={`p-2 rounded-lg border text-center ${isStrongStreak ? "border-amber-500/30 bg-amber-500/5" : "border-border bg-secondary/20"}`}>
+            <div className="text-[9px] text-muted-foreground mb-0.5">Streak</div>
+            <div className={`text-sm font-mono font-bold ${isStrongStreak ? "text-amber-400" : "text-foreground"}`}>
               {streak > 0 ? `${streak}× ${streakType.toUpperCase()}` : "—"}
             </div>
+            {isStrongStreak && (
+              <div className="text-[8px] text-amber-400 mt-0.5">→ bet {reversalSide}</div>
+            )}
           </div>
           <div className={`p-2 rounded-lg border text-center ${chiSig ? "border-amber-500/30 bg-amber-500/5" : "border-border bg-secondary/20"}`}>
             <div className="text-[9px] text-muted-foreground mb-0.5">Chi-Square Test</div>
@@ -796,16 +840,24 @@ function EvenOddPanel({ digitStats, onTrade }: { digitStats: any; onTrade: (type
           </div>
         </div>
 
-        {/* Signal summary */}
+        {/* AI Signal summary — based on Markov + streak reversal logic */}
         <div className="p-2 rounded-lg bg-secondary/20 border border-border text-xs text-muted-foreground">
-          <span className="text-foreground font-medium">Signal: </span>
-          {recommendEven
-            ? `⚡ EVEN bias detected across ${s50}+ ticks (${evenPct50.toFixed(1)}%${chiSig ? ", χ² significant" : ""}) — EVEN favoured`
-            : recommendOdd
-            ? `⚡ ODD bias detected across ${s50}+ ticks (${oddPct50.toFixed(1)}%${chiSig ? ", χ² significant" : ""}) — ODD favoured`
-            : streak >= 5
-            ? `🔄 ${streakType.toUpperCase()} streak of ${streak} — watch for reversal`
-            : "⚖ Balanced — even and odd near 50%. No statistical edge."}
+          <span className="text-foreground font-medium">AI Signal: </span>
+          {isEvenRecommended
+            ? `🎯 EVEN recommended — ${
+                streakReversalSignal === "even" ? `reversal after ${streak}× ODD streak`
+                : markovSignal === "even" ? `Markov P(even|last)=${(markovNextEvenProb * 100).toFixed(0)}%`
+                : chiSig ? `χ² confirmed bias (${evenPct100.toFixed(1)}%)` : "multi-signal consensus"
+              }`
+            : isOddRecommended
+            ? `🎯 ODD recommended — ${
+                streakReversalSignal === "odd" ? `reversal after ${streak}× EVEN streak`
+                : markovSignal === "odd" ? `Markov P(odd|last)=${((1-markovNextEvenProb) * 100).toFixed(0)}%`
+                : chiSig ? `χ² confirmed bias (${oddPct100.toFixed(1)}%)` : "multi-signal consensus"
+              }`
+            : isStrongStreak
+            ? `⚠ ${streak}× ${streakType.toUpperCase()} streak — reversal to ${reversalSide} possible but not confirmed`
+            : "⚖ Balanced — no clear edge. Avoid trading Even/Odd until a signal forms."}
         </div>
       </CardContent>
     </Card>
@@ -1190,6 +1242,8 @@ export default function MarketDetail() {
               <span className="px-2 py-1 rounded-md bg-primary/10 border border-primary/30 font-mono font-bold text-primary">
                 {tradeContract.startsWith("DIGIT")
                   ? (tradeBarrier != null ? `${tradeContract.replace("DIGIT", "")} ${tradeBarrier}` : tradeContract.replace("DIGIT", ""))
+                  : tradeContract === "CALL" ? "Rise (CALL)"
+                  : tradeContract === "PUT" ? "Fall (PUT)"
                   : tradeContract}
               </span>
               {tradeBarrier != null && (

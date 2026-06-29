@@ -169,7 +169,13 @@ export interface EvenOddStats {
   samples100: number;
   samples50: number;
   samples20: number;
-  edge: number;              // edge % (abs diff from 50%)
+  edge: number;              // edge % (combination of Markov + streak)
+  // Markov chain fields
+  markovEvenGivenEven?: number;
+  markovEvenGivenOdd?: number;
+  markovNextEvenProb?: number;
+  markovSignal?: "even" | "odd" | "neutral";
+  streakReversalSignal?: "even" | "odd" | "neutral";
 }
 
 export function analyzeEvenOdd(digits: number[]): EvenOddStats {
@@ -196,16 +202,13 @@ export function analyzeEvenOdd(digits: number[]): EvenOddStats {
   const recentEvenPct  = (even20 / total20) * 100;
   const recentOddPct   = 100 - recentEvenPct;
 
-  // Chi-square test against expected 50/50
-  // χ² = (observed - expected)² / expected for both even/odd
+  // ── Chi-square test against expected 50/50 ────────────────────────────────
   const expected100 = total100 / 2;
   const chi2 = ((even100 - expected100) ** 2 / expected100) + (((total100 - even100) - expected100) ** 2 / expected100);
-  // Approximate p-value for chi2 df=1 using Wilson-Hilferty approximation
-  // For significance: chi2 > 3.841 → p < 0.05; chi2 > 6.635 → p < 0.01
   const chiSquarePvalue = chi2 > 6.635 ? 0.01 : chi2 > 3.841 ? 0.05 : chi2 > 2.706 ? 0.10 : 0.50;
   const chiSquareSignificant = chi2 > 3.841; // p < 0.05
 
-  // Current streak detection (walk backwards through all digits)
+  // ── Current streak detection ──────────────────────────────────────────────
   let currentStreak = 0;
   let currentStreakType: "even" | "odd" = EVEN.includes(digits[digits.length - 1] ?? 0) ? "even" : "odd";
   for (let i = digits.length - 1; i >= 0; i--) {
@@ -214,30 +217,81 @@ export function analyzeEvenOdd(digits: number[]): EvenOddStats {
     else break;
   }
 
-  // Bias: use the most data-rich window (100 ticks), but confirm with 50-tick window
+  // ── Markov Chain Analysis ─────────────────────────────────────────────────
+  // Compute transition probabilities: P(even|prev=even), P(even|prev=odd)
+  // For a truly 50/50 random process: both should be ~0.5
+  // Mean-reversion tendency: if P(even|prev=even) < 0.45 → streaks tend to reverse
+  let eeCount = 0, eoCount = 0, oeCount = 0, ooCount = 0;
+  for (let i = 1; i < window100.length; i++) {
+    const prevEven = EVEN.includes(window100[i - 1]);
+    const currEven = EVEN.includes(window100[i]);
+    if (prevEven && currEven)   eeCount++;
+    else if (prevEven)          eoCount++;
+    else if (currEven)          oeCount++;
+    else                        ooCount++;
+  }
+  const pEvenGivenEven = eeCount + eoCount > 0 ? eeCount / (eeCount + eoCount) : 0.5;
+  const pEvenGivenOdd  = oeCount + ooCount > 0 ? oeCount / (oeCount + ooCount) : 0.5;
+
+  // Determine last digit parity for Markov signal
+  const lastIsEven = EVEN.includes(digits[digits.length - 1] ?? 0);
+  // Markov probability of NEXT digit being even
+  const markovEvenProb = lastIsEven ? pEvenGivenEven : pEvenGivenOdd;
+  const markovSignal = markovEvenProb > 0.55 ? "even" : markovEvenProb < 0.45 ? "odd" : "neutral";
+
+  // ── Intelligent Recommendation Logic ─────────────────────────────────────
+  // Key insight: Deriv synthetics use pseudo-random digit generation.
+  // Consecutive same-parity streaks tend to REVERSE, not continue.
+  // We should recommend the OPPOSITE when we see a strong streak.
+  // We also use Markov chain to detect systematic biases.
   let bias: "even" | "odd" | "neutral" = "neutral";
   let recommendEven = false;
   let recommendOdd = false;
 
-  const dominantInRecent20 = recentEvenPct > 60 ? "even" : recentOddPct > 60 ? "odd" : "neutral";
-  const dominantIn50 = recent50EvenPct > 55 ? "even" : recent50OddPct > 55 ? "odd" : "neutral";
-  const dominantIn100 = evenPct > 55 ? "even" : oddPct > 55 ? "odd" : "neutral";
+  // Signal 1: Streak reversal — after 4+ consecutive same parity, bet opposite
+  const streakReversalSignal: "even" | "odd" | "neutral" =
+    currentStreak >= 5
+      ? (currentStreakType === "even" ? "odd" : "even")   // strong reversal
+      : currentStreak >= 4
+        ? (currentStreakType === "even" ? "odd" : "even") // moderate reversal
+        : "neutral";
 
-  // Require agreement in at least 2 windows for a confident bias
-  const signals = [dominantInRecent20, dominantIn50, dominantIn100];
-  const evenSignals = signals.filter((s) => s === "even").length;
-  const oddSignals  = signals.filter((s) => s === "odd").length;
+  // Signal 2: Markov transition bias (clear probability skew)
+  const markovBias: "even" | "odd" | "neutral" = markovSignal;
 
-  if (evenSignals >= 2) { bias = "even"; recommendEven = true; }
-  else if (oddSignals >= 2) { bias = "odd"; recommendOdd = true; }
+  // Signal 3: Chi-square confirmed long-run bias (100+ ticks)
+  const chiSignal: "even" | "odd" | "neutral" = chiSquareSignificant
+    ? (evenPct > 50 ? "even" : "odd")
+    : "neutral";
 
-  const edge = Math.abs(recentEvenPct - 50);
+  // Signal 4: Recent 20-tick pattern — avoid chasing frequent side
+  // If recent 20 ticks heavily favor one side, the other is likely due
+  const recentReversalSignal: "even" | "odd" | "neutral" =
+    recentEvenPct > 65 ? "odd" :    // even over-represented → bet odd
+    recentOddPct  > 65 ? "even" :   // odd over-represented → bet even
+    "neutral";
 
-  const streakInfo = currentStreak >= 3
-    ? `${currentStreakType.toUpperCase()} streak: ${currentStreak} consecutive`
+  // Aggregate: need at least 2 signals pointing the same way
+  const allSignals = [streakReversalSignal, markovBias, chiSignal, recentReversalSignal];
+  const evenVotes = allSignals.filter((s) => s === "even").length;
+  const oddVotes  = allSignals.filter((s) => s === "odd").length;
+
+  if (evenVotes >= 2 && evenVotes > oddVotes) {
+    bias = "even"; recommendEven = true;
+  } else if (oddVotes >= 2 && oddVotes > evenVotes) {
+    bias = "odd"; recommendOdd = true;
+  }
+
+  // Edge = how far the Markov probability deviates from 50% + streak strength
+  const markovEdge = Math.abs(markovEvenProb - 0.5) * 100;
+  const streakEdge = currentStreak >= 4 ? Math.min(20, currentStreak * 3) : 0;
+  const edge = Math.max(markovEdge, streakEdge, Math.abs(recentEvenPct - 50));
+
+  const streakInfo = currentStreak >= 4
+    ? `${currentStreak}× ${currentStreakType.toUpperCase()} streak → reversal likely`
     : currentStreak >= 2
-    ? `${currentStreakType.toUpperCase()} run: ${currentStreak} in a row`
-    : "No significant streak";
+    ? `${currentStreak}× ${currentStreakType.toUpperCase()} run`
+    : "No streak detected";
 
   return {
     evenPct, oddPct,
@@ -248,7 +302,13 @@ export function analyzeEvenOdd(digits: number[]): EvenOddStats {
     chiSquarePvalue, chiSquareSignificant,
     samples100: total100, samples50: total50, samples20: total20,
     edge,
-  };
+    // Extended Markov data (consumed by frontend)
+    markovEvenGivenEven: pEvenGivenEven,
+    markovEvenGivenOdd:  pEvenGivenOdd,
+    markovNextEvenProb:  markovEvenProb,
+    markovSignal,
+    streakReversalSignal,
+  } as EvenOddStats & Record<string, unknown>;
 }
 
 // ── Trend / Rise-Fall analysis (directional contracts) ───────────────────────

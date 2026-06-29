@@ -478,8 +478,9 @@ function computeJournalStats(trades: any[]) {
 }
 
 function normalizeDerivContractType(ct: string): string {
-  if (ct === "CALL") return "RISE";
-  if (ct === "PUT") return "FALL";
+  // Canonical: CALL (Rise) and PUT (Fall). Normalize legacy RISE/FALL → CALL/PUT.
+  if (ct === "RISE") return "CALL";
+  if (ct === "FALL") return "PUT";
   return ct;
 }
 

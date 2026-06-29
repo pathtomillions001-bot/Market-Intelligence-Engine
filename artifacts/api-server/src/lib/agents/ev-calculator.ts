@@ -26,11 +26,14 @@ import type { BarrierOption } from "./digit-agent";
 
 // ── Default payout table ──────────────────────────────────────────────────────
 // Updated to more realistic Deriv values for synthetic indices.
-// RISE/FALL on Volatility indices typically pay 1.88–1.95x.
+// CALL/PUT (Rise/Fall) on Volatility indices typically pay 1.88–1.95x.
 // DIGITEVEN/DIGITODD are 50/50 contracts that pay ~1.95x on Deriv.
+// NOTE: Deriv API uses CALL (price ends higher = Rise) and PUT (price ends lower = Fall).
 export const DEFAULT_PAYOUTS: Record<string, number> = {
-  RISE:        1.91,
-  FALL:        1.91,
+  CALL:        1.91,   // Rise — price ends higher than entry
+  PUT:         1.91,   // Fall — price ends lower than entry
+  RISE:        1.91,   // Alias for backward compatibility
+  FALL:        1.91,   // Alias for backward compatibility
   DIGITOVER:   1.96,   // barrier=5 (most common)
   DIGITUNDER:  1.96,
   DIGITEVEN:   1.95,   // 50/50 contract: even digit wins
@@ -111,9 +114,10 @@ function evForDirectionProducts(
   const probUp = dirResult.probUp;
   const probDown = dirResult.probDown;
 
-  if (preferredTypes.some((t) => ["RISE", "FALL"].includes(t))) {
-    results.push(buildEVResult("RISE", probUp, payouts.rise, stake));
-    results.push(buildEVResult("FALL", probDown, payouts.fall, stake));
+  // Accept both CALL/PUT (canonical) and RISE/FALL (legacy alias)
+  if (preferredTypes.some((t) => ["RISE", "FALL", "CALL", "PUT"].includes(t))) {
+    results.push(buildEVResult("CALL", probUp, payouts.rise, stake));
+    results.push(buildEVResult("PUT", probDown, payouts.fall, stake));
   }
 
   return results;
@@ -182,8 +186,8 @@ export function runEVCalculatorAgent(
 
   const payoutsSource = livePayouts ? "live" : "default";
   const payouts = {
-    rise:  livePayouts?.["RISE"]  ?? DEFAULT_PAYOUTS["RISE"],
-    fall:  livePayouts?.["FALL"]  ?? DEFAULT_PAYOUTS["FALL"],
+    rise:  livePayouts?.["CALL"]  ?? livePayouts?.["RISE"]  ?? DEFAULT_PAYOUTS["CALL"],
+    fall:  livePayouts?.["PUT"]   ?? livePayouts?.["FALL"]  ?? DEFAULT_PAYOUTS["PUT"],
   };
 
   const allEV: EVResult[] = [];
@@ -207,7 +211,7 @@ export function runEVCalculatorAgent(
   // Best result: prefer strictly positive EV; fall back to near-breakeven for direction
   const strictPositiveEV = allEV.filter((r) => r.isPositiveEV).sort((a, b) => b.dollarEV - a.dollarEV);
   const nearBreakevenDirection = allEV
-    .filter((r) => r.isNearBreakeven && ["RISE", "FALL"].includes(r.product))
+    .filter((r) => r.isNearBreakeven && ["CALL", "PUT", "RISE", "FALL"].includes(r.product))
     .sort((a, b) => b.dollarEV - a.dollarEV);
 
   const bestEVResult = strictPositiveEV[0] ?? nearBreakevenDirection[0] ?? null;

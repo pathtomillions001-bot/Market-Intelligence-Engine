@@ -1,4 +1,6 @@
 - [NeuroTrade Architecture](neurotrade-arch.md) — pnpm monorepo: trading-platform (Vite/React, port 21210) + api-server (Express, port 8080). DB push via `pnpm --filter db push`.
+- [CALL/PUT canonical types](callput-canonical.md) — CALL=Rise, PUT=Fall are the canonical internal types; RISE/FALL are legacy aliases normalized on ingestion; Deriv API accepts both.
+- [EvenOdd Markov analysis](evenodd-markov.md) — analyzeEvenOdd uses Markov chain + streak reversal + chi-square; needs ≥2 signals to fire; returns markovEvenGivenEven/Odd, markovNextEvenProb, streakReversalSignal.
 - [Generated client source files](generated-client-sources.md) — api-client-react and api-zod need real .ts source files in src/generated/; tsc --build composite requires them; dist/ .d.ts are compiled output used by project references.
 - [Live trade execution](live-trade-exec.md) — manual trades route now uses executeLiveTrade+waitForContractResult when token exists and not paperTradeMode; inserts as "open" then updates to won/lost.
 - [Settings Zod schema quirks](settings-zod.md) — UpdateSettingsBody must include maxDrawdown+autonomousEnabled; preferredContractTypes/preferredCategories/allowedMarkets accept union[string, string[]] and settings route joins arrays with commas.

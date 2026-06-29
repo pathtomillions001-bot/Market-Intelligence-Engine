@@ -51,7 +51,7 @@ export type MarketRegime =
 
 // ── Product-specific decision ─────────────────────────────────────────────────
 
-export type ProductType = "RISE" | "FALL" | "DIGITOVER" | "DIGITUNDER" | "DIGITEVEN" | "DIGITODD";
+export type ProductType = "CALL" | "PUT" | "RISE" | "FALL" | "DIGITOVER" | "DIGITUNDER" | "DIGITEVEN" | "DIGITODD";
 
 export interface ProductRecommendation {
   product: ProductType;

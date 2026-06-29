@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
 import {
   useGetDailySummary,
   useGetTopMarket,
@@ -15,7 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
 import { Link } from "wouter";
-import { TrendingUp, TrendingDown, Activity, Zap, Shield, AlertTriangle, Target, ChevronRight, Clock, RefreshCw } from "lucide-react";
+import { TrendingUp, Activity, Shield, AlertTriangle, Target, ChevronRight, Clock, RefreshCw, Calendar, BarChart2 } from "lucide-react";
 import { toast } from "sonner";
 import { MarketOpportunityFlashCard } from "@/components/flash-card-3d";
 
@@ -63,15 +62,23 @@ export default function Dashboard() {
     return () => clearInterval(iv);
   }, [engine?.isRunning, engine?.nextScanIn]);
 
+  // Today-only vs all-time filter
+  const [todayOnly, setTodayOnly] = useState(true);
+
   const targetPct = summary ? Math.max(0, Math.min(100, (summary.totalProfit / summary.dailyTarget) * 100)) : 0;
   const isProfit = (summary?.totalProfit ?? 0) >= 0;
+
+  // Compute today-only derived stats
+  const todayTrades = (summary?.wonCount ?? 0) + (summary?.lostCount ?? 0);
+  const todayWinRate = todayTrades > 0 ? ((summary?.wonCount ?? 0) / todayTrades) * 100 : 0;
+  const todayProfit = summary?.totalProfit ?? 0;
 
   const handleQuickTrade = () => {
     if (!topMarket) return;
     executeTrade.mutate({
       data: {
         symbol: topMarket.symbol,
-        contractType: topMarket.recommendation?.contractType ?? "RISE",
+        contractType: topMarket.recommendation?.contractType ?? "CALL",
         stake: topMarket.recommendation?.stake ?? 1,
         direction: topMarket.recommendation?.direction ?? "up",
       }
@@ -112,44 +119,75 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* Stat strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Card className="bg-card">
-          <CardContent className="p-4">
-            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Today P&L</div>
-            <div className={`text-2xl font-mono font-bold ${isProfit ? "text-green-500" : "text-red-500"}`}>
-              {isProfit ? "+" : ""}{summary?.totalProfit?.toFixed(2) ?? "0.00"}
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">{summary?.wonCount ?? 0}W / {summary?.lostCount ?? 0}L today</div>
-          </CardContent>
-        </Card>
-        <Card className="bg-card">
-          <CardContent className="p-4">
-            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Win Rate</div>
-            <div className="text-2xl font-mono font-bold">{stats?.winRate ? (stats.winRate * 100).toFixed(1) : "—"}%</div>
-            <div className="text-xs text-muted-foreground mt-1">{stats?.totalTrades ?? 0} total trades</div>
-          </CardContent>
-        </Card>
-        <Card className="bg-card">
-          <CardContent className="p-4">
-            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Streak</div>
-            <div className={`text-2xl font-mono font-bold ${(stats?.currentStreak ?? 0) >= 0 ? "text-green-500" : "text-red-500"}`}>
-              {(stats?.currentStreak ?? 0) > 0 ? "+" : ""}{stats?.currentStreak ?? 0}
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">
-              {(stats?.currentStreak ?? 0) >= 0 ? "winning" : "losing"} streak
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="bg-card">
-          <CardContent className="p-4">
-            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Total Profit</div>
-            <div className={`text-2xl font-mono font-bold ${(stats?.totalProfit ?? 0) >= 0 ? "text-green-500" : "text-red-500"}`}>
-              {(stats?.totalProfit ?? 0) >= 0 ? "+" : ""}{stats?.totalProfit?.toFixed(2) ?? "0.00"}
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">best: +{stats?.bestTrade?.toFixed(2) ?? "0.00"}</div>
-          </CardContent>
-        </Card>
+      {/* Stat strip with Today/All-time toggle */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
+            {todayOnly ? "Today's Stats" : "All-Time Stats"}
+          </span>
+          <button
+            onClick={() => setTodayOnly(!todayOnly)}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border transition-all ${
+              todayOnly
+                ? "bg-primary/10 border-primary/30 text-primary"
+                : "bg-secondary/40 border-border text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {todayOnly ? <Calendar className="w-3 h-3" /> : <BarChart2 className="w-3 h-3" />}
+            {todayOnly ? "Today Only" : "All Time"}
+          </button>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <Card className="bg-card">
+            <CardContent className="p-4">
+              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">{todayOnly ? "Today P&L" : "All-Time P&L"}</div>
+              <div className={`text-2xl font-mono font-bold ${(todayOnly ? todayProfit : (stats?.totalProfit ?? 0)) >= 0 ? "text-green-500" : "text-red-500"}`}>
+                {(todayOnly ? todayProfit : (stats?.totalProfit ?? 0)) >= 0 ? "+" : ""}
+                {todayOnly ? todayProfit.toFixed(2) : (stats?.totalProfit?.toFixed(2) ?? "0.00")}
+              </div>
+              <div className="text-xs text-muted-foreground mt-1">
+                {todayOnly
+                  ? `${summary?.wonCount ?? 0}W / ${summary?.lostCount ?? 0}L today`
+                  : `best: +${stats?.bestTrade?.toFixed(2) ?? "0.00"}`}
+              </div>
+            </CardContent>
+          </Card>
+          <Card className="bg-card">
+            <CardContent className="p-4">
+              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Win Rate</div>
+              <div className="text-2xl font-mono font-bold">
+                {todayOnly
+                  ? (todayTrades > 0 ? todayWinRate.toFixed(1) : "—")
+                  : (stats?.winRate ? (stats.winRate * 100).toFixed(1) : "—")}%
+              </div>
+              <div className="text-xs text-muted-foreground mt-1">
+                {todayOnly ? `${todayTrades} trades today` : `${stats?.totalTrades ?? 0} total trades`}
+              </div>
+            </CardContent>
+          </Card>
+          <Card className="bg-card">
+            <CardContent className="p-4">
+              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Streak</div>
+              <div className={`text-2xl font-mono font-bold ${(stats?.currentStreak ?? 0) >= 0 ? "text-green-500" : "text-red-500"}`}>
+                {(stats?.currentStreak ?? 0) > 0 ? "+" : ""}{stats?.currentStreak ?? 0}
+              </div>
+              <div className="text-xs text-muted-foreground mt-1">
+                {(stats?.currentStreak ?? 0) >= 0 ? "winning" : "losing"} streak
+              </div>
+            </CardContent>
+          </Card>
+          <Card className="bg-card">
+            <CardContent className="p-4">
+              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">{todayOnly ? "Today Trades" : "Total Trades"}</div>
+              <div className="text-2xl font-mono font-bold">
+                {todayOnly ? todayTrades : (stats?.totalTrades ?? 0)}
+              </div>
+              <div className="text-xs text-muted-foreground mt-1">
+                {todayOnly ? `${summary?.wonCount ?? 0}W ${summary?.lostCount ?? 0}L` : `${stats?.winRate ? (stats.winRate * 100).toFixed(1) : "—"}% win rate`}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       </div>
 
       {/* Daily target + Top opportunity */}

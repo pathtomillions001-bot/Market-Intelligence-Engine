@@ -52,15 +52,15 @@ function formatContractLabel(contractType: string, barrier: number | null): stri
   if (contractType === "DIGITUNDER") return "UNDER";
   if (contractType === "DIGITEVEN") return "EVEN";
   if (contractType === "DIGITODD") return "ODD";
-  if (contractType === "CALL") return "RISE";
-  if (contractType === "PUT") return "FALL";
+  if (contractType === "CALL" || contractType === "RISE") return "Rise";
+  if (contractType === "PUT"  || contractType === "FALL") return "Fall";
   return contractType;
 }
 
 function contractBadgeClass(contractType: string): string {
   if (contractType === "DIGITEVEN" || contractType === "DIGITODD") return "bg-cyan-500/10 text-cyan-400";
   if (contractType.startsWith("DIGIT")) return "bg-purple-500/10 text-purple-400";
-  if (contractType === "RISE" || contractType === "FALL") return "bg-blue-500/10 text-blue-400";
+  if (["RISE", "FALL", "CALL", "PUT"].includes(contractType)) return "bg-blue-500/10 text-blue-400";
   return "bg-zinc-500/10 text-zinc-400";
 }
 
