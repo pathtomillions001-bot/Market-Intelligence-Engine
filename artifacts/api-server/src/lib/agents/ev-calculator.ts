@@ -31,8 +31,6 @@ import type { BarrierOption } from "./digit-agent";
 export const DEFAULT_PAYOUTS: Record<string, number> = {
   RISE:        1.91,
   FALL:        1.91,
-  CALL:        1.87,   // legacy — kept for backward compat, prefer RISE/FALL
-  PUT:         1.87,   // legacy — kept for backward compat, prefer RISE/FALL
   DIGITOVER:   1.96,   // barrier=5 (most common)
   DIGITUNDER:  1.96,
   DIGITEVEN:   1.95,   // 50/50 contract: even digit wins
@@ -105,7 +103,7 @@ export function buildEVResult(
 
 function evForDirectionProducts(
   dirResult: DirectionResult,
-  payouts: { rise: number; fall: number; call: number; put: number },
+  payouts: { rise: number; fall: number },
   stake: number,
   preferredTypes: string[],
 ): EVResult[] {
@@ -113,15 +111,9 @@ function evForDirectionProducts(
   const probUp = dirResult.probUp;
   const probDown = dirResult.probDown;
 
-  if (preferredTypes.some((t) => ["RISE", "FALL", "CALL", "PUT"].includes(t))) {
-    if (preferredTypes.includes("RISE") || preferredTypes.includes("FALL")) {
-      results.push(buildEVResult("RISE", probUp, payouts.rise, stake));
-      results.push(buildEVResult("FALL", probDown, payouts.fall, stake));
-    }
-    if (preferredTypes.includes("CALL") || preferredTypes.includes("PUT")) {
-      results.push(buildEVResult("CALL", probUp, payouts.call, stake));
-      results.push(buildEVResult("PUT", probDown, payouts.put, stake));
-    }
+  if (preferredTypes.some((t) => ["RISE", "FALL"].includes(t))) {
+    results.push(buildEVResult("RISE", probUp, payouts.rise, stake));
+    results.push(buildEVResult("FALL", probDown, payouts.fall, stake));
   }
 
   return results;
