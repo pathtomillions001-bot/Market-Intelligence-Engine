@@ -121,8 +121,13 @@ function buildScanContext(
 }
 
 // ── Wire up TickManager → SSE for live prices + live analysis ─────────────────
+
+// Track the last time each market received a real Deriv tick
+const lastTickTime = new Map<string, number>();
+
 tickManager.on("tick", (tick) => {
   broadcastSSE("tick", tick);
+  lastTickTime.set(tick.symbol, Date.now());
   const market = getMarketInfo(tick.symbol);
   if (market) {
     const prices = tickManager.getTicks(tick.symbol, 100);
@@ -136,6 +141,34 @@ tickManager.on("tick", (tick) => {
     });
   }
 });
+
+// ── Heartbeat: broadcast market_analysis for markets that haven't received
+//    a real Deriv tick in the last 3s (e.g. 1HZ25V when Deriv throttles).
+//    Rotates through all markets, one per 200ms, full cycle every ~7s.
+let heartbeatIdx = 0;
+setInterval(() => {
+  const now = Date.now();
+  const markets = DERIV_MARKETS;
+  if (markets.length === 0) return;
+  heartbeatIdx = (heartbeatIdx + 1) % markets.length;
+  const market = markets[heartbeatIdx];
+  const lastTick = lastTickTime.get(market.symbol) ?? 0;
+  // Only broadcast if this market hasn't had a real tick in the last 3 seconds
+  if (now - lastTick < 3000) return;
+  const prices = tickManager.getTicks(market.symbol, 100);
+  const trendStats = analyzeTrend(prices);
+  const digits50 = market.digitEnabled ? tickManager.getDigits(market.symbol, 50) : null;
+  const digitStats = digits50 ? analyzeDigits(digits50) : null;
+  const latestPrice = tickManager.getLatestPrice(market.symbol) ?? prices[prices.length - 1] ?? 0;
+  broadcastSSE("market_analysis", {
+    symbol: market.symbol,
+    trendStats,
+    digitStats,
+    lastDigit: digits50 ? digits50[digits50.length - 1] ?? null : null,
+    price: latestPrice,
+    epoch: Math.floor(now / 1000),
+  });
+}, 200);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function stopEngine(reason: string) {

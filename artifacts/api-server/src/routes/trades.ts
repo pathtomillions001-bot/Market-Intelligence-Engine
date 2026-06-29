@@ -47,6 +47,40 @@ function buildDailyStatsForManual(closedToday: any[]): DailyStats {
 // ── Stats ──────────────────────────────────────────────────────────────────────
 
 router.get("/stats", async (_req, res): Promise<void> => {
+  const accounts = await db.select().from(accountsTable).limit(1);
+  const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
+
+  // When Deriv token exists use profit_table as source of truth — same as the journal
+  if (token) {
+    try {
+      const transactions = await fetchDerivProfitTable(token, 200);
+      if (transactions.length > 0) {
+        const mapped = transactions.map((t: any) => {
+          const buyPrice = Number(t.buy_price ?? 0);
+          const sellPrice = Number(t.sell_price ?? 0);
+          const profit = Math.round((sellPrice - buyPrice) * 100) / 100;
+          return { won: profit > 0, profit, createdAt: t.purchase_time ? new Date(t.purchase_time * 1000).toISOString() : new Date().toISOString() };
+        });
+        const stats = computeJournalStats(mapped);
+        res.json({
+          totalTrades: stats.totalTrades,
+          wonTrades: stats.wonTrades,
+          lostTrades: stats.lostTrades,
+          winRate: stats.winRate,
+          totalProfit: stats.totalProfit,
+          avgProfit: stats.avgProfit,
+          bestTrade: stats.bestTrade,
+          worstTrade: stats.worstTrade,
+          currentStreak: stats.currentStreak,
+          longestWinStreak: stats.longestWinStreak,
+          longestLoseStreak: stats.longestLoseStreak,
+        });
+        return;
+      }
+    } catch { /* fall through to local */ }
+  }
+
+  // Fallback: local DB
   const trades = await db.select().from(tradesTable).where(
     sql`${tradesTable.status} IN ('won', 'lost')`
   );
