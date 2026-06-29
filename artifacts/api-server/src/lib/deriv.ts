@@ -69,6 +69,8 @@ export interface DigitStats {
   hotDigits: number[];   // digits appearing more than expected (>12%)
   coldDigits: number[];  // digits appearing less than expected (<8%)
   bias: "over" | "under" | "neutral";
+  samples: number;
+  evenOddStats: EvenOddStats;
 }
 
 export function analyzeDigits(digits: number[]): DigitStats {
@@ -144,61 +146,109 @@ export function analyzeDigits(digits: number[]): DigitStats {
     ? `${streakType} streak: ${lastStreak.length} consecutive`
     : `No significant streak`;
 
-  return { distribution, overPct, underPct, fivePct, recommendOver, recommendUnder, streakInfo, hotDigits, coldDigits, bias };
+  const evenOddStats = analyzeEvenOdd(digits);
+  return { distribution, overPct, underPct, fivePct, recommendOver, recommendUnder, streakInfo, hotDigits, coldDigits, bias, evenOddStats, samples: total };
 }
 
 // ── Even/Odd digit distribution analysis ──────────────────────────────────────
 export interface EvenOddStats {
   evenPct: number;
   oddPct: number;
-  recentEvenPct: number;
+  recentEvenPct: number;     // last 20 ticks
   recentOddPct: number;
+  recent50EvenPct: number;   // last 50 ticks
+  recent50OddPct: number;
   bias: "even" | "odd" | "neutral";
   recommendEven: boolean;
   recommendOdd: boolean;
   streakInfo: string;
+  currentStreak: number;     // length of current run
+  currentStreakType: "even" | "odd";
+  chiSquarePvalue: number;   // p-value for deviation from 50%
+  chiSquareSignificant: boolean; // p < 0.05
+  samples100: number;
+  samples50: number;
+  samples20: number;
+  edge: number;              // edge % (abs diff from 50%)
 }
 
 export function analyzeEvenOdd(digits: number[]): EvenOddStats {
-  const window = digits.slice(-100);
-  const recent = digits.slice(-20);
-  const total = window.length || 1;
-  const recentTotal = recent.length || 1;
+  const window100 = digits.slice(-100);
+  const window50  = digits.slice(-50);
+  const window20  = digits.slice(-20);
 
   const EVEN = [0, 2, 4, 6, 8];
-  const evenCount = window.filter((d) => EVEN.includes(d)).length;
-  const oddCount = total - evenCount;
-  const recentEvenCount = recent.filter((d) => EVEN.includes(d)).length;
-  const recentOddCount = recentTotal - recentEvenCount;
 
-  const evenPct = Math.round((evenCount / total) * 100);
-  const oddPct = Math.round((oddCount / total) * 100);
-  const recentEvenPct = Math.round((recentEvenCount / recentTotal) * 100);
-  const recentOddPct = Math.round((recentOddCount / recentTotal) * 100);
+  function countEven(arr: number[]) { return arr.filter((d) => EVEN.includes(d)).length; }
 
+  const total100 = window100.length || 1;
+  const total50  = window50.length  || 1;
+  const total20  = window20.length  || 1;
+
+  const even100 = countEven(window100);
+  const even50  = countEven(window50);
+  const even20  = countEven(window20);
+
+  const evenPct        = (even100 / total100) * 100;
+  const oddPct         = 100 - evenPct;
+  const recent50EvenPct = (even50 / total50) * 100;
+  const recent50OddPct  = 100 - recent50EvenPct;
+  const recentEvenPct  = (even20 / total20) * 100;
+  const recentOddPct   = 100 - recentEvenPct;
+
+  // Chi-square test against expected 50/50
+  // χ² = (observed - expected)² / expected for both even/odd
+  const expected100 = total100 / 2;
+  const chi2 = ((even100 - expected100) ** 2 / expected100) + (((total100 - even100) - expected100) ** 2 / expected100);
+  // Approximate p-value for chi2 df=1 using Wilson-Hilferty approximation
+  // For significance: chi2 > 3.841 → p < 0.05; chi2 > 6.635 → p < 0.01
+  const chiSquarePvalue = chi2 > 6.635 ? 0.01 : chi2 > 3.841 ? 0.05 : chi2 > 2.706 ? 0.10 : 0.50;
+  const chiSquareSignificant = chi2 > 3.841; // p < 0.05
+
+  // Current streak detection (walk backwards through all digits)
+  let currentStreak = 0;
+  let currentStreakType: "even" | "odd" = EVEN.includes(digits[digits.length - 1] ?? 0) ? "even" : "odd";
+  for (let i = digits.length - 1; i >= 0; i--) {
+    const isEven = EVEN.includes(digits[i]);
+    if ((currentStreakType === "even") === isEven) currentStreak++;
+    else break;
+  }
+
+  // Bias: use the most data-rich window (100 ticks), but confirm with 50-tick window
   let bias: "even" | "odd" | "neutral" = "neutral";
   let recommendEven = false;
   let recommendOdd = false;
 
-  if (recentEvenPct > 65) { bias = "even"; recommendEven = true; }
-  else if (recentOddPct > 65) { bias = "odd"; recommendOdd = true; }
-  else if (evenPct > 55) { bias = "even"; recommendEven = true; }
-  else if (oddPct > 55) { bias = "odd"; recommendOdd = true; }
+  const dominantInRecent20 = recentEvenPct > 60 ? "even" : recentOddPct > 60 ? "odd" : "neutral";
+  const dominantIn50 = recent50EvenPct > 55 ? "even" : recent50OddPct > 55 ? "odd" : "neutral";
+  const dominantIn100 = evenPct > 55 ? "even" : oddPct > 55 ? "odd" : "neutral";
 
-  // Streak detection
-  const lastStreak: number[] = [];
-  for (let i = recent.length - 1; i >= 0; i--) {
-    const isEven = EVEN.includes(recent[i]);
-    if (lastStreak.length === 0) { lastStreak.push(recent[i]); continue; }
-    if (EVEN.includes(lastStreak[0]) === isEven) lastStreak.push(recent[i]);
-    else break;
-  }
-  const streakType = EVEN.includes(lastStreak[0]) ? "EVEN" : "ODD";
-  const streakInfo = lastStreak.length >= 3
-    ? `${streakType} streak: ${lastStreak.length} consecutive`
+  // Require agreement in at least 2 windows for a confident bias
+  const signals = [dominantInRecent20, dominantIn50, dominantIn100];
+  const evenSignals = signals.filter((s) => s === "even").length;
+  const oddSignals  = signals.filter((s) => s === "odd").length;
+
+  if (evenSignals >= 2) { bias = "even"; recommendEven = true; }
+  else if (oddSignals >= 2) { bias = "odd"; recommendOdd = true; }
+
+  const edge = Math.abs(recentEvenPct - 50);
+
+  const streakInfo = currentStreak >= 3
+    ? `${currentStreakType.toUpperCase()} streak: ${currentStreak} consecutive`
+    : currentStreak >= 2
+    ? `${currentStreakType.toUpperCase()} run: ${currentStreak} in a row`
     : "No significant streak";
 
-  return { evenPct, oddPct, recentEvenPct, recentOddPct, bias, recommendEven, recommendOdd, streakInfo };
+  return {
+    evenPct, oddPct,
+    recentEvenPct, recentOddPct,
+    recent50EvenPct, recent50OddPct,
+    bias, recommendEven, recommendOdd,
+    streakInfo, currentStreak, currentStreakType,
+    chiSquarePvalue, chiSquareSignificant,
+    samples100: total100, samples50: total50, samples20: total20,
+    edge,
+  };
 }
 
 // ── Trend / Rise-Fall analysis (directional contracts) ───────────────────────

@@ -91,7 +91,7 @@ function computeWeightedScore(agents: Record<string, AgentOutput>): number {
 
 // ── Direction product detection ────────────────────────────────────────────────
 function isDirectionProduct(product: ProductType | string | undefined): boolean {
-  return ["RISE", "FALL", "CALL", "PUT"].includes(product ?? "");
+  return ["RISE", "FALL"].includes(product ?? "");
 }
 
 // ── Trend direction from probabilities ───────────────────────────────────────

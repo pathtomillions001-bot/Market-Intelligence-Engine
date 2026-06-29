@@ -44,17 +44,9 @@ const CONTRACT_GROUPS = [
     id: "riseFall",
     label: "Rise & Fall",
     icon: <TrendingUp className="w-4 h-4" />,
-    desc: "Tick-to-tick momentum. Price rises or falls from entry.",
+    desc: "Tick-to-tick momentum. Price ends higher (Rise) or lower (Fall) than entry at contract expiry.",
     types: ["RISE", "FALL"],
     color: "indigo",
-  },
-  {
-    id: "putCall",
-    label: "Put & Call",
-    icon: <TrendingDown className="w-4 h-4" />,
-    desc: "Direction at expiry. Higher or lower than entry at contract end.",
-    types: ["CALL", "PUT"],
-    color: "violet",
   },
   {
     id: "overUnder",
@@ -63,6 +55,14 @@ const CONTRACT_GROUPS = [
     desc: "Last digit of price. AI picks optimal barrier from live digit analysis.",
     types: ["DIGITOVER", "DIGITUNDER"],
     color: "emerald",
+  },
+  {
+    id: "evenOdd",
+    label: "Even & Odd (Digits)",
+    icon: <TrendingDown className="w-4 h-4" />,
+    desc: "Last digit parity. AI analyses digit frequency, chi-square bias and streak patterns to find edge.",
+    types: ["DIGITEVEN", "DIGITODD"],
+    color: "violet",
   },
 ];
 
@@ -89,7 +89,7 @@ export default function Settings() {
     scanAllMarkets: true,
     paperTradeMode: false,
     requirePositiveEv: true,
-    preferredContractTypes: ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"],
+    preferredContractTypes: ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"],
     preferredCategories: ["synthetic"],
     allowedMarkets: [] as string[],
   });
@@ -114,8 +114,8 @@ export default function Settings() {
         paperTradeMode: (settings as any).paperTradeMode ?? false,
         requirePositiveEv: (settings as any).requirePositiveEv ?? true,
         preferredContractTypes: settings.preferredContractTypes.length > 0
-          ? settings.preferredContractTypes
-          : ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"],
+          ? settings.preferredContractTypes.map((t: string) => t === "CALL" ? "RISE" : t === "PUT" ? "FALL" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i)
+          : ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"],
         preferredCategories: (settings as any).preferredCategories?.length > 0
           ? (settings as any).preferredCategories
           : ["synthetic"],

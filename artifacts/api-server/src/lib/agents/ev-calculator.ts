@@ -184,8 +184,6 @@ export function runEVCalculatorAgent(
   const payouts = {
     rise:  livePayouts?.["RISE"]  ?? DEFAULT_PAYOUTS["RISE"],
     fall:  livePayouts?.["FALL"]  ?? DEFAULT_PAYOUTS["FALL"],
-    call:  livePayouts?.["CALL"]  ?? DEFAULT_PAYOUTS["CALL"],
-    put:   livePayouts?.["PUT"]   ?? DEFAULT_PAYOUTS["PUT"],
   };
 
   const allEV: EVResult[] = [];

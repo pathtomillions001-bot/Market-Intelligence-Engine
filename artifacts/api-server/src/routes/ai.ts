@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@workspace/db";
 import { sql, desc, eq } from "drizzle-orm";
-import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo, analyzeDigits, analyzeTrend } from "../lib/deriv";
+import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd } from "../lib/deriv";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome, updateDigitRecovery } from "../lib/agent-coordinator";
@@ -173,7 +173,8 @@ async function runAutonomousLoop() {
     const { balance, settings, account } = await getAccountAndSettings();
     const token = getCachedToken() ?? account?.token ?? null;
 
-    const preferredContractTypes = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
+    const rawPreferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
+    const preferredContractTypes = rawPreferred.map(t => t === "CALL" ? "RISE" : t === "PUT" ? "FALL" : t).filter((v, i, a) => a.indexOf(v) === i);
     const tradingSettings = buildTradingSettings(settings, preferredContractTypes);
     const marketRotationAfter = settings?.marketRotationAfter ?? 5;
     const paperTradeMode = tradingSettings.paperTradeMode;
@@ -566,7 +567,8 @@ router.get("/events", (req, res) => {
 router.get("/recommendation", async (_req, res): Promise<void> => {
   const { balance, settings, account } = await getAccountAndSettings();
   const token = getCachedToken() ?? account?.token ?? null;
-  const preferredContractTypes = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
+  const rawPreferred2 = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
+  const preferredContractTypes = rawPreferred2.map((t: string) => t === "CALL" ? "RISE" : t === "PUT" ? "FALL" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
 
   const allowedSymbols = (settings as any)?.allowedMarkets
     ? ((settings as any).allowedMarkets as string).split(",").filter(Boolean)
@@ -593,7 +595,8 @@ router.get("/recommendation/:symbol", async (req, res): Promise<void> => {
 
   const { balance, settings, account } = await getAccountAndSettings();
   const token = getCachedToken() ?? account?.token ?? null;
-  const preferredContractTypes = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
+  const rawPreferred3 = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
+  const preferredContractTypes = rawPreferred3.map((t: string) => t === "CALL" ? "RISE" : t === "PUT" ? "FALL" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
 
   const payload = await buildRecommendationPayload(symbol, market, balance, settings, preferredContractTypes, token, account?.currency ?? "USD");
   if (!payload) { res.status(500).json({ error: "Analysis failed" }); return; }
