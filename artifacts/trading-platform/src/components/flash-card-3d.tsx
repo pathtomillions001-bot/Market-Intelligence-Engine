@@ -1,22 +1,22 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
+import { ChevronLeft, ChevronRight, RotateCcw } from "lucide-react";
 
 interface FlashCard3DProps {
   front: React.ReactNode;
   back: React.ReactNode;
+  flipped: boolean;
+  onFlip: () => void;
   className?: string;
   glowColor?: string;
 }
 
-export function FlashCard3D({ front, back, className = "", glowColor = "rgba(0,255,255,0.35)" }: FlashCard3DProps) {
-  const [flipped, setFlipped] = useState(false);
-
+export function FlashCard3D({ front, back, flipped, onFlip, className = "", glowColor = "rgba(0,255,255,0.35)" }: FlashCard3DProps) {
   return (
     <div
-      className={`relative cursor-pointer select-none ${className}`}
+      className={`relative select-none ${className}`}
       style={{ perspective: "1200px" }}
-      onClick={() => setFlipped((f) => !f)}
     >
       <motion.div
         animate={{ rotateY: flipped ? 180 : 0 }}
@@ -52,9 +52,15 @@ export function FlashCard3D({ front, back, className = "", glowColor = "rgba(0,2
               {front}
             </div>
 
-            <div className="absolute bottom-3 right-4 text-[10px] font-mono text-primary/40 tracking-widest uppercase">
-              tap to flip ↻
-            </div>
+            {/* Dedicated flip button — bottom right */}
+            <button
+              onClick={onFlip}
+              className="absolute bottom-2.5 right-3 flex items-center gap-1 text-[10px] font-mono text-primary/50 hover:text-primary transition-colors group"
+              title="Flip card"
+            >
+              <RotateCcw className="w-3 h-3 group-hover:rotate-180 transition-transform duration-300" />
+              <span className="tracking-widest uppercase">flip</span>
+            </button>
           </div>
         </div>
 
@@ -83,13 +89,19 @@ export function FlashCard3D({ front, back, className = "", glowColor = "rgba(0,2
               backgroundSize: "24px 24px"
             }} />
 
-            <div className="relative z-10 w-full h-full flex flex-col">
+            <div className="relative z-10 w-full h-full flex flex-col overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700 scrollbar-track-transparent">
               {back}
             </div>
 
-            <div className="absolute bottom-3 right-4 text-[10px] font-mono text-primary/40 tracking-widest uppercase">
-              tap to flip ↻
-            </div>
+            {/* Dedicated flip button — bottom right */}
+            <button
+              onClick={onFlip}
+              className="absolute bottom-2.5 right-3 flex items-center gap-1 text-[10px] font-mono text-primary/50 hover:text-primary transition-colors group z-20"
+              title="Flip card"
+            >
+              <RotateCcw className="w-3 h-3 group-hover:-rotate-180 transition-transform duration-300" />
+              <span className="tracking-widest uppercase">flip</span>
+            </button>
           </div>
         </div>
       </motion.div>
@@ -128,7 +140,7 @@ const FILTER_OPTIONS: { id: FilterType; label: string; contractTypes: string }[]
 
 function formatContractLabel(contractType?: string, digitBarrier?: number | null): string {
   if (!contractType) return "—";
-  if (contractType === "DIGITOVER") return digitBarrier != null ? `OVER ${digitBarrier}` : "OVER";
+  if (contractType === "DIGITOVER")  return digitBarrier != null ? `OVER ${digitBarrier}` : "OVER";
   if (contractType === "DIGITUNDER") return digitBarrier != null ? `UNDER ${digitBarrier}` : "UNDER";
   return contractType;
 }
@@ -152,53 +164,81 @@ function ConfidenceArc({ value }: { value: number }) {
 }
 
 export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending }: MarketOpportunityCardProps) {
+  const [flipped, setFlipped] = useState(false);
   const [filterType, setFilterType] = useState<FilterType>("auto");
+  const [marketIndex, setMarketIndex] = useState(0);
 
   const activeFilter = FILTER_OPTIONS.find(f => f.id === filterType)!;
 
-  const { data: filteredMarket } = useQuery<typeof topMarket>({
-    queryKey: ["markets", "top", filterType],
-    queryFn: () =>
-      fetch(`/api/markets/top?contractTypeFilter=${activeFilter.contractTypes}`)
-        .then(r => r.json()),
-    refetchInterval: 8000,
+  // Fetch ranked markets list when a filter is active (returns all, we pick the best matching)
+  const { data: allMarkets } = useQuery<any[]>({
+    queryKey: ["markets", "list", filterType],
+    queryFn: () => fetch("/api/markets?limit=50").then(r => r.json()),
+    refetchInterval: 10000,
     enabled: filterType !== "auto",
+    select: (data) => {
+      if (!activeFilter.contractTypes) return data;
+      const allowed = new Set(activeFilter.contractTypes.split(","));
+      return (data ?? []).filter((m: any) => m.recommendedContractType && allowed.has(m.recommendedContractType));
+    },
   });
 
-  const displayMarket = filterType === "auto" ? topMarket : filteredMarket;
+  // Fetch full recommendation for the selected filtered market
+  const filteredMarkets = filterType !== "auto" ? (allMarkets ?? []) : [];
+  const selectedFiltered = filteredMarkets[Math.min(marketIndex, Math.max(filteredMarkets.length - 1, 0))];
 
-  const conf = displayMarket?.recommendation?.confidence ?? 0;
+  const { data: filteredDetail } = useQuery<any>({
+    queryKey: ["markets", "detail", selectedFiltered?.symbol],
+    queryFn: () => fetch(`/api/markets/${selectedFiltered!.symbol}`).then(r => r.json()),
+    refetchInterval: 8000,
+    enabled: filterType !== "auto" && !!selectedFiltered?.symbol,
+  });
+
+  // Reset index when filter changes
+  const handleFilterChange = (f: FilterType) => {
+    setFilterType(f);
+    setMarketIndex(0);
+  };
+
+  // Determine what to display
+  const displayMarket = filterType === "auto" ? topMarket : (filteredDetail ?? selectedFiltered);
+  const displayRec = (displayMarket as any)?.recommendation ?? null;
+
+  const conf = displayRec?.confidence ?? 0;
   const confColor = conf >= 70 ? "#10b981" : conf >= 50 ? "#f59e0b" : "#ef4444";
   const glowColor = conf >= 70 ? "rgba(16,185,129,0.3)" : conf >= 50 ? "rgba(245,158,11,0.3)" : "rgba(0,255,255,0.3)";
+
+  const canPrev = filterType !== "auto" && marketIndex > 0;
+  const canNext = filterType !== "auto" && marketIndex < filteredMarkets.length - 1;
 
   const front = (
     <div className="flex flex-col h-full p-5 gap-3">
       <div className="flex items-center justify-between">
-        <div>
+        <div className="flex-1 min-w-0 pr-3">
           <div className="flex items-center gap-2 mb-1">
             <div className="text-[10px] font-mono uppercase tracking-widest text-primary/70">Best Opportunity</div>
             {filterType !== "auto" && (
-              <span className="px-1.5 py-0.5 rounded text-[9px] font-mono uppercase tracking-wide bg-primary/10 text-primary border border-primary/20">
+              <span className="px-1.5 py-0.5 rounded text-[9px] font-mono uppercase tracking-wide bg-primary/10 text-primary border border-primary/20 shrink-0">
                 {activeFilter.label}
               </span>
             )}
           </div>
-          <div className="text-lg font-bold leading-tight">{displayMarket?.displayName ?? "Scanning…"}</div>
+          <div className="text-lg font-bold leading-tight truncate">{displayMarket?.displayName ?? "Scanning…"}</div>
           <div className="text-xs font-mono text-muted-foreground">{displayMarket?.symbol ?? "—"}</div>
         </div>
-        <div className="flex flex-col items-center">
+        <div className="flex flex-col items-center shrink-0">
           <ConfidenceArc value={conf} />
           <div className="text-[9px] font-mono text-muted-foreground -mt-1">confidence</div>
         </div>
       </div>
 
       <div className="flex items-center gap-2 flex-wrap">
-        {displayMarket?.recommendation?.direction && (
+        {displayRec?.direction && (
           <span
             className="px-2.5 py-0.5 rounded-full text-[11px] font-bold font-mono border"
-            style={{ color: displayMarket.recommendation.direction === "up" ? "#10b981" : "#ef4444", borderColor: displayMarket.recommendation.direction === "up" ? "rgba(16,185,129,0.3)" : "rgba(239,68,68,0.3)" }}
+            style={{ color: displayRec.direction === "up" ? "#10b981" : "#ef4444", borderColor: displayRec.direction === "up" ? "rgba(16,185,129,0.3)" : "rgba(239,68,68,0.3)" }}
           >
-            {displayMarket.recommendation.direction.toUpperCase()} · {formatContractLabel(displayMarket.recommendation.contractType, displayMarket.recommendation.digitBarrier ?? displayMarket.recommendation.barrier)}
+            {displayRec.direction.toUpperCase()} · {formatContractLabel(displayRec.contractType, displayRec.digitBarrier ?? displayRec.barrier)}
           </span>
         )}
         {displayMarket?.category && (
@@ -208,31 +248,55 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
         )}
       </div>
 
-      <div className="mt-auto flex items-center justify-between">
+      {/* Market navigator (when filter is active) */}
+      {filterType !== "auto" && filteredMarkets.length > 1 && (
+        <div className="flex items-center gap-2 mt-auto">
+          <button
+            onClick={(e) => { e.stopPropagation(); setMarketIndex(i => Math.max(0, i - 1)); }}
+            disabled={!canPrev}
+            className="p-1 rounded-lg border border-white/10 disabled:opacity-30 hover:border-primary/40 hover:bg-primary/5 transition-all"
+          >
+            <ChevronLeft className="w-3.5 h-3.5" />
+          </button>
+          <span className="text-[10px] font-mono text-muted-foreground flex-1 text-center">
+            {marketIndex + 1} / {filteredMarkets.length} markets
+          </span>
+          <button
+            onClick={(e) => { e.stopPropagation(); setMarketIndex(i => Math.min(filteredMarkets.length - 1, i + 1)); }}
+            disabled={!canNext}
+            className="p-1 rounded-lg border border-white/10 disabled:opacity-30 hover:border-primary/40 hover:bg-primary/5 transition-all"
+          >
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      <div className={`flex items-center justify-between ${filterType === "auto" || filteredMarkets.length <= 1 ? "mt-auto" : ""}`}>
         <div>
           <div className="text-[10px] text-muted-foreground uppercase">Stake</div>
-          <div className="font-mono font-bold text-lg">${displayMarket?.recommendation?.stake?.toFixed(2) ?? "—"}</div>
+          <div className="font-mono font-bold text-lg">${displayRec?.stake?.toFixed(2) ?? "—"}</div>
         </div>
 
         <button
           onClick={(e) => { e.stopPropagation(); onTrade?.(); }}
-          disabled={isTradePending || !displayMarket?.recommendation?.shouldTrade}
+          disabled={isTradePending || !displayRec?.shouldTrade}
           className="px-4 py-2 rounded-xl text-xs font-bold font-mono border transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           style={{
-            background: displayMarket?.recommendation?.shouldTrade ? `${confColor}18` : "transparent",
-            borderColor: displayMarket?.recommendation?.shouldTrade ? `${confColor}60` : "rgba(255,255,255,0.1)",
-            color: displayMarket?.recommendation?.shouldTrade ? confColor : "rgba(255,255,255,0.3)",
-            boxShadow: displayMarket?.recommendation?.shouldTrade ? `0 0 12px ${confColor}30` : "none",
+            background: displayRec?.shouldTrade ? `${confColor}18` : "transparent",
+            borderColor: displayRec?.shouldTrade ? `${confColor}60` : "rgba(255,255,255,0.1)",
+            color: displayRec?.shouldTrade ? confColor : "rgba(255,255,255,0.3)",
+            boxShadow: displayRec?.shouldTrade ? `0 0 12px ${confColor}30` : "none",
           }}
         >
-          {isTradePending ? "EXECUTING…" : displayMarket?.recommendation?.shouldTrade ? "EXECUTE" : "LOW CONF"}
+          {isTradePending ? "EXECUTING…" : displayRec?.shouldTrade ? "EXECUTE" : "LOW CONF"}
         </button>
       </div>
     </div>
   );
 
   const back = (
-    <div className="flex flex-col h-full p-5 gap-3">
+    <div className="flex flex-col p-5 gap-3 pb-10">
+      {/* Market Type Filter */}
       <div className="text-[10px] font-mono uppercase tracking-widest text-primary/70">Market Type Filter</div>
 
       <div className="grid grid-cols-2 gap-2">
@@ -241,7 +305,7 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
           return (
             <button
               key={opt.id}
-              onClick={(e) => { e.stopPropagation(); setFilterType(opt.id); }}
+              onClick={() => handleFilterChange(opt.id)}
               className="relative py-2 px-3 rounded-xl text-xs font-bold font-mono border transition-all"
               style={{
                 background: isActive ? "rgba(0,255,255,0.08)" : "rgba(255,255,255,0.02)",
@@ -259,24 +323,26 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
         })}
       </div>
 
-      <div className="mt-1 space-y-2">
-        <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-wide">Signal Analysis</div>
-        <div className="grid grid-cols-2 gap-2">
-          {[
-            { label: "Signal", value: displayMarket?.recommendation?.direction?.toUpperCase() ?? "—" },
-            { label: "Type", value: formatContractLabel(displayMarket?.recommendation?.contractType, displayMarket?.recommendation?.digitBarrier) },
-            { label: "Confidence", value: `${conf.toFixed(1)}%` },
-            { label: "Stake", value: `$${displayMarket?.recommendation?.stake?.toFixed(2) ?? "0.00"}` },
-          ].map((item) => (
-            <div key={item.label} className="bg-white/[0.03] rounded-xl p-2.5 border border-white/[0.06]">
-              <div className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">{item.label}</div>
-              <div className="font-mono font-bold text-sm text-foreground">{item.value}</div>
-            </div>
-          ))}
-        </div>
+      {/* Signal Analysis */}
+      <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-wide mt-1">Signal Analysis</div>
+      <div className="grid grid-cols-2 gap-2">
+        {[
+          { label: "Market", value: displayMarket?.displayName ?? "—" },
+          { label: "Signal", value: displayRec?.direction?.toUpperCase() ?? "—" },
+          { label: "Type", value: formatContractLabel(displayRec?.contractType, displayRec?.digitBarrier) },
+          { label: "Confidence", value: `${conf.toFixed(1)}%` },
+          { label: "Stake", value: `$${displayRec?.stake?.toFixed(2) ?? "0.00"}` },
+          { label: "Category", value: displayMarket?.category ?? "—" },
+        ].map((item) => (
+          <div key={item.label} className="bg-white/[0.03] rounded-xl p-2.5 border border-white/[0.06]">
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">{item.label}</div>
+            <div className="font-mono font-bold text-xs text-foreground truncate">{item.value}</div>
+          </div>
+        ))}
       </div>
 
-      <div className="mt-auto space-y-1">
+      {/* Confidence bar */}
+      <div className="space-y-1">
         <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-wide">Confidence</div>
         <div className="h-2 w-full bg-zinc-800 rounded-full overflow-hidden">
           <motion.div
@@ -291,6 +357,29 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
           <span>0%</span><span>50%</span><span>100%</span>
         </div>
       </div>
+
+      {/* Market navigator on back */}
+      {filterType !== "auto" && filteredMarkets.length > 1 && (
+        <div className="flex items-center gap-2 mt-1">
+          <button
+            onClick={() => setMarketIndex(i => Math.max(0, i - 1))}
+            disabled={!canPrev}
+            className="p-1.5 rounded-lg border border-white/10 disabled:opacity-30 hover:border-primary/40 hover:bg-primary/5 transition-all"
+          >
+            <ChevronLeft className="w-3.5 h-3.5" />
+          </button>
+          <span className="text-[10px] font-mono text-muted-foreground flex-1 text-center">
+            market {marketIndex + 1} of {filteredMarkets.length}
+          </span>
+          <button
+            onClick={() => setMarketIndex(i => Math.min(filteredMarkets.length - 1, i + 1))}
+            disabled={!canNext}
+            className="p-1.5 rounded-lg border border-white/10 disabled:opacity-30 hover:border-primary/40 hover:bg-primary/5 transition-all"
+          >
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
     </div>
   );
 
@@ -298,6 +387,8 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
     <FlashCard3D
       front={front}
       back={back}
+      flipped={flipped}
+      onFlip={() => setFlipped(f => !f)}
       glowColor={glowColor}
       className="h-full min-h-[200px]"
     />

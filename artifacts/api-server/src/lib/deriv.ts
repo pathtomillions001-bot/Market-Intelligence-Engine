@@ -25,7 +25,8 @@ const DERIV_WS_URL = `wss://ws.binaryws.com/websockets/v3?app_id=${APP_ID}`;
 // ── Market definitions (synthetics only) ──────────────────────────────────────
 export const DERIV_MARKETS = [
   // Pip sizes verified from live Deriv prices:
-  // R_25/1HZ25V → pip=0.001 (3 d.p.) → pipSize=3   [confirmed: price like 2592.726]
+  // R_25 → pip=0.001 (3 d.p.) → pipSize=3   [confirmed: price like 2592.726]
+  // 1HZ25V → pip=0.01  (2 d.p.) → pipSize=2   [confirmed: price like 830197.73, NOT 830197.730]
   // R_50/R_75 → pip=0.0001 (4 d.p.) → pipSize=4
   // R_10/R_100/1HZ10V/1HZ50V/1HZ75V/1HZ100V → pip=0.01 (2 d.p.) → pipSize=2
   // ALL Jump indices → pip=0.01 (2 d.p.) → pipSize=2
@@ -35,7 +36,7 @@ export const DERIV_MARKETS = [
   { symbol: "R_75",    displayName: "Volatility 75 Index",       category: "synthetic", pipSize: 4, digitEnabled: true },
   { symbol: "R_100",   displayName: "Volatility 100 Index",      category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ10V",  displayName: "Volatility 10 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
-  { symbol: "1HZ25V",  displayName: "Volatility 25 (1s) Index",  category: "synthetic", pipSize: 3, digitEnabled: true },
+  { symbol: "1HZ25V",  displayName: "Volatility 25 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ50V",  displayName: "Volatility 50 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ75V",  displayName: "Volatility 75 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ100V", displayName: "Volatility 100 (1s) Index", category: "synthetic", pipSize: 2, digitEnabled: true },
