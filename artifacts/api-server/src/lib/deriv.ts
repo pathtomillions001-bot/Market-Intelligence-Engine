@@ -24,17 +24,18 @@ const DERIV_WS_URL = `wss://ws.binaryws.com/websockets/v3?app_id=${APP_ID}`;
 
 // ── Market definitions (synthetics only) ──────────────────────────────────────
 export const DERIV_MARKETS = [
-  // Pip sizes verified against Deriv active_symbols API (pip = smallest price increment):
-  // R_10/R_25/R_100/1HZ10V/1HZ25V/1HZ100V → pip=0.01 (2 d.p.) → pipSize=2
-  // R_50/R_75/1HZ50V/1HZ75V → pip=0.0001 (4 d.p.) → pipSize=4
+  // Pip sizes verified from live Deriv prices:
+  // R_25/1HZ25V → pip=0.001 (3 d.p.) → pipSize=3   [confirmed: price like 2592.726]
+  // R_50/R_75 → pip=0.0001 (4 d.p.) → pipSize=4
+  // R_10/R_100/1HZ10V/1HZ50V/1HZ75V/1HZ100V → pip=0.01 (2 d.p.) → pipSize=2
   // ALL Jump indices → pip=0.01 (2 d.p.) → pipSize=2
   { symbol: "R_10",    displayName: "Volatility 10 Index",       category: "synthetic", pipSize: 2, digitEnabled: true },
-  { symbol: "R_25",    displayName: "Volatility 25 Index",       category: "synthetic", pipSize: 2, digitEnabled: true },
+  { symbol: "R_25",    displayName: "Volatility 25 Index",       category: "synthetic", pipSize: 3, digitEnabled: true },
   { symbol: "R_50",    displayName: "Volatility 50 Index",       category: "synthetic", pipSize: 4, digitEnabled: true },
   { symbol: "R_75",    displayName: "Volatility 75 Index",       category: "synthetic", pipSize: 4, digitEnabled: true },
   { symbol: "R_100",   displayName: "Volatility 100 Index",      category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ10V",  displayName: "Volatility 10 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
-  { symbol: "1HZ25V",  displayName: "Volatility 25 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
+  { symbol: "1HZ25V",  displayName: "Volatility 25 (1s) Index",  category: "synthetic", pipSize: 3, digitEnabled: true },
   { symbol: "1HZ50V",  displayName: "Volatility 50 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ75V",  displayName: "Volatility 75 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ100V", displayName: "Volatility 100 (1s) Index", category: "synthetic", pipSize: 2, digitEnabled: true },
@@ -144,6 +145,60 @@ export function analyzeDigits(digits: number[]): DigitStats {
     : `No significant streak`;
 
   return { distribution, overPct, underPct, fivePct, recommendOver, recommendUnder, streakInfo, hotDigits, coldDigits, bias };
+}
+
+// ── Even/Odd digit distribution analysis ──────────────────────────────────────
+export interface EvenOddStats {
+  evenPct: number;
+  oddPct: number;
+  recentEvenPct: number;
+  recentOddPct: number;
+  bias: "even" | "odd" | "neutral";
+  recommendEven: boolean;
+  recommendOdd: boolean;
+  streakInfo: string;
+}
+
+export function analyzeEvenOdd(digits: number[]): EvenOddStats {
+  const window = digits.slice(-100);
+  const recent = digits.slice(-20);
+  const total = window.length || 1;
+  const recentTotal = recent.length || 1;
+
+  const EVEN = [0, 2, 4, 6, 8];
+  const evenCount = window.filter((d) => EVEN.includes(d)).length;
+  const oddCount = total - evenCount;
+  const recentEvenCount = recent.filter((d) => EVEN.includes(d)).length;
+  const recentOddCount = recentTotal - recentEvenCount;
+
+  const evenPct = Math.round((evenCount / total) * 100);
+  const oddPct = Math.round((oddCount / total) * 100);
+  const recentEvenPct = Math.round((recentEvenCount / recentTotal) * 100);
+  const recentOddPct = Math.round((recentOddCount / recentTotal) * 100);
+
+  let bias: "even" | "odd" | "neutral" = "neutral";
+  let recommendEven = false;
+  let recommendOdd = false;
+
+  if (recentEvenPct > 65) { bias = "even"; recommendEven = true; }
+  else if (recentOddPct > 65) { bias = "odd"; recommendOdd = true; }
+  else if (evenPct > 55) { bias = "even"; recommendEven = true; }
+  else if (oddPct > 55) { bias = "odd"; recommendOdd = true; }
+
+  // Streak detection
+  const lastStreak: number[] = [];
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const isEven = EVEN.includes(recent[i]);
+    if (lastStreak.length === 0) { lastStreak.push(recent[i]); continue; }
+    if (EVEN.includes(lastStreak[0]) === isEven) lastStreak.push(recent[i]);
+    else break;
+  }
+  const streakType = EVEN.includes(lastStreak[0]) ? "EVEN" : "ODD";
+  const streakInfo = lastStreak.length >= 3
+    ? `${streakType} streak: ${lastStreak.length} consecutive`
+    : "No significant streak";
+
+  return { evenPct, oddPct, recentEvenPct, recentOddPct, bias, recommendEven, recommendOdd, streakInfo };
 }
 
 // ── Trend / Rise-Fall analysis (directional contracts) ───────────────────────
@@ -768,6 +823,33 @@ export async function executeLiveTrade(token: string, params: {
       } catch (e) { logger.error({ e }, "Error parsing Deriv buy response"); }
     });
     ws.on("error", (err) => { clearTimeout(timeout); reject(err); });
+  });
+}
+
+export async function fetchDerivProfitTable(token: string, limit = 50): Promise<any[]> {
+  return new Promise((resolve) => {
+    try {
+      const ws = new WebSocket(DERIV_WS_URL);
+      const timeout = setTimeout(() => { ws.close(); resolve([]); }, 12000);
+      let authorized = false;
+      ws.on("open", () => { ws.send(JSON.stringify({ authorize: token })); });
+      ws.on("message", (data) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.error) { clearTimeout(timeout); ws.close(); resolve([]); return; }
+          if (msg.msg_type === "authorize" && !authorized) {
+            authorized = true;
+            ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit }));
+          }
+          if (msg.msg_type === "profit_table" && msg.profit_table) {
+            clearTimeout(timeout);
+            ws.close();
+            resolve(msg.profit_table.transactions ?? []);
+          }
+        } catch { /* ignore */ }
+      });
+      ws.on("error", () => { clearTimeout(timeout); ws.close(); resolve([]); });
+    } catch { resolve([]); }
   });
 }
 

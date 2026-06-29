@@ -112,8 +112,9 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
 
   // Determine which contract types to consider based on preferences + regime
   const preferred = ctx.settings.preferredContractTypes;
-  const wantDirection = preferred.some((t) => ["RISE", "FALL", "CALL", "PUT"].includes(t));
+  const wantDirection = preferred.some((t) => t === "RISE" || t === "FALL");
   const wantDigit = preferred.some((t) => t.startsWith("DIGIT"));
+  const wantEvenOdd = preferred.some((t) => t === "DIGITEVEN" || t === "DIGITODD");
   const hasDigitEdge = digitResult?.hasEdge ?? false;
 
   // ── Stage 2.5: Duration optimization ─────────────────────────────────────
@@ -134,6 +135,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   const contractTypesToFetch = [
     ...(wantDirection ? ["RISE", "FALL"] : []),
     ...(wantDigit && hasDigitEdge ? ["DIGITOVER", "DIGITUNDER"] : []),
+    ...(wantEvenOdd ? ["DIGITEVEN", "DIGITODD"] : []),
   ];
   if (contractTypesToFetch.length > 0 && ctx.token && !ctx.settings.paperTradeMode) {
     try {
@@ -151,11 +153,19 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
     }
   }
 
+  // Compute even/odd probability from recent digit history for EVEN/ODD EV
+  let evenProb: number | undefined;
+  if (wantEvenOdd && ctx.digits.length >= 20) {
+    const recentDigits = ctx.digits.slice(-100);
+    evenProb = recentDigits.filter((d) => d % 2 === 0).length / recentDigits.length;
+  }
+
   const evAgent = runEVCalculatorAgent(
     ctx,
     wantDirection ? dirResult : null,
     wantDigit && digitResult ? (digitResult.topOptions ?? []) : [],
     livePayouts && Object.keys(livePayouts).length > 0 ? livePayouts : null,
+    evenProb,
   );
   const bestEV = evAgent.bestEVResult;
 

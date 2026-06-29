@@ -676,20 +676,25 @@ function RiseFallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (typ
   );
 }
 
-// ── Put/Call analysis panel ───────────────────────────────────────────────────
-function PutCallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (type: string, dir: "up" | "down") => void }) {
-  if (!trendStats) return null;
-  const { direction, strength, winProb, sma, ema, rsi, samples } = trendStats;
-  const isCallFavoured = direction === "up";
-  const callPct = winProb?.call ?? (isCallFavoured ? winProb?.rise ?? 50 : 100 - (winProb?.rise ?? 50));
-  const putPct = 100 - callPct;
+// ── Even / Odd analysis panel ──────────────────────────────────────────────────
+function EvenOddPanel({ digitStats, onTrade }: { digitStats: any; onTrade: (type: string, dir: "up" | "down") => void }) {
+  if (!digitStats) return null;
+  const EVEN = [0, 2, 4, 6, 8];
+  const dist: { digit: number; pct: number }[] = digitStats.distribution ?? [];
+  const evenPct = dist.filter((d) => EVEN.includes(d.digit)).reduce((s, d) => s + d.pct, 0);
+  const oddPct = dist.filter((d) => !EVEN.includes(d.digit)).reduce((s, d) => s + d.pct, 0);
+  const isEvenHot = evenPct > 55;
+  const isOddHot = oddPct > 55;
+  const isEvenCold = evenPct < 45;
+  const isOddCold = oddPct < 45;
+  const samples = digitStats.samples ?? 0;
 
   return (
     <Card className="bg-card">
       <CardHeader className="pb-2">
         <CardTitle className="text-sm flex items-center gap-2">
-          <TrendingDown className="w-4 h-4 text-violet-400" />
-          Put & Call Analysis
+          <span className="text-base leading-none">⚡</span>
+          Even &amp; Odd Analysis
           {samples > 0 && <span className="text-[10px] text-muted-foreground font-normal">({samples} ticks)</span>}
           <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
         </CardTitle>
@@ -697,49 +702,47 @@ function PutCallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (type
       <CardContent className="space-y-3">
         <div className="grid grid-cols-2 gap-2">
           <button
-            onClick={() => onTrade("CALL", "up")}
-            className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${isCallFavoured && strength > 55 ? "border-violet-500/60 bg-violet-500/10" : "border-border bg-secondary/30 hover:border-violet-500/30"}`}
+            onClick={() => onTrade("DIGITEVEN", "up")}
+            className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${isEvenHot ? "border-cyan-500/60 bg-cyan-500/10" : "border-border bg-secondary/30 hover:border-cyan-500/30"}`}
           >
-            <ArrowUp className={`w-6 h-6 mb-1.5 ${isCallFavoured && strength > 55 ? "text-violet-400" : "text-muted-foreground"}`} />
-            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">CALL</div>
-            <div className={`text-2xl font-mono font-bold mt-1 ${isCallFavoured ? "text-violet-400" : "text-foreground"}`}>{callPct.toFixed(0)}%</div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">above entry</div>
-            {isCallFavoured && strength > 55 && <Badge className="mt-2 text-[9px] bg-violet-500/20 text-violet-400 border-violet-500/30">AI Favours</Badge>}
+            <span className={`text-2xl font-bold mb-1 ${isEvenHot ? "text-cyan-400" : "text-muted-foreground"}`}>2</span>
+            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">EVEN</div>
+            <div className={`text-2xl font-mono font-bold mt-1 ${isEvenHot ? "text-cyan-400" : isEvenCold ? "text-red-400" : "text-foreground"}`}>{evenPct.toFixed(1)}%</div>
+            <div className="text-[10px] text-muted-foreground mt-0.5">0, 2, 4, 6, 8</div>
+            {isEvenHot && <Badge className="mt-2 text-[9px] bg-cyan-500/20 text-cyan-400 border-cyan-500/30">HOT</Badge>}
           </button>
           <button
-            onClick={() => onTrade("PUT", "down")}
-            className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${!isCallFavoured && strength > 55 ? "border-rose-500/60 bg-rose-500/10" : "border-border bg-secondary/30 hover:border-rose-500/30"}`}
+            onClick={() => onTrade("DIGITODD", "up")}
+            className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${isOddHot ? "border-violet-500/60 bg-violet-500/10" : "border-border bg-secondary/30 hover:border-violet-500/30"}`}
           >
-            <ArrowDown className={`w-6 h-6 mb-1.5 ${!isCallFavoured && strength > 55 ? "text-rose-400" : "text-muted-foreground"}`} />
-            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">PUT</div>
-            <div className={`text-2xl font-mono font-bold mt-1 ${!isCallFavoured ? "text-rose-400" : "text-foreground"}`}>{putPct.toFixed(0)}%</div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">below entry</div>
-            {!isCallFavoured && strength > 55 && <Badge className="mt-2 text-[9px] bg-rose-500/20 text-rose-400 border-rose-500/30">AI Favours</Badge>}
+            <span className={`text-2xl font-bold mb-1 ${isOddHot ? "text-violet-400" : "text-muted-foreground"}`}>1</span>
+            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">ODD</div>
+            <div className={`text-2xl font-mono font-bold mt-1 ${isOddHot ? "text-violet-400" : isOddCold ? "text-red-400" : "text-foreground"}`}>{oddPct.toFixed(1)}%</div>
+            <div className="text-[10px] text-muted-foreground mt-0.5">1, 3, 5, 7, 9</div>
+            {isOddHot && <Badge className="mt-2 text-[9px] bg-violet-500/20 text-violet-400 border-violet-500/30">HOT</Badge>}
           </button>
         </div>
 
-        {/* Indicator row */}
-        <div className="grid grid-cols-3 gap-2">
-          <div className="text-center p-2 rounded-lg bg-secondary/30">
-            <div className="text-[10px] text-muted-foreground">RSI</div>
-            <div className={`text-base font-mono font-bold ${rsi > 70 ? "text-red-400" : rsi < 30 ? "text-green-400" : "text-foreground"}`}>{rsi?.toFixed(0) ?? "—"}</div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className={`text-center p-2 rounded-lg border ${isEvenHot ? "bg-cyan-500/10 border-cyan-500/30" : "bg-secondary/30 border-border"}`}>
+            <div className="text-[10px] text-muted-foreground">EVEN (last {samples} ticks)</div>
+            <div className="text-base font-mono font-bold">{evenPct.toFixed(1)}%</div>
+            <div className="text-[10px] text-muted-foreground">expected 50%</div>
           </div>
-          <div className="text-center p-2 rounded-lg bg-secondary/30">
-            <div className="text-[10px] text-muted-foreground">SMA vs EMA</div>
-            <div className={`text-base font-mono font-bold ${sma > ema ? "text-green-400" : "text-red-400"}`}>{sma > ema ? "Bull" : "Bear"}</div>
-          </div>
-          <div className="text-center p-2 rounded-lg bg-secondary/30">
-            <div className="text-[10px] text-muted-foreground">Trend</div>
-            <div className={`text-base font-mono font-bold ${isCallFavoured ? "text-violet-400" : "text-rose-400"}`}>{isCallFavoured ? "↑ CALL" : "↓ PUT"}</div>
+          <div className={`text-center p-2 rounded-lg border ${isOddHot ? "bg-violet-500/10 border-violet-500/30" : "bg-secondary/30 border-border"}`}>
+            <div className="text-[10px] text-muted-foreground">ODD (last {samples} ticks)</div>
+            <div className="text-base font-mono font-bold">{oddPct.toFixed(1)}%</div>
+            <div className="text-[10px] text-muted-foreground">expected 50%</div>
           </div>
         </div>
 
         <div className="p-2 rounded-lg bg-secondary/20 border border-border text-xs text-muted-foreground">
           <span className="text-foreground font-medium">Signal: </span>
-          {isCallFavoured
-            ? `📊 Bullish structure — price likely above entry at expiry (CALL favoured, ${strength.toFixed(0)}% strength)`
-            : `📊 Bearish structure — price likely below entry at expiry (PUT favoured, ${strength.toFixed(0)}% strength)`}
-          {rsi && (rsi > 70 || rsi < 30) && <span className="ml-2 text-amber-400">· RSI {rsi > 70 ? "overbought" : "oversold"}</span>}
+          {isEvenHot
+            ? `⚡ Even digits dominant (${evenPct.toFixed(1)}%) — EVEN trade favoured`
+            : isOddHot
+            ? `⚡ Odd digits dominant (${oddPct.toFixed(1)}%) — ODD trade favoured`
+            : "⚖ Balanced — even and odd near 50%"}
         </div>
       </CardContent>
     </Card>
@@ -875,7 +878,7 @@ export default function MarketDetail() {
   const pipSize = (
     symbol?.includes("R_50") || symbol?.includes("R_75") ||
     symbol === "RDBULL" || symbol === "RDBEAR"
-  ) ? 4 : 2;
+  ) ? 4 : (symbol === "R_25" || symbol === "1HZ25V") ? 3 : 2;
 
   function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number, duration?: number) {
     setTradeContract(contractType);
@@ -968,8 +971,8 @@ export default function MarketDetail() {
       {/* Rise & Fall Analysis — clickable trade buttons */}
       <RiseFallPanel trendStats={trendStats} onTrade={openTradeDialog} />
 
-      {/* Put & Call Analysis — clickable trade buttons */}
-      <PutCallPanel trendStats={trendStats} onTrade={openTradeDialog} />
+      {/* Even & Odd Analysis — only for digit markets */}
+      {isDigitMarket && <EvenOddPanel digitStats={digitStats} onTrade={openTradeDialog} />}
 
       {/* Digit Analysis (OVER/UNDER) — only for digit markets */}
       {isDigitMarket && digitStats && (
@@ -1119,19 +1122,33 @@ export default function MarketDetail() {
                 </div>
               )}
             </div>
-            {/* Contract type + duration info */}
-            <div className="flex items-center gap-2 text-xs">
+            {/* Contract type badge */}
+            <div className="flex items-center gap-2 text-xs flex-wrap">
               <span className="px-2 py-1 rounded-md bg-primary/10 border border-primary/30 font-mono font-bold text-primary">
-                {tradeContract.startsWith("DIGIT") ? `${tradeContract.replace("DIGIT", "")} ${tradeBarrier ?? ""}` : tradeContract}
+                {tradeContract.startsWith("DIGIT")
+                  ? (tradeBarrier != null ? `${tradeContract.replace("DIGIT", "")} ${tradeBarrier}` : tradeContract.replace("DIGIT", ""))
+                  : tradeContract}
               </span>
-              <span className="px-2 py-1 rounded-md bg-secondary/50 border border-border font-mono text-muted-foreground">{tradeDuration} ticks</span>
-              {tradeBarrier != null && !tradeContract.startsWith("DIGIT") === false && (
+              {tradeBarrier != null && (
                 <span className="px-2 py-1 rounded-md bg-violet-500/10 border border-violet-500/30 font-mono text-violet-400 text-[10px]">Barrier: {tradeBarrier}</span>
               )}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="stake">Stake (USD)</Label>
               <Input id="stake" type="number" value={stake} min="0.35" step="0.5" onChange={(e) => setStake(e.target.value)} className="font-mono bg-secondary/50" />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="ticks">Duration (ticks)</Label>
+              <Input
+                id="ticks"
+                type="number"
+                value={tradeDuration}
+                min="1"
+                max="15"
+                step="1"
+                onChange={(e) => setTradeDuration(Math.max(1, Math.min(15, Number(e.target.value))))}
+                className="font-mono bg-secondary/50"
+              />
             </div>
           </div>
           <DialogFooter>

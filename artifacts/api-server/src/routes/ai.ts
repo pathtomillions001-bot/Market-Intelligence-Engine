@@ -7,6 +7,7 @@ import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome, updateDigitRecovery } from "../lib/agent-coordinator";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
+import { broadcastSSE, addSSEClient, removeSSEClient } from "../lib/sse";
 
 const router = Router();
 
@@ -119,16 +120,6 @@ function buildScanContext(
   };
 }
 
-// ── SSE clients ───────────────────────────────────────────────────────────────
-const sseClients = new Set<any>();
-
-export function broadcastSSE(event: string, data: unknown) {
-  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const res of sseClients) {
-    try { res.write(payload); } catch { sseClients.delete(res); }
-  }
-}
-
 // ── Wire up TickManager → SSE for live prices + live analysis ─────────────────
 tickManager.on("tick", (tick) => {
   broadcastSSE("tick", tick);
@@ -182,7 +173,7 @@ async function runAutonomousLoop() {
     const { balance, settings, account } = await getAccountAndSettings();
     const token = getCachedToken() ?? account?.token ?? null;
 
-    const preferredContractTypes = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
+    const preferredContractTypes = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
     const tradingSettings = buildTradingSettings(settings, preferredContractTypes);
     const marketRotationAfter = settings?.marketRotationAfter ?? 5;
     const paperTradeMode = tradingSettings.paperTradeMode;
@@ -460,6 +451,8 @@ async function runAutonomousLoop() {
 
 function scheduleNext(tradeExecuted = false) {
   if (!engineRunning) return;
+  // Clear any pending timer before scheduling a new one (prevents double-fires)
+  if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
   // 5s after a trade (to let Deriv account settle), 3s otherwise
   const delayMs = tradeExecuted ? 5000 : 3000;
   nextScanIn = Math.ceil(delayMs / 1000);
@@ -560,20 +553,20 @@ router.get("/events", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.flushHeaders();
 
-  sseClients.add(res);
+  addSSEClient(res);
   res.write(`event: connected\ndata: ${JSON.stringify({ ok: true, liveTickCount: tickManager.getLiveTickCount(), connected: tickManager.getConnectionStatus() })}\n\n`);
 
   const heartbeat = setInterval(() => {
     try { res.write(": heartbeat\n\n"); } catch { clearInterval(heartbeat); }
   }, 25000);
 
-  req.on("close", () => { clearInterval(heartbeat); sseClients.delete(res); });
+  req.on("close", () => { clearInterval(heartbeat); removeSSEClient(res); });
 });
 
 router.get("/recommendation", async (_req, res): Promise<void> => {
   const { balance, settings, account } = await getAccountAndSettings();
   const token = getCachedToken() ?? account?.token ?? null;
-  const preferredContractTypes = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
+  const preferredContractTypes = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
 
   const allowedSymbols = (settings as any)?.allowedMarkets
     ? ((settings as any).allowedMarkets as string).split(",").filter(Boolean)
@@ -600,7 +593,7 @@ router.get("/recommendation/:symbol", async (req, res): Promise<void> => {
 
   const { balance, settings, account } = await getAccountAndSettings();
   const token = getCachedToken() ?? account?.token ?? null;
-  const preferredContractTypes = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
+  const preferredContractTypes = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
 
   const payload = await buildRecommendationPayload(symbol, market, balance, settings, preferredContractTypes, token, account?.currency ?? "USD");
   if (!payload) { res.status(500).json({ error: "Analysis failed" }); return; }

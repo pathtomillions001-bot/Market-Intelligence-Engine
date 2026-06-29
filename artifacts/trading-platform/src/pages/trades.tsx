@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useGetTrades, useGetTradeStats } from "@workspace/api-client-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { motion } from "framer-motion";
 import { format } from "date-fns";
-import { TrendingUp, TrendingDown, Activity } from "lucide-react";
+import { Activity } from "lucide-react";
 
 type StatusFilter = "all" | "won" | "lost" | "open";
 
@@ -20,19 +21,37 @@ function formatContractLabel(contractType: string, barrier: number | null): stri
   if (contractType === "DIGITUNDER" && barrier !== null) return `UNDER ${barrier}`;
   if (contractType === "DIGITOVER") return "OVER";
   if (contractType === "DIGITUNDER") return "UNDER";
+  if (contractType === "DIGITEVEN") return "EVEN";
+  if (contractType === "DIGITODD") return "ODD";
+  if (contractType === "CALL") return "RISE";
+  if (contractType === "PUT") return "FALL";
   return contractType;
 }
 
 export default function Trades() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const queryClient = useQueryClient();
+
   const { data: trades } = useGetTrades(
     { status: statusFilter },
     { query: { refetchInterval: statusFilter === "open" ? 3000 : 8000 } } as { query: any }
   );
   const { data: stats } = useGetTradeStats({ query: { refetchInterval: 10000 } } as { query: any });
 
+  useEffect(() => {
+    const es = new EventSource("/api/ai/events");
+    es.addEventListener("trade_completed", () => {
+      queryClient.invalidateQueries({ queryKey: ["getTrades"] });
+      queryClient.invalidateQueries({ queryKey: ["getTradeStats"] });
+    });
+    es.addEventListener("trade_started", () => {
+      queryClient.invalidateQueries({ queryKey: ["getTrades"] });
+    });
+    return () => es.close();
+  }, [queryClient]);
+
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-6 max-w-7xl mx-auto space-y-5">
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-6 max-w-7xl mx-auto space-y-5">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Trade Journal</h1>
         <p className="text-muted-foreground text-sm mt-0.5">Complete history of manual and autonomous executions.</p>
@@ -107,100 +126,105 @@ export default function Trades() {
         )}
       </div>
 
-      {/* Column headers */}
-      <div className="grid grid-cols-12 gap-3 px-4 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
-        <div className="col-span-2">Time</div>
-        <div className="col-span-2">Market</div>
-        <div className="col-span-1">Dir</div>
-        <div className="col-span-2">Contract</div>
-        <div className="col-span-1">Stake</div>
-        <div className="col-span-2">AI Conf</div>
-        <div className="col-span-1">Mode</div>
-        <div className="col-span-1">P/L</div>
-      </div>
-
-      <div className="space-y-1">
-        {trades?.map((trade) => {
-          const isWon = trade.status === "won";
-          const isOpen = trade.status === "open";
-          const profitColor = isWon ? "text-green-500" : isOpen ? "text-amber-500" : "text-red-500";
-          const confVal = trade.aiConfidence ?? 0;
-          const confColor = confVal >= 70 ? "text-green-500" : confVal >= 50 ? "text-amber-500" : "text-red-500";
-          const contractLabel = formatContractLabel(trade.contractType, (trade as any).barrier ?? null);
-
-          return (
-            <Card key={trade.id} className={`bg-card hover:bg-secondary/20 transition-colors border ${isWon ? "border-green-500/10" : isOpen ? "border-amber-500/10 animate-pulse" : "border-red-500/10"}`}>
-              <CardContent className="p-2.5 grid grid-cols-12 gap-3 items-center">
-                <div className="col-span-2">
-                  <div className="text-[11px] font-mono text-muted-foreground">{format(new Date(trade.createdAt), "HH:mm:ss")}</div>
-                  <div className="text-[10px] text-zinc-600">{format(new Date(trade.createdAt), "MMM d")}</div>
-                </div>
-
-                <div className="col-span-2">
-                  <div className="text-xs font-bold truncate">{(trade as any).displayName ?? trade.symbol}</div>
-                  <div className="text-[10px] text-zinc-600 font-mono">{trade.symbol}</div>
-                </div>
-
-                <div className="col-span-1">
-                  <div className={`flex items-center gap-0.5 text-[10px] font-bold ${trade.direction === "up" ? "text-green-500" : "text-red-500"}`}>
-                    {trade.direction === "up" ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                    {trade.direction.toUpperCase()}
-                  </div>
-                </div>
-
-                <div className="col-span-2">
-                  <span className={`text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded ${
-                    trade.contractType.includes("DIGIT")
-                      ? "bg-purple-500/10 text-purple-400"
-                      : "bg-blue-500/10 text-blue-400"
-                  }`}>
-                    {contractLabel}
-                  </span>
-                </div>
-
-                <div className="col-span-1">
-                  <span className="text-xs font-mono">${trade.stake.toFixed(2)}</span>
-                </div>
-
-                <div className="col-span-2">
-                  <div className="flex items-center gap-1.5">
-                    <div className={`text-xs font-mono font-bold ${confColor}`}>{confVal.toFixed(0)}%</div>
-                    <div className="flex-1 h-1 bg-secondary rounded-full overflow-hidden">
-                      <div className={`h-full rounded-full ${confVal >= 70 ? "bg-green-500" : confVal >= 50 ? "bg-amber-500" : "bg-red-500"}`}
-                        style={{ width: `${confVal}%` }} />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="col-span-1">
-                  <Badge variant="outline" className="text-[9px] px-1 py-0 text-muted-foreground border-border">
-                    {trade.isAutonomous ? "AUTO" : "MANUAL"}
-                  </Badge>
-                </div>
-
-                <div className="col-span-1">
-                  {isOpen ? (
-                    <div className="flex items-center gap-0.5 text-amber-500">
-                      <Activity className="w-3 h-3 animate-pulse" />
-                      <span className="text-[10px] font-mono">Live</span>
-                    </div>
-                  ) : (
-                    <div className={`text-xs font-mono font-bold ${profitColor}`}>
-                      {isWon ? "+" : ""}{trade.profit?.toFixed(2) ?? "—"}
-                    </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          );
-        })}
-        {trades?.length === 0 && (
-          <div className="text-center py-16 text-muted-foreground">
-            <Activity className="w-8 h-8 mx-auto mb-3 opacity-30" />
-            <div className="text-sm">No trades recorded yet.</div>
-            <div className="text-xs mt-1">Go to Markets and execute your first trade.</div>
+      {/* Trade list — horizontal scroll on mobile */}
+      <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
+        <div className="min-w-[640px]">
+          {/* Column headers */}
+          <div className="grid grid-cols-12 gap-2 px-3 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+            <div className="col-span-2">Time</div>
+            <div className="col-span-2">Market</div>
+            <div className="col-span-2">Contract</div>
+            <div className="col-span-1">Stake</div>
+            <div className="col-span-1">Ticks</div>
+            <div className="col-span-2">AI Conf</div>
+            <div className="col-span-1">Mode</div>
+            <div className="col-span-1">P/L</div>
           </div>
-        )}
+
+          <div className="space-y-1">
+            {trades?.map((trade) => {
+              const isWon = trade.status === "won";
+              const isOpen = trade.status === "open";
+              const profitColor = isWon ? "text-green-500" : isOpen ? "text-amber-500" : "text-red-500";
+              const confVal = trade.aiConfidence ?? 0;
+              const confColor = confVal >= 70 ? "text-green-500" : confVal >= 50 ? "text-amber-500" : "text-red-500";
+              const contractLabel = formatContractLabel(trade.contractType, (trade as any).barrier ?? null);
+              const isDigitType = trade.contractType.includes("DIGIT");
+              const isEvenOdd = trade.contractType === "DIGITEVEN" || trade.contractType === "DIGITODD";
+              const ticks = (trade as any).duration ?? "—";
+
+              return (
+                <Card key={trade.id} className={`bg-card hover:bg-secondary/20 transition-colors border ${isWon ? "border-green-500/10" : isOpen ? "border-amber-500/10 animate-pulse" : "border-red-500/10"}`}>
+                  <CardContent className="p-2.5 grid grid-cols-12 gap-2 items-center">
+                    <div className="col-span-2">
+                      <div className="text-[11px] font-mono text-muted-foreground">{format(new Date(trade.createdAt), "HH:mm:ss")}</div>
+                      <div className="text-[10px] text-zinc-600">{format(new Date(trade.createdAt), "MMM d")}</div>
+                    </div>
+
+                    <div className="col-span-2">
+                      <div className="text-xs font-bold truncate">{(trade as any).displayName ?? trade.symbol}</div>
+                      <div className="text-[10px] text-zinc-600 font-mono">{trade.symbol}</div>
+                    </div>
+
+                    <div className="col-span-2">
+                      <span className={`text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded ${
+                        isEvenOdd ? "bg-cyan-500/10 text-cyan-400"
+                        : isDigitType ? "bg-purple-500/10 text-purple-400"
+                        : "bg-blue-500/10 text-blue-400"
+                      }`}>
+                        {contractLabel}
+                      </span>
+                    </div>
+
+                    <div className="col-span-1">
+                      <span className="text-xs font-mono">${trade.stake.toFixed(2)}</span>
+                    </div>
+
+                    <div className="col-span-1">
+                      <span className="text-[11px] font-mono text-muted-foreground">{ticks}{typeof ticks === "number" ? "t" : ""}</span>
+                    </div>
+
+                    <div className="col-span-2">
+                      <div className="flex items-center gap-1.5">
+                        <div className={`text-xs font-mono font-bold ${confColor}`}>{confVal.toFixed(0)}%</div>
+                        <div className="flex-1 h-1 bg-secondary rounded-full overflow-hidden">
+                          <div className={`h-full rounded-full ${confVal >= 70 ? "bg-green-500" : confVal >= 50 ? "bg-amber-500" : "bg-red-500"}`}
+                            style={{ width: `${confVal}%` }} />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="col-span-1">
+                      <Badge variant="outline" className="text-[9px] px-1 py-0 text-muted-foreground border-border">
+                        {trade.isAutonomous ? "AUTO" : "MAN"}
+                      </Badge>
+                    </div>
+
+                    <div className="col-span-1">
+                      {isOpen ? (
+                        <div className="flex items-center gap-0.5 text-amber-500">
+                          <Activity className="w-3 h-3 animate-pulse" />
+                          <span className="text-[10px] font-mono">Live</span>
+                        </div>
+                      ) : (
+                        <div className={`text-xs font-mono font-bold ${profitColor}`}>
+                          {isWon ? "+" : ""}{trade.profit?.toFixed(2) ?? "—"}
+                        </div>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
+            {trades?.length === 0 && (
+              <div className="text-center py-16 text-muted-foreground">
+                <Activity className="w-8 h-8 mx-auto mb-3 opacity-30" />
+                <div className="text-sm">No trades recorded yet.</div>
+                <div className="text-xs mt-1">Go to Markets and execute your first trade.</div>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </motion.div>
   );

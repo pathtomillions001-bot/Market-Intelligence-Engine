@@ -27,13 +27,16 @@ import type { BarrierOption } from "./digit-agent";
 // ── Default payout table ──────────────────────────────────────────────────────
 // Updated to more realistic Deriv values for synthetic indices.
 // RISE/FALL on Volatility indices typically pay 1.88–1.95x.
+// DIGITEVEN/DIGITODD are 50/50 contracts that pay ~1.95x on Deriv.
 export const DEFAULT_PAYOUTS: Record<string, number> = {
   RISE:        1.91,
   FALL:        1.91,
-  CALL:        1.87,
-  PUT:         1.87,
+  CALL:        1.87,   // legacy — kept for backward compat, prefer RISE/FALL
+  PUT:         1.87,   // legacy — kept for backward compat, prefer RISE/FALL
   DIGITOVER:   1.96,   // barrier=5 (most common)
   DIGITUNDER:  1.96,
+  DIGITEVEN:   1.95,   // 50/50 contract: even digit wins
+  DIGITODD:    1.95,   // 50/50 contract: odd digit wins
 };
 
 // Minimum EV threshold to consider an option positive.
@@ -148,6 +151,24 @@ function evForDigitProducts(
     }));
 }
 
+// ── Even / Odd products ───────────────────────────────────────────────────────
+// evenProb = fraction of recent digits that were even (0,2,4,6,8).
+// Both products always use payout ~1.95x (50/50 contract on Deriv).
+
+function evForEvenOddProducts(
+  evenProb: number,
+  stake: number,
+  livePayouts: Record<string, number> | null,
+): EVResult[] {
+  const evenPayout = livePayouts?.["DIGITEVEN"] ?? DEFAULT_PAYOUTS["DIGITEVEN"];
+  const oddPayout  = livePayouts?.["DIGITODD"]  ?? DEFAULT_PAYOUTS["DIGITODD"];
+  const oddProb    = 1 - evenProb;
+  return [
+    buildEVResult("DIGITEVEN", evenProb, evenPayout, stake),
+    buildEVResult("DIGITODD",  oddProb,  oddPayout,  stake),
+  ];
+}
+
 // ── Agent runner ──────────────────────────────────────────────────────────────
 
 export interface EVAgentOutput extends AgentOutput {
@@ -161,6 +182,7 @@ export function runEVCalculatorAgent(
   dirResult: DirectionResult | null,
   barrierOptions: BarrierOption[],
   livePayouts: Record<string, number> | null,
+  evenProb?: number,
 ): EVAgentOutput {
   const t0 = Date.now();
   const stake = computeStake(ctx);
@@ -184,10 +206,18 @@ export function runEVCalculatorAgent(
     allEV.push(...evForDigitProducts(barrierOptions, stake));
   }
 
+  // EVEN/ODD: compute when preferred and we have a valid probability
+  if (
+    evenProb !== undefined &&
+    preferred.some((t) => t === "DIGITEVEN" || t === "DIGITODD")
+  ) {
+    allEV.push(...evForEvenOddProducts(evenProb, stake, livePayouts));
+  }
+
   // Best result: prefer strictly positive EV; fall back to near-breakeven for direction
   const strictPositiveEV = allEV.filter((r) => r.isPositiveEV).sort((a, b) => b.dollarEV - a.dollarEV);
   const nearBreakevenDirection = allEV
-    .filter((r) => r.isNearBreakeven && ["RISE", "FALL", "CALL", "PUT"].includes(r.product))
+    .filter((r) => r.isNearBreakeven && ["RISE", "FALL"].includes(r.product))
     .sort((a, b) => b.dollarEV - a.dollarEV);
 
   const bestEVResult = strictPositiveEV[0] ?? nearBreakevenDirection[0] ?? null;

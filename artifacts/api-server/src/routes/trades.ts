@@ -3,9 +3,10 @@ import { db } from "@workspace/db";
 import { tradesTable, accountsTable, settingsTable } from "@workspace/db";
 import { eq, desc, and, sql } from "drizzle-orm";
 import { ExecuteTradeBody, GetTradesQueryParams, GetTradeParams } from "@workspace/api-zod";
-import { tickManager, DERIV_MARKETS, getCachedToken, executeLiveTrade, waitForContractResult, getLiveBalance } from "../lib/deriv";
+import { tickManager, DERIV_MARKETS, getCachedToken, executeLiveTrade, waitForContractResult, getLiveBalance, fetchDerivProfitTable } from "../lib/deriv";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome, updateDigitRecovery } from "../lib/agent-coordinator";
 import { logger } from "../lib/logger";
+import { broadcastSSE } from "../lib/sse";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 
 const router = Router();
@@ -323,6 +324,7 @@ router.post("/", async (req, res): Promise<void> => {
       }
     } catch { /* ignore */ }
 
+    broadcastSSE("trade_completed", { symbol, contractType, won, profit: profit.toFixed(2), stake });
     res.status(201).json(formatTrade(closedTrade));
     return;
   }
@@ -369,7 +371,61 @@ router.post("/", async (req, res): Promise<void> => {
     }
   } catch { /* ignore */ }
 
+  broadcastSSE("trade_completed", { symbol, contractType, won, profit: profit.toFixed(2), stake });
   res.status(201).json(formatTrade(trade));
+});
+
+// ── Deriv profit_table journal ─────────────────────────────────────────────────
+router.get("/deriv-journal", async (_req, res): Promise<void> => {
+  const accounts = await db.select().from(accountsTable).limit(1);
+  const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
+
+  if (!token) {
+    const trades = await db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(100);
+    res.json({ source: "local", trades: trades.map(formatTrade) });
+    return;
+  }
+
+  try {
+    const transactions = await fetchDerivProfitTable(token, 100);
+    if (transactions.length === 0) {
+      const trades = await db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(100);
+      res.json({ source: "local", trades: trades.map(formatTrade) });
+      return;
+    }
+    res.json({
+      source: "deriv",
+      trades: transactions.map((t: any) => {
+        const buyPrice = Number(t.buy_price ?? 0);
+        const sellPrice = Number(t.sell_price ?? 0);
+        const profit = sellPrice - buyPrice;
+        return {
+          id: t.transaction_id,
+          symbol: t.underlying_symbol ?? "—",
+          displayName: t.underlying_symbol,
+          contractType: t.contract_type ?? "UNKNOWN",
+          barrier: null,
+          stake: buyPrice,
+          payout: sellPrice,
+          profit,
+          won: profit > 0,
+          status: profit > 0 ? "won" : "lost",
+          duration: t.duration,
+          durationUnit: t.duration_unit,
+          createdAt: t.purchase_time ? new Date(t.purchase_time * 1000).toISOString() : new Date().toISOString(),
+          closedAt: t.sell_time ? new Date(t.sell_time * 1000).toISOString() : null,
+          shortcode: t.shortcode,
+          longcode: t.longcode,
+          isAutonomous: false,
+          aiConfidence: null,
+          source: "deriv",
+        };
+      }),
+    });
+  } catch {
+    const trades = await db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(100);
+    res.json({ source: "local", trades: trades.map(formatTrade) });
+  }
 });
 
 router.get("/:id", async (req, res): Promise<void> => {

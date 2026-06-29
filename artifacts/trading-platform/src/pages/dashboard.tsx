@@ -70,7 +70,7 @@ export default function Dashboard() {
     executeTrade.mutate({
       data: {
         symbol: topMarket.symbol,
-        contractType: topMarket.recommendation?.contractType ?? "CALL",
+        contractType: topMarket.recommendation?.contractType ?? "RISE",
         stake: topMarket.recommendation?.stake ?? 1,
         direction: topMarket.recommendation?.direction ?? "up",
       }
