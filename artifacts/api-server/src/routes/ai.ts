@@ -285,13 +285,21 @@ async function runAutonomousLoop() {
     // No exploit mode — every cycle scans all markets for the best opportunity
     let bestResult: { market: typeof availableMarkets[0]; output: Awaited<ReturnType<typeof runCoordinator>>; ctx: ScanContext } | null = null;
 
-    const scanResults = await Promise.all(
+    // Scan without token — skips live WS payout calls so all markets complete in parallel quickly.
+    // The winning market gets a full ctx (with real token) built before execution.
+    const SCAN_TIMEOUT_MS = 5000;
+    function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+      return Promise.race([p, new Promise<T>((r) => setTimeout(() => r(fallback), ms))]);
+    }
+
+    const scanResults = (await Promise.allSettled(
       availableMarkets.map(async (m) => {
-        const ctx = buildScanContext(m, balance, tradingSettings, daily, token, account?.currency ?? "USD");
-        const output = await runCoordinator(ctx);
+        const ctx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
+        const output = await withTimeout(runCoordinator(ctx), SCAN_TIMEOUT_MS, null as any);
+        if (!output) return null;
         return { market: m, output, ctx };
       })
-    );
+    )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 
     scanResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore);
     const top = scanResults[0];
@@ -299,7 +307,9 @@ async function runAutonomousLoop() {
 
     if (!bestResult) { scheduleNext(); return; }
 
-    const { market: bestMarket, output, ctx } = bestResult;
+    const { market: bestMarket, output } = bestResult;
+    // Rebuild ctx with real token for live trade execution (scan used null for speed)
+    const ctx = buildScanContext(bestMarket, balance, tradingSettings, daily, token, account?.currency ?? "USD");
     currentMarket = bestMarket.symbol;
 
     // ── Guard: block if there is already an open/in-progress trade ───────────

@@ -22,12 +22,12 @@ function buildOAuthRedirectUrl(): string {
 export default function Connect() {
   const { data: account } = useGetAccount({
     query: {
-      retry: (failureCount, error) => {
+      retry: (failureCount: number, error: unknown) => {
         if (error instanceof ApiError && error.status === 404) return false;
         return failureCount < 1;
       },
     },
-  });
+  } as { query: any });
   const connect = useConnectDerivAccount();
   const disconnect = useDisconnectAccount();
   const queryClient = useQueryClient();
