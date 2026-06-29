@@ -145,6 +145,19 @@ router.get("/daily-summary", async (_req, res): Promise<void> => {
   const totalProfit = closed.reduce((s, t) => s + Number(t.profit ?? 0), 0);
   const won = closed.filter((t) => t.status === "won").length;
 
+  // Compute today's streak from today's trades (newest first)
+  const sortedToday = [...closed].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  let currentStreak = 0;
+  if (sortedToday.length > 0) {
+    const lastStatus = sortedToday[0].status;
+    let streak = 0;
+    for (const t of sortedToday) {
+      if (t.status === lastStatus) streak++;
+      else break;
+    }
+    currentStreak = lastStatus === "won" ? streak : -streak;
+  }
+
   res.json({
     date: today.toISOString().split("T")[0],
     tradesCount: closed.length,
@@ -158,6 +171,7 @@ router.get("/daily-summary", async (_req, res): Promise<void> => {
     isLossLimitHit: totalProfit <= -dailyLossLimit,
     balanceStart: balance - totalProfit,
     balanceNow: balance,
+    currentStreak,
   });
 });
 

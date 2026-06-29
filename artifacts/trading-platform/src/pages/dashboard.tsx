@@ -168,12 +168,21 @@ export default function Dashboard() {
           <Card className="bg-card">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Streak</div>
-              <div className={`text-2xl font-mono font-bold ${(stats?.currentStreak ?? 0) >= 0 ? "text-green-500" : "text-red-500"}`}>
-                {(stats?.currentStreak ?? 0) > 0 ? "+" : ""}{stats?.currentStreak ?? 0}
-              </div>
-              <div className="text-xs text-muted-foreground mt-1">
-                {(stats?.currentStreak ?? 0) >= 0 ? "winning" : "losing"} streak
-              </div>
+              {(() => {
+                const streak = todayOnly
+                  ? ((summary as any)?.currentStreak ?? 0)
+                  : (stats?.currentStreak ?? 0);
+                return (
+                  <>
+                    <div className={`text-2xl font-mono font-bold ${streak >= 0 ? "text-green-500" : "text-red-500"}`}>
+                      {streak > 0 ? "+" : ""}{streak}
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      {todayOnly ? "today's" : "all-time"} {streak >= 0 ? "winning" : "losing"} streak
+                    </div>
+                  </>
+                );
+              })()}
             </CardContent>
           </Card>
           <Card className="bg-card">

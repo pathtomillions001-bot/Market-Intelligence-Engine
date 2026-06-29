@@ -455,11 +455,13 @@ class DerivTickManager extends EventEmitter {
   private tickBuffers = new Map<string, number[]>();
   private digitBuffers = new Map<string, number[]>();
   private latestPrices = new Map<string, number>();
+  private lastRealTickMs = new Map<string, number>();
   private isConnected = false;
   private reconnectDelay = 3000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private subscribedSymbols: string[] = [];
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
   private lastPongTime = Date.now();
 
   start(symbols: string[]) {
@@ -469,6 +471,30 @@ class DerivTickManager extends EventEmitter {
       if (!this.digitBuffers.has(sym)) this.digitBuffers.set(sym, []);
     }
     this.connect();
+    this.startStaleCheck();
+  }
+
+  private startStaleCheck() {
+    if (this.staleCheckTimer) clearInterval(this.staleCheckTimer);
+    this.staleCheckTimer = setInterval(() => {
+      if (!this.isConnected || this.ws?.readyState !== WebSocket.OPEN) return;
+      const now = Date.now();
+      // Find how many symbols are actively receiving ticks (sanity reference)
+      const activeSym = this.subscribedSymbols.filter(s => {
+        const last = this.lastRealTickMs.get(s) ?? 0;
+        return now - last < 30_000;
+      });
+      // If at least some symbols are live, check for stale ones and re-subscribe them
+      if (activeSym.length > 0) {
+        for (const sym of this.subscribedSymbols) {
+          const last = this.lastRealTickMs.get(sym) ?? 0;
+          if (now - last > 45_000) {
+            logger.info({ symbol: sym }, "TickManager: re-subscribing stale market");
+            this.ws!.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
+          }
+        }
+      }
+    }, 30_000);
   }
 
   private connect() {
@@ -538,6 +564,8 @@ class DerivTickManager extends EventEmitter {
       if (prices.length > TICK_BUFFER_SIZE) prices.shift();
       this.tickBuffers.set(symbol, prices);
       this.latestPrices.set(symbol, price);
+      // Track real tick time per market for stale detection
+      this.lastRealTickMs.set(symbol, Date.now());
 
       // Buffer digit
       if (market.digitEnabled && lastDigit >= 0) {
@@ -558,6 +586,15 @@ class DerivTickManager extends EventEmitter {
     if (msg.error) {
       const sym = msg.echo_req?.ticks ?? msg.echo_req?.symbol ?? "?";
       logger.warn({ code: msg.error.code, message: msg.error.message, symbol: sym }, "TickManager: Deriv subscription error");
+      // Re-subscribe to the failed market after a short delay
+      if (sym !== "?" && this.subscribedSymbols.includes(sym)) {
+        setTimeout(() => {
+          if (this.ws?.readyState === WebSocket.OPEN) {
+            logger.info({ symbol: sym }, "TickManager: re-subscribing after error");
+            this.ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
+          }
+        }, 5000);
+      }
     }
   }
 

@@ -55,10 +55,11 @@ const UNDER_THEORETICAL: Record<number, number> = {
 const TIER1_OVER  = new Set([1, 2, 3]);
 const TIER1_UNDER = new Set([6, 7, 8]);
 
-// Tier 2: recovery mode (after a loss — more payout to recover faster)
-// OVER 4/5/6 → 50/40/30% win rate; UNDER 3/4/5 → 30/40/50% win rate
-const TIER2_OVER  = new Set([4, 5, 6]);
-const TIER2_UNDER = new Set([3, 4, 5]);
+// Tier 2: recovery mode (after a loss in normal mode, until recovered)
+// OVER 4/5 → 50/40% win rate; UNDER 4/5 → 40/50% win rate
+// Note: OVER 6 and UNDER 3 are no longer part of any tier (tier 0, not selected)
+const TIER2_OVER  = new Set([4, 5]);
+const TIER2_UNDER = new Set([4, 5]);
 
 // Hard-blocked barriers — NEVER select these; ultra-risky, unacceptable loss rate
 const HARD_BLOCKED_OVER  = new Set([7, 8]);    // OVER 7: 20% win, OVER 8: 10% win

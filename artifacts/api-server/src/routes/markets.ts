@@ -178,15 +178,23 @@ router.get("/", async (req, res): Promise<void> => {
   res.json(ranked);
 });
 
-router.get("/top", async (_req, res): Promise<void> => {
+router.get("/top", async (req, res): Promise<void> => {
   analyzeAllMarkets().catch(() => {});
   const { balance, settings, token, currency } = await getAccountAndSettings();
   const preferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER"];
   const tradingSettings = buildTradingSettings(settings, preferred);
   const daily = await getDailyStats();
 
+  // Optional contract-type filter: e.g. ?contractTypeFilter=CALL,PUT
+  const contractTypeFilter = req.query.contractTypeFilter as string | undefined;
+  const allowedTypes = contractTypeFilter ? new Set(contractTypeFilter.split(",").map(s => s.trim())) : null;
+
   let best: CachedOutput | null = null;
   for (const [, cached] of analysisCache) {
+    if (allowedTypes) {
+      const recType = cached.output.recommendation?.product as string | undefined;
+      if (!recType || !allowedTypes.has(recType)) continue;
+    }
     if (!best || cached.output.qualityScore > best.output.qualityScore) best = cached;
   }
 
