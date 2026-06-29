@@ -50,20 +50,22 @@ const UNDER_THEORETICAL: Record<number, number> = {
 };
 
 // ── Tier definitions ─────────────────────────────────────────────────────────
-// Tier 1: safe compounding (normal mode)
-// OVER 1/2/3 → 80/70/60% win rate; UNDER 6/7/8 → 60/70/80% win rate
-const TIER1_OVER  = new Set([1, 2, 3]);
-const TIER1_UNDER = new Set([6, 7, 8]);
+// Tier 1: normal mode — ONLY the one safest barrier per side
+// OVER 2 → ~70% win rate;  UNDER 8 → ~70% win rate
+// Normal mode: ONLY OVER 2 (~70% win) or UNDER 8 (~70% win)
+const TIER1_OVER  = new Set([2]);
+const TIER1_UNDER = new Set([8]);
 
-// Tier 2: recovery mode (after a loss in normal mode, until recovered)
-// OVER 4/5 → 50/40% win rate; UNDER 4/5 → 40/50% win rate
-// Note: OVER 6 and UNDER 3 are no longer part of any tier (tier 0, not selected)
-const TIER2_OVER  = new Set([4, 5]);
-const TIER2_UNDER = new Set([4, 5]);
+// Recovery mode (after any loss): OVER 4 (~50% win) or UNDER 5 (~50% win)
+// AI picks whichever has better digit-distribution probability for the current market
+const TIER2_OVER  = new Set([4]);
+const TIER2_UNDER = new Set([5]);
 
-// Hard-blocked barriers — NEVER select these; ultra-risky, unacceptable loss rate
-const HARD_BLOCKED_OVER  = new Set([7, 8]);    // OVER 7: 20% win, OVER 8: 10% win
-const HARD_BLOCKED_UNDER = new Set([1, 2]);    // UNDER 1: 10% win, UNDER 2: 20% win
+// Hard-blocked: EVERYTHING except the two allowed barriers per mode.
+// Normal allowed: OVER 2, UNDER 8. Recovery allowed: OVER 4, UNDER 5.
+// Any barrier not in [2,4] for OVER or [5,8] for UNDER is forbidden.
+const HARD_BLOCKED_OVER  = new Set([0, 1, 3, 5, 6, 7, 8, 9]);
+const HARD_BLOCKED_UNDER = new Set([0, 1, 2, 3, 4, 6, 7, 9]);
 
 function inPreferredTier(
   contractType: "DIGITOVER" | "DIGITUNDER",
@@ -96,8 +98,8 @@ export function updateDigitRecovery(
   const prev = recoveryStore.get(symbol) ?? { unrecoveredLoss: 0, lastLossAt: 0 };
   let unrecoveredLoss: number;
   if (won) {
-    // Recovery: reduce unrecovered amount by actual profit
-    unrecoveredLoss = Math.max(0, prev.unrecoveredLoss - Math.abs(profit));
+    // Any win fully clears recovery — streak resets from zero
+    unrecoveredLoss = 0;
   } else {
     // New loss: add stake to unrecovered amount
     unrecoveredLoss = prev.unrecoveredLoss + Math.abs(stake);

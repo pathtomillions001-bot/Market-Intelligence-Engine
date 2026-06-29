@@ -52,10 +52,10 @@ export function FlashCard3D({ front, back, flipped, onFlip, className = "", glow
               {front}
             </div>
 
-            {/* Dedicated flip button — bottom right */}
+            {/* Dedicated flip button — bottom right, above content layer */}
             <button
               onClick={onFlip}
-              className="absolute bottom-2.5 right-3 flex items-center gap-1 text-[10px] font-mono text-primary/50 hover:text-primary transition-colors group"
+              className="absolute bottom-2.5 right-3 z-20 flex items-center gap-1 text-[10px] font-mono text-primary/50 hover:text-primary transition-colors group"
               title="Flip card"
             >
               <RotateCcw className="w-3 h-3 group-hover:rotate-180 transition-transform duration-300" />
