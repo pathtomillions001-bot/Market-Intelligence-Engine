@@ -38,6 +38,7 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     maxTradeStake: Number(s.maxTradeStake),
     paperTradeMode: s.paperTradeMode,
     requirePositiveEv: s.requirePositiveEv,
+    cooldownMinutes: s.cooldownMinutes,
   };
 }
 
@@ -88,6 +89,7 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).maxTradeStake !== undefined) updateData.maxTradeStake = String((updates as any).maxTradeStake);
   if ((updates as any).paperTradeMode !== undefined) updateData.paperTradeMode = (updates as any).paperTradeMode;
   if ((updates as any).requirePositiveEv !== undefined) updateData.requirePositiveEv = (updates as any).requirePositiveEv;
+  if ((updates as any).cooldownMinutes !== undefined) updateData.cooldownMinutes = (updates as any).cooldownMinutes;
 
     const [updated] = await db.update(settingsTable)
       .set(updateData)

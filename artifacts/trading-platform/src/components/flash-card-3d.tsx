@@ -25,7 +25,11 @@ export function FlashCard3D({ front, back, flipped, onFlip, className = "", glow
       >
         {/* Front */}
         <div
-          style={{ backfaceVisibility: "hidden", WebkitBackfaceVisibility: "hidden" }}
+          style={{
+            backfaceVisibility: "hidden",
+            WebkitBackfaceVisibility: "hidden",
+            pointerEvents: flipped ? "none" : "auto",
+          }}
           className="absolute inset-0 rounded-2xl"
         >
           <div
@@ -52,9 +56,9 @@ export function FlashCard3D({ front, back, flipped, onFlip, className = "", glow
               {front}
             </div>
 
-            {/* Dedicated flip button — bottom right, above content layer */}
+            {/* Flip button — front */}
             <button
-              onClick={onFlip}
+              onClick={(e) => { e.stopPropagation(); onFlip(); }}
               className="absolute bottom-2.5 right-3 z-20 flex items-center gap-1 text-[10px] font-mono text-primary/50 hover:text-primary transition-colors group"
               title="Flip card"
             >
@@ -66,7 +70,12 @@ export function FlashCard3D({ front, back, flipped, onFlip, className = "", glow
 
         {/* Back */}
         <div
-          style={{ backfaceVisibility: "hidden", WebkitBackfaceVisibility: "hidden", transform: "rotateY(180deg)" }}
+          style={{
+            backfaceVisibility: "hidden",
+            WebkitBackfaceVisibility: "hidden",
+            transform: "rotateY(180deg)",
+            pointerEvents: flipped ? "auto" : "none",
+          }}
           className="absolute inset-0 rounded-2xl"
         >
           <div
@@ -93,9 +102,9 @@ export function FlashCard3D({ front, back, flipped, onFlip, className = "", glow
               {back}
             </div>
 
-            {/* Dedicated flip button — bottom right */}
+            {/* Flip button — back */}
             <button
-              onClick={onFlip}
+              onClick={(e) => { e.stopPropagation(); onFlip(); }}
               className="absolute bottom-2.5 right-3 flex items-center gap-1 text-[10px] font-mono text-primary/50 hover:text-primary transition-colors group z-20"
               title="Flip card"
             >
@@ -170,7 +179,6 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
 
   const activeFilter = FILTER_OPTIONS.find(f => f.id === filterType)!;
 
-  // Fetch ranked markets list when a filter is active (returns all, we pick the best matching)
   const { data: allMarkets } = useQuery<any[]>({
     queryKey: ["markets", "list", filterType],
     queryFn: () => fetch("/api/markets?limit=50").then(r => r.json()),
@@ -183,7 +191,6 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
     },
   });
 
-  // Fetch full recommendation for the selected filtered market
   const filteredMarkets = filterType !== "auto" ? (allMarkets ?? []) : [];
   const selectedFiltered = filteredMarkets[Math.min(marketIndex, Math.max(filteredMarkets.length - 1, 0))];
 
@@ -194,13 +201,13 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
     enabled: filterType !== "auto" && !!selectedFiltered?.symbol,
   });
 
-  // Reset index when filter changes
   const handleFilterChange = (f: FilterType) => {
     setFilterType(f);
     setMarketIndex(0);
   };
 
-  // Determine what to display
+  const handleFlip = () => setFlipped(f => !f);
+
   const displayMarket = filterType === "auto" ? topMarket : (filteredDetail ?? selectedFiltered);
   const displayRec = (displayMarket as any)?.recommendation ?? null;
 
@@ -305,7 +312,7 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
           return (
             <button
               key={opt.id}
-              onClick={() => handleFilterChange(opt.id)}
+              onClick={(e) => { e.stopPropagation(); handleFilterChange(opt.id); }}
               className="relative py-2 px-3 rounded-xl text-xs font-bold font-mono border transition-all"
               style={{
                 background: isActive ? "rgba(0,255,255,0.08)" : "rgba(255,255,255,0.02)",
@@ -362,7 +369,7 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
       {filterType !== "auto" && filteredMarkets.length > 1 && (
         <div className="flex items-center gap-2 mt-1">
           <button
-            onClick={() => setMarketIndex(i => Math.max(0, i - 1))}
+            onClick={(e) => { e.stopPropagation(); setMarketIndex(i => Math.max(0, i - 1)); }}
             disabled={!canPrev}
             className="p-1.5 rounded-lg border border-white/10 disabled:opacity-30 hover:border-primary/40 hover:bg-primary/5 transition-all"
           >
@@ -372,7 +379,7 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
             market {marketIndex + 1} of {filteredMarkets.length}
           </span>
           <button
-            onClick={() => setMarketIndex(i => Math.min(filteredMarkets.length - 1, i + 1))}
+            onClick={(e) => { e.stopPropagation(); setMarketIndex(i => Math.min(filteredMarkets.length - 1, i + 1)); }}
             disabled={!canNext}
             className="p-1.5 rounded-lg border border-white/10 disabled:opacity-30 hover:border-primary/40 hover:bg-primary/5 transition-all"
           >
@@ -388,7 +395,7 @@ export function MarketOpportunityFlashCard({ topMarket, onTrade, isTradePending 
       front={front}
       back={back}
       flipped={flipped}
-      onFlip={() => setFlipped(f => !f)}
+      onFlip={handleFlip}
       glowColor={glowColor}
       className="h-full min-h-[200px]"
     />

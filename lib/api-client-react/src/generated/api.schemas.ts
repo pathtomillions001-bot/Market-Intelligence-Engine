@@ -1,264 +1,522 @@
-export interface DerivAccount {
-    loginId: string;
-    currency: string;
-    balance: number;
-    accountType: string;
-    token?: string | null;
-    fullname?: string | null;
-    email?: string | null;
-    country?: string | null;
-    isVirtual?: boolean;
-}
-
-export interface Market {
-    symbol: string;
-    displayName: string;
-    category: string;
-    qualityScore: number;
-    confidenceScore: number;
-    riskScore: number;
-    trend: string;
-    volatility?: string;
-    recommendedContractType?: string | null;
-    lastPrice?: number | null;
-    priceChange24h?: number | null;
-    regime?: string;
-    shouldTrade?: boolean;
-    rank?: number;
-    isActive?: boolean;
-    digitEnabled?: boolean;
-    priceHistory: {
-        timestamp: string;
-        price: number;
-    }[];
-    agentScores?: Record<string, {
-        score: number;
-        weight: number;
-        signal: string;
-        reasoning: string;
-    }>;
-    agentOutputs?: Record<string, {
-        agentId: string;
-        score: number;
-        confidence: number;
-        signal: string;
-        reasoning: string;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        data: Record<string, any>;
-        executionTimeMs: number;
-    }>;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    digitStats?: any;
-    digitBarrier?: number | null;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    recommendation?: any;
-}
-
-export interface Trade {
-    id: number;
-    symbol: string;
-    displayName: string;
-    contractType: string;
-    barrier?: number | null;
-    stake: number;
-    direction: string;
-    status: string;
-    payout?: number | null;
-    profit?: number | null;
-    entryPrice?: number | null;
-    exitPrice?: number | null;
-    aiConfidence?: number | null;
-    aiRiskScore?: number | null;
-    isAutonomous: boolean;
-    agentReasoning?: string | null;
-    duration?: number | null;
-    durationUnit?: string | null;
-    createdAt: string;
-    closedAt?: string | null;
-}
-
-export interface TradeStats {
-    totalTrades: number;
-    wonTrades: number;
-    lostTrades: number;
-    winRate: number;
-    totalProfit: number;
-    avgProfit: number;
-    bestTrade: number;
-    worstTrade: number;
-    currentStreak: number;
-    longestWinStreak: number;
-    longestLoseStreak: number;
-}
-
-export interface DailySummary {
-    date: string;
-    tradesCount: number;
-    wonCount: number;
-    lostCount: number;
-    totalProfit: number;
-    dailyTarget: number;
-    dailyLossLimit: number;
-    targetProgress: number;
-    isTargetMet: boolean;
-    isLossLimitHit: boolean;
-    balanceStart: number;
-    balanceNow: number;
-}
-
-export interface AiEngineStatus {
-    isRunning: boolean;
-    mode: string;
-    agentStatuses: {
-        name: string;
-        isActive: boolean;
-        lastRun: string | null;
-        confidence: number;
-    }[];
-    tradesExecutedToday: number;
-    currentMarket: string | null;
-    nextScanIn: number | null;
-    stopReasons: string[];
-    loopIntervalSec: number;
-    lastTradeTime: string | null;
-    exploitSymbol: string | null;
-    exploitCount: number;
-    recoveryStep?: number;
-    wsConnected: boolean;
-    liveTickCount: number;
-    tickHealth: Record<string, unknown>;
-    paperTradeMode: boolean;
-    requirePositiveEv: boolean;
-}
-
-export interface AiInsight {
-    id: number;
-    type: string;
-    title: string;
-    description: string;
-    priority: string;
-    actionable: boolean;
-    relatedMarket: string | null;
-}
-
-export interface MarketRecommendation {
-    symbol: string;
-    displayName?: string;
-    contractType: string;
-    direction: string;
-    confidence: number;
-    stake: number;
-    riskScore: number;
-    shouldTrade: boolean;
-    reasoning: string;
-    warnings: string[];
-    [key: string]: unknown;
-}
-
-export interface Settings {
-    id: number;
-    riskProfile: string;
-    maxRiskPerTrade: number;
-    dailyTarget: number;
-    dailyLossLimit: number;
-    maxDrawdown: number;
-    maxTradeStake: number;
-    minConfidenceThreshold: number;
-    tradeDurationSec: number;
-    paperTradeMode: boolean;
-    requirePositiveEv: boolean;
-    consecutiveLossLimit: number;
-    marketRotationAfter: number;
-    loopIntervalSec: number;
-    preferredContractTypes: string[];
-    preferredCategories: string[];
-    allowedMarkets: string[];
-    autonomousEnabled: boolean;
-    recoveryMode: boolean;
-    recoveryMultiplier: number;
-    maxRecoverySteps: number;
-    scanAllMarkets: boolean;
-}
-
-export interface PerformanceAnalytics {
-    days?: number;
-    period?: string;
-    winRateHistory: {
-        date: string;
-        winRate: number;
-        tradeCount: number;
-    }[];
-    profitCurve: {
-        date: string;
-        cumulativeProfit: number;
-        dailyProfit: number;
-    }[];
-    avgConfidenceByOutcome: {
-        avgConfidenceWon: number;
-        avgConfidenceLost: number;
-    };
-    equityCurve?: {
-        date: string;
-        equity: number;
-        profit: number;
-        trades: number;
-    }[];
-    drawdownCurve?: {
-        date: string;
-        drawdown: number;
-        peak: number;
-    }[];
-    maxDrawdown?: number;
-    sharpeRatio?: number;
-    profitFactor?: number;
-}
-
-export interface DrawdownAnalysis {
-    currentDrawdown: number;
-    maxDrawdown: number;
-    drawdownLimit: number;
-    isAtRisk: boolean;
-    riskExposure: number;
-    consecutiveLosses: number;
-    consecutiveLossLimit: number;
-    drawdownPeriods?: {
-        start: string;
-        end: string;
-        depth: number;
-    }[];
-    recoveryTime?: number | null;
-}
-
-export type MarketBreakdown = {
-    symbol: string;
-    displayName: string;
-    tradeCount: number;
-    winRate: number;
-    totalProfit: number;
-    avgStake: number;
-}[];
-
+/**
+ * Generated by orval v8.9.1 🍺
+ * Do not edit manually.
+ * Api
+ * AI Trading Platform API
+ * OpenAPI spec version: 0.1.0
+ */
 export interface HealthStatus {
-    status: string;
-    uptime: number;
-    timestamp: string;
-}
-
-export interface SuccessResponse {
-    success: boolean;
-    message?: string;
+  status: string;
 }
 
 export interface ApiError {
-    error: string;
-    message?: string;
+  error: string;
 }
 
-export interface TopMarket {
-    symbol: string;
-    displayName: string;
-    category: string;
-    qualityScore: number;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    recommendation?: any;
+export interface SuccessResponse {
+  success: boolean;
+  /** @nullable */
+  message?: string | null;
 }
+
+export interface DerivTokenInput {
+  /** @minLength 1 */
+  token: string;
+}
+
+export interface DerivAccount {
+  id: number;
+  loginId: string;
+  currency: string;
+  balance: number;
+  isVirtual: boolean;
+  /** @nullable */
+  email?: string | null;
+  /** @nullable */
+  fullName?: string | null;
+  /** @nullable */
+  country?: string | null;
+  connectedAt?: string;
+}
+
+export type RankedMarketCategory = typeof RankedMarketCategory[keyof typeof RankedMarketCategory];
+
+
+export const RankedMarketCategory = {
+  synthetic: 'synthetic',
+  forex: 'forex',
+  commodities: 'commodities',
+  derived: 'derived',
+} as const;
+
+export type RankedMarketTrend = typeof RankedMarketTrend[keyof typeof RankedMarketTrend];
+
+
+export const RankedMarketTrend = {
+  strong_up: 'strong_up',
+  up: 'up',
+  sideways: 'sideways',
+  down: 'down',
+  strong_down: 'strong_down',
+} as const;
+
+export type RankedMarketVolatility = typeof RankedMarketVolatility[keyof typeof RankedMarketVolatility];
+
+
+export const RankedMarketVolatility = {
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  extreme: 'extreme',
+} as const;
+
+export interface RankedMarket {
+  symbol: string;
+  displayName: string;
+  category: RankedMarketCategory;
+  /** Composite market quality score 0-100 */
+  qualityScore: number;
+  /** AI confidence that a good trade exists 0-100 */
+  confidenceScore: number;
+  /** Risk level 0-100 (lower is safer) */
+  riskScore: number;
+  trend: RankedMarketTrend;
+  volatility: RankedMarketVolatility;
+  rank: number;
+  /** @nullable */
+  recommendedContractType?: string | null;
+  /** @nullable */
+  lastPrice?: number | null;
+  /** @nullable */
+  priceChange24h?: number | null;
+}
+
+export type AgentScoreSignal = typeof AgentScoreSignal[keyof typeof AgentScoreSignal];
+
+
+export const AgentScoreSignal = {
+  strong_buy: 'strong_buy',
+  buy: 'buy',
+  neutral: 'neutral',
+  sell: 'sell',
+  strong_sell: 'strong_sell',
+} as const;
+
+export interface AgentScore {
+  score: number;
+  weight: number;
+  signal: AgentScoreSignal;
+  reasoning: string;
+}
+
+export interface AgentScores {
+  marketScanner: AgentScore;
+  trendAnalysis: AgentScore;
+  volatilityAnalysis: AgentScore;
+  patternRecognition: AgentScore;
+  riskManagement: AgentScore;
+  capitalPreservation: AgentScore;
+  tradeExecution: AgentScore;
+  selfLearning: AgentScore;
+}
+
+export type AiRecommendationDirection = typeof AiRecommendationDirection[keyof typeof AiRecommendationDirection];
+
+
+export const AiRecommendationDirection = {
+  up: 'up',
+  down: 'down',
+} as const;
+
+export interface AiRecommendation {
+  symbol: string;
+  contractType: string;
+  direction: AiRecommendationDirection;
+  stake: number;
+  confidence: number;
+  riskScore: number;
+  profitability: number;
+  agentScores: AgentScores;
+  shouldTrade: boolean;
+  reasoning: string;
+  warnings: string[];
+  generatedAt?: string;
+  calibratedConfidence?: number;
+  winProbability?: number;
+  expectedValue?: number;
+  breakevenWinRate?: number;
+  payoutMultiplier?: number;
+  recommendedDuration?: number;
+  /** @nullable */
+  tickWindow?: number | null;
+}
+
+export interface PricePoint {
+  timestamp: string;
+  price: number;
+}
+
+export interface MarketDetail {
+  symbol: string;
+  displayName: string;
+  category: string;
+  qualityScore: number;
+  agentScores: AgentScores;
+  recommendation: AiRecommendation;
+  priceHistory: PricePoint[];
+  lastUpdated?: string;
+}
+
+export interface ScanStatus {
+  status: string;
+  marketsScanned: number;
+  startedAt: string;
+}
+
+export type TradeDirection = typeof TradeDirection[keyof typeof TradeDirection];
+
+
+export const TradeDirection = {
+  up: 'up',
+  down: 'down',
+} as const;
+
+export type TradeStatus = typeof TradeStatus[keyof typeof TradeStatus];
+
+
+export const TradeStatus = {
+  open: 'open',
+  won: 'won',
+  lost: 'lost',
+  cancelled: 'cancelled',
+} as const;
+
+export interface Trade {
+  id: number;
+  symbol: string;
+  contractType: string;
+  stake: number;
+  direction: TradeDirection;
+  status: TradeStatus;
+  /** @nullable */
+  payout?: number | null;
+  /** @nullable */
+  profit?: number | null;
+  /** @nullable */
+  entryPrice?: number | null;
+  /** @nullable */
+  exitPrice?: number | null;
+  /** @nullable */
+  aiConfidence?: number | null;
+  /** @nullable */
+  aiRiskScore?: number | null;
+  isAutonomous?: boolean;
+  /** @nullable */
+  agentReasoning?: string | null;
+  createdAt: string;
+  /** @nullable */
+  closedAt?: string | null;
+  /** @nullable */
+  duration?: number | null;
+}
+
+export type TradeInputDirection = typeof TradeInputDirection[keyof typeof TradeInputDirection];
+
+
+export const TradeInputDirection = {
+  up: 'up',
+  down: 'down',
+} as const;
+
+export type TradeInputDurationUnit = typeof TradeInputDurationUnit[keyof typeof TradeInputDurationUnit];
+
+
+export const TradeInputDurationUnit = {
+  t: 't',
+  s: 's',
+  m: 'm',
+  h: 'h',
+  d: 'd',
+} as const;
+
+export interface TradeInput {
+  symbol: string;
+  contractType: string;
+  stake: number;
+  direction: TradeInputDirection;
+  barrier?: number | null;
+  isAutonomous?: boolean;
+  duration?: number;
+  durationUnit?: TradeInputDurationUnit;
+}
+
+export interface TradeStats {
+  totalTrades: number;
+  wonTrades: number;
+  lostTrades: number;
+  winRate: number;
+  totalProfit: number;
+  avgProfit: number;
+  bestTrade: number;
+  worstTrade: number;
+  currentStreak: number;
+  longestWinStreak: number;
+  longestLoseStreak: number;
+}
+
+export interface DailySummary {
+  date: string;
+  tradesCount: number;
+  wonCount: number;
+  lostCount: number;
+  totalProfit: number;
+  dailyTarget: number;
+  dailyLossLimit: number;
+  targetProgress: number;
+  isTargetMet: boolean;
+  isLossLimitHit: boolean;
+  balanceStart: number;
+  balanceNow: number;
+}
+
+export interface WinRatePoint {
+  date: string;
+  winRate: number;
+  tradeCount: number;
+}
+
+export interface ProfitPoint {
+  date: string;
+  cumulativeProfit: number;
+  dailyProfit: number;
+}
+
+export interface ConfidenceByOutcome {
+  avgConfidenceWon: number;
+  avgConfidenceLost: number;
+}
+
+export interface PerformanceAnalytics {
+  days: number;
+  winRateHistory: WinRatePoint[];
+  profitCurve: ProfitPoint[];
+  avgConfidenceByOutcome: ConfidenceByOutcome;
+}
+
+export interface DrawdownAnalysis {
+  currentDrawdown: number;
+  maxDrawdown: number;
+  drawdownLimit: number;
+  isAtRisk: boolean;
+  riskExposure: number;
+  consecutiveLosses: number;
+  consecutiveLossLimit: number;
+}
+
+export interface MarketBreakdown {
+  symbol: string;
+  displayName: string;
+  tradeCount: number;
+  winRate: number;
+  totalProfit: number;
+  avgStake: number;
+}
+
+export interface AgentScoreRecord {
+  date: string;
+  agentName: string;
+  predictedScore: number;
+  actualOutcome: string;
+  accuracy: number;
+}
+
+export type AiInsightType = typeof AiInsightType[keyof typeof AiInsightType];
+
+
+export const AiInsightType = {
+  improvement: 'improvement',
+  warning: 'warning',
+  pattern: 'pattern',
+  milestone: 'milestone',
+} as const;
+
+export type AiInsightPriority = typeof AiInsightPriority[keyof typeof AiInsightPriority];
+
+
+export const AiInsightPriority = {
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  critical: 'critical',
+} as const;
+
+export interface AiInsight {
+  id: number;
+  type: AiInsightType;
+  title: string;
+  description: string;
+  priority: AiInsightPriority;
+  actionable: boolean;
+  /** @nullable */
+  relatedMarket?: string | null;
+}
+
+export type AiEngineStatusMode = typeof AiEngineStatusMode[keyof typeof AiEngineStatusMode];
+
+
+export const AiEngineStatusMode = {
+  manual: 'manual',
+  autonomous: 'autonomous',
+} as const;
+
+export interface AgentStatus {
+  name: string;
+  isActive: boolean;
+  /** @nullable */
+  lastRun: string | null;
+  confidence: number;
+}
+
+export interface AiEngineStatus {
+  isRunning: boolean;
+  mode: AiEngineStatusMode;
+  agentStatuses: AgentStatus[];
+  tradesExecutedToday: number;
+  /** @nullable */
+  currentMarket: string | null;
+  /** @nullable */
+  nextScanIn: number | null;
+  stopReasons: string[];
+  /**
+     * ISO timestamp when the cooldown ends and engine auto-resumes
+     * @nullable
+     */
+  cooldownUntil?: string | null;
+}
+
+export interface EngineToggleInput {
+  running: boolean;
+}
+
+export type TradingSettingsRiskProfile = typeof TradingSettingsRiskProfile[keyof typeof TradingSettingsRiskProfile];
+
+
+export const TradingSettingsRiskProfile = {
+  conservative: 'conservative',
+  moderate: 'moderate',
+  aggressive: 'aggressive',
+} as const;
+
+export interface TradingSettings {
+  id: number;
+  riskProfile: TradingSettingsRiskProfile;
+  /** Max % of balance per trade */
+  maxRiskPerTrade: number;
+  /** Daily profit target in account currency */
+  dailyTarget: number;
+  /** Max daily loss in account currency */
+  dailyLossLimit: number;
+  /** Max drawdown % before stopping */
+  maxDrawdown: number;
+  consecutiveLossLimit: number;
+  /** Min AI confidence to allow trade */
+  minConfidenceThreshold: number;
+  /** Rotate market after N consecutive trades */
+  marketRotationAfter: number;
+  preferredContractTypes: string[];
+  preferredCategories: string[];
+  autonomousEnabled: boolean;
+  /** Seconds between autonomous scan cycles */
+  loopIntervalSec: number;
+  /** Enable conservative stake recovery after losses */
+  recoveryMode: boolean;
+  /** Stake multiplier after a loss (e.g. 1.2 = 20% increase) */
+  recoveryMultiplier: number;
+  /** Max consecutive recovery multiplications before reset */
+  maxRecoverySteps: number;
+  /** Scan all available markets in parallel */
+  scanAllMarkets: boolean;
+  /** Trade contract duration in ticks */
+  tradeDurationSec: number;
+  maxTradeStake: number;
+  /** Log trades without sending live orders to Deriv */
+  paperTradeMode?: boolean;
+  /** Only execute when expected value is positive */
+  requirePositiveEv?: boolean;
+  /** Minutes to wait before auto-resuming after consecutive loss stop */
+  cooldownMinutes?: number;
+}
+
+export type TradingSettingsInputRiskProfile = typeof TradingSettingsInputRiskProfile[keyof typeof TradingSettingsInputRiskProfile];
+
+
+export const TradingSettingsInputRiskProfile = {
+  conservative: 'conservative',
+  moderate: 'moderate',
+  aggressive: 'aggressive',
+} as const;
+
+export interface TradingSettingsInput {
+  riskProfile?: TradingSettingsInputRiskProfile;
+  maxRiskPerTrade?: number;
+  dailyTarget?: number;
+  dailyLossLimit?: number;
+  maxDrawdown?: number;
+  consecutiveLossLimit?: number;
+  minConfidenceThreshold?: number;
+  marketRotationAfter?: number;
+  preferredContractTypes?: string[];
+  preferredCategories?: string[];
+  autonomousEnabled?: boolean;
+  loopIntervalSec?: number;
+  recoveryMode?: boolean;
+  recoveryMultiplier?: number;
+  maxRecoverySteps?: number;
+  scanAllMarkets?: boolean;
+  tradeDurationSec?: number;
+  maxTradeStake?: number;
+  paperTradeMode?: boolean;
+  requirePositiveEv?: boolean;
+  cooldownMinutes?: number;
+}
+
+export type GetMarketsParams = {
+/**
+ * Filter by market category
+ */
+category?: GetMarketsCategory;
+limit?: number;
+};
+
+export type GetMarketsCategory = typeof GetMarketsCategory[keyof typeof GetMarketsCategory];
+
+
+export const GetMarketsCategory = {
+  all: 'all',
+  synthetic: 'synthetic',
+  forex: 'forex',
+  commodities: 'commodities',
+  derived: 'derived',
+} as const;
+
+export type GetTradesParams = {
+status?: GetTradesStatus;
+market?: string;
+limit?: number;
+offset?: number;
+};
+
+export type GetTradesStatus = typeof GetTradesStatus[keyof typeof GetTradesStatus];
+
+
+export const GetTradesStatus = {
+  all: 'all',
+  won: 'won',
+  lost: 'lost',
+  open: 'open',
+} as const;
+
+export type GetPerformanceAnalyticsParams = {
+days?: number;
+};
+

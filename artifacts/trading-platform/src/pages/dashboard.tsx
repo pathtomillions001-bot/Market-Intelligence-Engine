@@ -1,52 +1,57 @@
 import { useState, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
-  useGetDailySummary,
   useGetTopMarket,
   useGetAiEngineStatus,
   useGetAiInsights,
   useGetAccount,
+  useGetDailySummary,
   useExecuteTrade,
   useToggleAutonomousEngine,
-  useGetTradeStats,
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
 import { Link } from "wouter";
-import { TrendingUp, Activity, Shield, AlertTriangle, Target, ChevronRight, Clock, RefreshCw, Calendar, BarChart2 } from "lucide-react";
+import { TrendingUp, Activity, Shield, AlertTriangle, Target, ChevronRight, Clock, RefreshCw, TimerOff } from "lucide-react";
 import { toast } from "sonner";
 import { MarketOpportunityFlashCard } from "@/components/flash-card-3d";
 
-function ConfidenceRing({ value, size = 56 }: { value: number; size?: number }) {
-  const r = size / 2 - 6;
-  const circ = 2 * Math.PI * r;
-  const offset = circ - (value / 100) * circ;
-  const color = value >= 70 ? "#10b981" : value >= 50 ? "#f59e0b" : "#ef4444";
-  return (
-    <svg width={size} height={size} className="rotate-[-90deg]">
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#27272a" strokeWidth={5} />
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={5}
-        strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
-        style={{ transition: "stroke-dashoffset 0.6s ease" }} />
-      <text x="50%" y="50%" dominantBaseline="middle" textAnchor="middle"
-        fill={color} fontSize={size * 0.22} fontFamily="monospace"
-        style={{ transform: "rotate(90deg)", transformOrigin: "center" }}>
-        {value.toFixed(0)}%
-      </text>
-    </svg>
-  );
+interface JournalStats {
+  totalTrades: number;
+  wonTrades: number;
+  lostTrades: number;
+  winRate: number;
+  totalProfit: number;
+  todayProfit: number;
+  currentStreak: number;
+}
+
+function formatCooldown(secs: number): string {
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  if (m > 0) return `${m}m ${s.toString().padStart(2, "0")}s`;
+  return `${s}s`;
 }
 
 export default function Dashboard() {
   const { data: summary } = useGetDailySummary({ query: { refetchInterval: 5000 } } as { query: any });
   const { data: topMarket } = useGetTopMarket({ query: { refetchInterval: 8000 } } as { query: any });
   const { data: engine, refetch: refetchEngine } = useGetAiEngineStatus({ query: { refetchInterval: 3000 } } as { query: any });
-  const { data: stats } = useGetTradeStats({ query: { refetchInterval: 10000 } } as { query: any });
   const { data: insights } = useGetAiInsights({ query: { refetchInterval: 30000 } } as { query: any });
   const { data: account } = useGetAccount();
   const executeTrade = useExecuteTrade();
   const toggleEngine = useToggleAutonomousEngine();
+
+  // Journal stats — same source as the Trade Journal mini dashboard
+  const { data: journalData } = useQuery({
+    queryKey: ["derivJournal"],
+    queryFn: () => fetch("/api/trades/deriv-journal").then(r => r.json()),
+    refetchInterval: 15000,
+    staleTime: 5000,
+  });
+  const stats: JournalStats | undefined = (journalData as any)?.stats;
 
   // Live countdown to next autonomous trade
   const [countdown, setCountdown] = useState<number | null>(null);
@@ -62,16 +67,23 @@ export default function Dashboard() {
     return () => clearInterval(iv);
   }, [engine?.isRunning, engine?.nextScanIn]);
 
-  // Today-only vs all-time filter
-  const [todayOnly, setTodayOnly] = useState(true);
+  // Cooldown countdown — counts down until engine auto-resumes
+  const [cooldownSecs, setCooldownSecs] = useState<number | null>(null);
+  useEffect(() => {
+    const cooldownUntilStr = (engine as any)?.cooldownUntil;
+    if (!cooldownUntilStr) { setCooldownSecs(null); return; }
+    const target = new Date(cooldownUntilStr).getTime();
+    const update = () => {
+      const remaining = Math.max(0, Math.ceil((target - Date.now()) / 1000));
+      setCooldownSecs(remaining > 0 ? remaining : null);
+    };
+    update();
+    const iv = setInterval(update, 1000);
+    return () => clearInterval(iv);
+  }, [(engine as any)?.cooldownUntil]);
 
   const targetPct = summary ? Math.max(0, Math.min(100, (summary.totalProfit / summary.dailyTarget) * 100)) : 0;
   const isProfit = (summary?.totalProfit ?? 0) >= 0;
-
-  // Compute today-only derived stats
-  const todayTrades = (summary?.wonCount ?? 0) + (summary?.lostCount ?? 0);
-  const todayWinRate = todayTrades > 0 ? ((summary?.wonCount ?? 0) / todayTrades) * 100 : 0;
-  const todayProfit = summary?.totalProfit ?? 0;
 
   const handleQuickTrade = () => {
     if (!topMarket) return;
@@ -95,11 +107,11 @@ export default function Dashboard() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
           <div className="flex items-center gap-2 mt-1">
-            <div className={`w-1.5 h-1.5 rounded-full ${engine?.isRunning ? "bg-green-500 animate-pulse" : "bg-zinc-600"}`} />
+            <div className={`w-1.5 h-1.5 rounded-full ${engine?.isRunning ? "bg-green-500 animate-pulse" : cooldownSecs ? "bg-amber-500 animate-pulse" : "bg-zinc-600"}`} />
             <p className="text-muted-foreground font-mono text-xs">
-              {engine?.isRunning ? "ENGINE ONLINE" : "ENGINE STANDBY"} &bull; {engine?.mode?.toUpperCase() ?? "MANUAL"} MODE
-              {(engine as any)?.paperTradeMode && " &bull; PAPER"}
-              {(engine as any)?.tickHealth?.usingSimulated && " &bull; SIM DATA"}
+              {engine?.isRunning ? "ENGINE ONLINE" : cooldownSecs ? "COOLDOWN" : "ENGINE STANDBY"} &bull; {engine?.mode?.toUpperCase() ?? "MANUAL"} MODE
+              {(engine as any)?.paperTradeMode && " · PAPER"}
+              {(engine as any)?.tickHealth?.usingSimulated && " · SIM DATA"}
             </p>
           </div>
         </div>
@@ -119,80 +131,88 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* Stat strip with Today/All-time toggle */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
-            {todayOnly ? "Today's Stats" : "All-Time Stats"}
-          </span>
-          <button
-            onClick={() => setTodayOnly(!todayOnly)}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border transition-all ${
-              todayOnly
-                ? "bg-primary/10 border-primary/30 text-primary"
-                : "bg-secondary/40 border-border text-muted-foreground hover:text-foreground"
-            }`}
+      {/* Cooldown banner — shown when engine is in cooldown after consecutive losses */}
+      <AnimatePresence>
+        {cooldownSecs !== null && !engine?.isRunning && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            className="flex items-center gap-4 p-4 rounded-xl bg-amber-500/8 border border-amber-500/30"
           >
-            {todayOnly ? <Calendar className="w-3 h-3" /> : <BarChart2 className="w-3 h-3" />}
-            {todayOnly ? "Today Only" : "All Time"}
-          </button>
-        </div>
+            <div className="flex items-center gap-2 flex-1">
+              <TimerOff className="w-4 h-4 text-amber-400 flex-shrink-0" />
+              <div>
+                <div className="text-sm font-medium text-amber-300">Engine in Cooldown</div>
+                <div className="text-xs text-amber-400/70 mt-0.5">
+                  {engine?.stopReasons?.[0] ?? "Consecutive losses triggered a safety pause"}
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-col items-end gap-1">
+              <div className="text-2xl font-mono font-bold text-amber-300 tabular-nums">
+                {formatCooldown(cooldownSecs)}
+              </div>
+              <div className="text-[10px] font-mono text-amber-500/60 uppercase tracking-wider">until auto-resume</div>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-xs h-7 px-3 border-amber-500/40 text-amber-400 hover:bg-amber-500/10 flex-shrink-0"
+              onClick={() => toggleEngine.mutate({ data: { running: true } })}
+              disabled={toggleEngine.isPending}
+            >
+              Resume Now
+            </Button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Stat strip — mirrors the Trade Journal mini dashboard */}
+      <div className="space-y-2">
+        <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Performance</span>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Card className="bg-card">
             <CardContent className="p-4">
-              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">{todayOnly ? "Today P&L" : "All-Time P&L"}</div>
-              <div className={`text-2xl font-mono font-bold ${(todayOnly ? todayProfit : (stats?.totalProfit ?? 0)) >= 0 ? "text-green-500" : "text-red-500"}`}>
-                {(todayOnly ? todayProfit : (stats?.totalProfit ?? 0)) >= 0 ? "+" : ""}
-                {todayOnly ? todayProfit.toFixed(2) : (stats?.totalProfit?.toFixed(2) ?? "0.00")}
+              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Win Rate</div>
+              <div className={`text-2xl font-mono font-bold ${(stats?.winRate ?? 0) >= 0.55 ? "text-green-500" : (stats?.winRate ?? 0) >= 0.45 ? "text-amber-500" : "text-red-500"}`}>
+                {stats ? `${(stats.winRate * 100).toFixed(1)}%` : "—"}
               </div>
               <div className="text-xs text-muted-foreground mt-1">
-                {todayOnly
-                  ? `${summary?.wonCount ?? 0}W / ${summary?.lostCount ?? 0}L today`
-                  : `best: +${stats?.bestTrade?.toFixed(2) ?? "0.00"}`}
+                {stats ? `${stats.wonTrades}W / ${stats.lostTrades}L` : "no trades yet"}
               </div>
             </CardContent>
           </Card>
           <Card className="bg-card">
             <CardContent className="p-4">
-              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Win Rate</div>
-              <div className="text-2xl font-mono font-bold">
-                {todayOnly
-                  ? (todayTrades > 0 ? todayWinRate.toFixed(1) : "—")
-                  : (stats?.winRate ? (stats.winRate * 100).toFixed(1) : "—")}%
+              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Total Profit</div>
+              <div className={`text-2xl font-mono font-bold ${(stats?.totalProfit ?? 0) >= 0 ? "text-green-500" : "text-red-500"}`}>
+                {stats ? `${stats.totalProfit >= 0 ? "+" : ""}${stats.totalProfit.toFixed(2)}` : "—"}
               </div>
               <div className="text-xs text-muted-foreground mt-1">
-                {todayOnly ? `${todayTrades} trades today` : `${stats?.totalTrades ?? 0} total trades`}
+                today: {stats ? `${stats.todayProfit >= 0 ? "+" : ""}${stats.todayProfit.toFixed(2)}` : "—"}
               </div>
             </CardContent>
           </Card>
           <Card className="bg-card">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Streak</div>
-              {(() => {
-                const streak = todayOnly
-                  ? ((summary as any)?.currentStreak ?? 0)
-                  : (stats?.currentStreak ?? 0);
-                return (
-                  <>
-                    <div className={`text-2xl font-mono font-bold ${streak >= 0 ? "text-green-500" : "text-red-500"}`}>
-                      {streak > 0 ? "+" : ""}{streak}
-                    </div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      {todayOnly ? "today's" : "all-time"} {streak >= 0 ? "winning" : "losing"} streak
-                    </div>
-                  </>
-                );
-              })()}
+              <div className={`text-2xl font-mono font-bold ${(stats?.currentStreak ?? 0) >= 0 ? "text-green-500" : "text-red-500"}`}>
+                {stats ? `${stats.currentStreak > 0 ? "+" : ""}${stats.currentStreak}` : "—"}
+              </div>
+              <div className="text-xs text-muted-foreground mt-1">
+                {stats ? ((stats.currentStreak ?? 0) >= 0 ? "winning streak" : "losing streak") : "no data"}
+              </div>
             </CardContent>
           </Card>
           <Card className="bg-card">
             <CardContent className="p-4">
-              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">{todayOnly ? "Today Trades" : "Total Trades"}</div>
+              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Total Trades</div>
               <div className="text-2xl font-mono font-bold">
-                {todayOnly ? todayTrades : (stats?.totalTrades ?? 0)}
+                {stats?.totalTrades ?? "—"}
               </div>
               <div className="text-xs text-muted-foreground mt-1">
-                {todayOnly ? `${summary?.wonCount ?? 0}W ${summary?.lostCount ?? 0}L` : `${stats?.winRate ? (stats.winRate * 100).toFixed(1) : "—"}% win rate`}
+                {stats ? `${(stats.winRate * 100).toFixed(1)}% win rate` : "no trades yet"}
               </div>
             </CardContent>
           </Card>
@@ -292,7 +312,7 @@ export default function Dashboard() {
                 </div>
               </motion.div>
             )}
-            {!engine?.isRunning && engine?.stopReasons && engine.stopReasons.length > 0 && (
+            {!engine?.isRunning && !cooldownSecs && engine?.stopReasons && engine.stopReasons.length > 0 && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}

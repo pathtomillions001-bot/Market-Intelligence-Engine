@@ -23,6 +23,9 @@ let loopIntervalSec = 5;
 let lastTradeTime: Date | null = null;
 // Concurrency guard — prevents two loop iterations from running simultaneously
 let isLoopRunning = false;
+// Cooldown state — set when engine stops due to consecutive losses
+let cooldownUntil: Date | null = null;
+let cooldownResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
 let exploitSymbol: string | null = null;
 let exploitCount = 0;
@@ -172,7 +175,7 @@ setInterval(() => {
 }, 200);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function stopEngine(reason: string) {
+function stopEngine(reason: string, cooldownMinutes?: number) {
   engineRunning = false;
   autonomousMode = "manual";
   stopReasons = [reason];
@@ -180,9 +183,34 @@ function stopEngine(reason: string) {
   nextScanIn = null;
   exploitSymbol = null;
   exploitCount = 0;
+  isLoopRunning = false;
   if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
-  logger.info({ reason }, "Autonomous engine stopped");
-  broadcastSSE("engine_stopped", { reason });
+
+  // Clear any existing cooldown timer
+  if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
+
+  if (cooldownMinutes && cooldownMinutes > 0) {
+    cooldownUntil = new Date(Date.now() + cooldownMinutes * 60 * 1000);
+    cooldownResumeTimer = setTimeout(() => {
+      cooldownUntil = null;
+      cooldownResumeTimer = null;
+      // Auto-resume engine
+      engineRunning = true;
+      autonomousMode = "autonomous";
+      stopReasons = [];
+      nextScanIn = loopIntervalSec;
+      exploitSymbol = null;
+      exploitCount = 0;
+      logger.info("Cooldown expired — autonomous engine auto-resuming");
+      broadcastSSE("engine_started", { reason: "cooldown_expired" });
+      autonomousTimer = setTimeout(runAutonomousLoop, 1000);
+    }, cooldownMinutes * 60 * 1000);
+    logger.info({ reason, cooldownMinutes, cooldownUntil }, "Engine stopped with cooldown");
+  } else {
+    cooldownUntil = null;
+    logger.info({ reason }, "Autonomous engine stopped");
+  }
+  broadcastSSE("engine_stopped", { reason, cooldownUntil: cooldownUntil?.toISOString() ?? null });
 }
 
 async function syncLiveBalance(token: string) {
@@ -240,7 +268,11 @@ async function runAutonomousLoop() {
     // Hard stop conditions (also handled inside risk manager, but stop the loop early)
     if (todayProfit <= -tradingSettings.dailyLossLimit) { stopEngine(`Daily loss limit $${tradingSettings.dailyLossLimit} reached`); return; }
     if (todayProfit >= tradingSettings.dailyTarget) { stopEngine(`Daily target $${tradingSettings.dailyTarget} reached!`); return; }
-    if (consecutiveLosses >= tradingSettings.consecutiveLossLimit) { stopEngine(`${consecutiveLosses} consecutive losses — cooldown`); return; }
+    if (consecutiveLosses >= tradingSettings.consecutiveLossLimit) {
+      const cooldownMins = settings?.cooldownMinutes ?? 30;
+      stopEngine(`${consecutiveLosses} consecutive losses — cooling down for ${cooldownMins}m`, cooldownMins);
+      return;
+    }
 
     // ── Market selection ─────────────────────────────────────────────────────
     let bestResult: { market: typeof availableMarkets[0]; output: Awaited<ReturnType<typeof runCoordinator>>; ctx: ScanContext } | null = null;
@@ -739,6 +771,7 @@ router.get("/engine/status", async (_req, res): Promise<void> => {
     tickHealth: tickManager.getTickHealth(),
     paperTradeMode: settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false,
     requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
+    cooldownUntil: cooldownUntil?.toISOString() ?? null,
   });
 });
 
@@ -751,6 +784,9 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
   if (settings.length > 0 && settings[0].loopIntervalSec) loopIntervalSec = settings[0].loopIntervalSec;
 
   if (running) {
+    // Clear any active cooldown when manually starting
+    if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
+    cooldownUntil = null;
     engineRunning = true; autonomousMode = "autonomous"; stopReasons = []; nextScanIn = loopIntervalSec;
     exploitSymbol = null; exploitCount = 0;
     if (settings.length > 0) await db.update(settingsTable).set({ autonomousEnabled: true });
@@ -761,6 +797,8 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     engineRunning = false; autonomousMode = "manual"; currentMarket = null; nextScanIn = null;
     exploitSymbol = null; lastAgentScores = {};
     if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
+    if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
+    cooldownUntil = null;
     if (settings.length > 0) await db.update(settingsTable).set({ autonomousEnabled: false });
   }
 
@@ -779,6 +817,7 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     tickHealth: tickManager.getTickHealth(),
     paperTradeMode: settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false,
     requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
+    cooldownUntil: cooldownUntil?.toISOString() ?? null,
   });
 });
 

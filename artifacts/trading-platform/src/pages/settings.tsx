@@ -79,6 +79,7 @@ export default function Settings() {
     dailyLossLimit: 30,
     maxDrawdown: 10,
     consecutiveLossLimit: 3,
+    cooldownMinutes: 30,
     marketRotationAfter: 5,
     tradeDurationSec: 5,
     maxTradeStake: 500,
@@ -103,6 +104,7 @@ export default function Settings() {
         dailyLossLimit: settings.dailyLossLimit,
         maxDrawdown: settings.maxDrawdown,
         consecutiveLossLimit: settings.consecutiveLossLimit,
+        cooldownMinutes: (settings as any).cooldownMinutes ?? 30,
         marketRotationAfter: settings.marketRotationAfter,
         tradeDurationSec: (settings as any).tradeDurationSec ?? 5,
         maxTradeStake: (settings as any).maxTradeStake ?? 500,
@@ -218,6 +220,9 @@ export default function Settings() {
           </SettingRow>
           <SettingRow label="Consecutive Loss Limit" description="Pause after this many losses in a row.">
             <NumInput value={form.consecutiveLossLimit} onChange={(v) => set("consecutiveLossLimit", v)} min={1} max={20} />
+          </SettingRow>
+          <SettingRow label="Cooldown Duration" description="Minutes before engine auto-resumes after a consecutive-loss stop.">
+            <NumInput value={form.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} min={1} max={1440} step={5} suffix="min" />
           </SettingRow>
         </CardContent>
       </Card>
