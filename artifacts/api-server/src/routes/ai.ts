@@ -505,6 +505,7 @@ async function runAutonomousLoop() {
           .where(eq(tradesTable.id, openTrade.id));
         broadcastSSE("trade_completed", { id: openTrade.id, symbol: bestMarket.symbol, won: false,
           profit: (-stake).toFixed(2), contract: effectiveContractType, error: errMsg });
+        journalManager.forceRefresh();
         scheduleNext(false);
         return;
       }
@@ -542,6 +543,8 @@ async function runAutonomousLoop() {
       ev: analysis.expectedValue,
       regime: output.regime,
     });
+    // Force-refresh the Deriv journal immediately so dashboard stats update right away
+    if (!paperTradeMode && token) journalManager.forceRefresh();
     logger.info({
       symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
       stake, ev: analysis.expectedValue,

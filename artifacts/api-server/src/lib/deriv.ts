@@ -834,6 +834,13 @@ class DerivJournalManager extends EventEmitter {
     return this.lastFetchMs > 0 && (Date.now() - this.lastFetchMs) < maxAgeMs;
   }
 
+  /** Immediately request a fresh profit_table — call after any trade settles. */
+  forceRefresh() {
+    if (this.isAuthorized && this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 200 }));
+    }
+  }
+
   private stopTimers() {
     if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
     if (this.refreshTimer) { clearInterval(this.refreshTimer); this.refreshTimer = null; }

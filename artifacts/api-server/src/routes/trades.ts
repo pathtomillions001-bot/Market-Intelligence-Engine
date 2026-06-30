@@ -370,6 +370,8 @@ router.post("/", async (req, res): Promise<void> => {
         aiConfidence: winProbability, isAutonomous: isAutonomous ?? false, source: "live",
       }
     });
+    // Immediately refresh the Deriv profit_table so journal + streak reflect this trade
+    journalManager.forceRefresh();
     res.status(201).json(formatTrade(closedTrade));
     return;
   }

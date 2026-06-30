@@ -5,6 +5,13 @@ import { toast } from "sonner";
 import { Zap, TrendingUp, TrendingDown, ChevronDown, ChevronUp } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
+// ── Contract type groups ────────────────────────────────────────────────────────
+const CONTRACT_GROUPS = [
+  { label: "Rise / Fall",  short: "R/F", types: ["CALL", "PUT"] },
+  { label: "Over / Under", short: "O/U", types: ["DIGITOVER", "DIGITUNDER"] },
+  { label: "Even / Odd",   short: "E/O", types: ["DIGITEVEN", "DIGITODD"] },
+] as const;
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function formatContractLabel(contractType?: string, barrier?: number | null): string {
   if (!contractType) return "—";
@@ -32,87 +39,101 @@ function contractColor(ct: string): string {
   return "#00ffff";
 }
 
-function ConfidenceArc({ value }: { value: number }) {
-  const r = 32, circ = Math.PI * r;
-  const offset = circ - (value / 100) * circ;
-  const color = value >= 70 ? "#10b981" : value >= 50 ? "#f59e0b" : "#ef4444";
-  return (
-    <svg width="76" height="44" viewBox="0 0 76 44">
-      <path d="M 6 42 A 32 32 0 0 1 70 42" fill="none" stroke="#27272a" strokeWidth="5" strokeLinecap="round" />
-      <path d="M 6 42 A 32 32 0 0 1 70 42" fill="none" stroke={color} strokeWidth="5" strokeLinecap="round"
-        strokeDasharray={circ} strokeDashoffset={offset}
-        style={{ transition: "stroke-dashoffset 0.8s ease, stroke 0.4s" }} />
-      <text x="38" y="40" textAnchor="middle" fill={color} fontSize="12" fontFamily="monospace" fontWeight="bold">
-        {value.toFixed(0)}%
-      </text>
-    </svg>
-  );
-}
-
-// ── FlashCard3D kept for compatibility (no longer used for flip) ───────────────
+// ── FlashCard3D kept for compatibility ────────────────────────────────────────
 export function FlashCard3D({ front }: { front: React.ReactNode; back?: React.ReactNode; flipped?: boolean; onFlip?: () => void; className?: string; glowColor?: string }) {
   return <div className="w-full h-full">{front}</div>;
 }
 
-// ── Quick Strike Card ──────────────────────────────────────────────────────────
-interface MarketOpportunityCardProps {
-  topMarket?: any;
-  onTrade?: () => void;
-  isTradePending?: boolean;
+// ── Win probability bar ────────────────────────────────────────────────────────
+function WinProbBar({ value }: { value: number }) {
+  const color = value >= 65 ? "#10b981" : value >= 50 ? "#f59e0b" : "#ef4444";
+  return (
+    <div className="flex flex-col items-center gap-0.5 w-14">
+      <div className="text-xs font-mono font-bold" style={{ color }}>{value.toFixed(0)}%</div>
+      <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden">
+        <div
+          className="h-full rounded-full transition-all duration-700"
+          style={{ width: `${Math.min(value, 100)}%`, background: color }}
+        />
+      </div>
+      <div className="text-[8px] font-mono text-muted-foreground">WIN PROB</div>
+    </div>
+  );
 }
 
-export function MarketOpportunityFlashCard({ onTrade }: MarketOpportunityCardProps) {
+// ── Quick Strike Card ──────────────────────────────────────────────────────────
+export function MarketOpportunityFlashCard({ onTrade }: { onTrade?: () => void }) {
+  const [selectedGroupIdx, setSelectedGroupIdx] = useState(0);
   const [executingSymbol, setExecutingSymbol] = useState<string | null>(null);
   const [showMarkets, setShowMarkets] = useState(false);
 
   const executeTrade = useExecuteTrade();
+  const selectedGroup = CONTRACT_GROUPS[selectedGroupIdx];
 
+  // All markets ranked by quality score from background scanner
   const { data: allMarkets } = useQuery<any[]>({
     queryKey: ["markets", "ranked-all"],
     queryFn: () => fetch("/api/markets?limit=50").then(r => r.json()),
     refetchInterval: 8000,
   });
 
-  const { data: bestRec } = useQuery<any>({
-    queryKey: ["ai", "best-recommendation"],
-    queryFn: () => fetch("/api/ai/recommendation").then(r => r.json()),
+  // Filter to markets whose AI-recommended contract type is in the selected group
+  const groupMarkets = (allMarkets ?? []).filter((m: any) =>
+    (selectedGroup.types as readonly string[]).includes(m.recommendedContractType)
+  );
+  const tradeableGroupMarkets = groupMarkets.filter((m: any) => m.shouldTrade);
+
+  // Best market: tradeable first, then by quality score
+  const bestGroupMarket = tradeableGroupMarkets[0] ?? groupMarkets[0] ?? allMarkets?.[0];
+
+  // Fetch full recommendation for the selected market (AI-configured ticks, stake, barrier)
+  const { data: marketDetail } = useQuery<any>({
+    queryKey: ["market-detail-flash", bestGroupMarket?.symbol, selectedGroupIdx],
+    queryFn: () => bestGroupMarket?.symbol
+      ? fetch(`/api/markets/${bestGroupMarket.symbol}`).then(r => r.json())
+      : Promise.resolve(null),
     refetchInterval: 8000,
+    enabled: !!bestGroupMarket?.symbol,
   });
 
-  const tradeableMarkets = (allMarkets ?? []).filter((m: any) => m.shouldTrade);
-  const top5 = tradeableMarkets.slice(0, 5);
-  const bestMarket = allMarkets?.find((m: any) => m.symbol === bestRec?.symbol) ?? allMarkets?.[0];
-  const rec = bestRec;
+  const rec = marketDetail?.recommendation;
 
-  const conf = rec?.confidence ?? 0;
-  const contractType: string = rec?.contractType ?? bestMarket?.recommendedContractType ?? "CALL";
+  // Contract type: use AI recommendation if it matches the selected group, else default to first in group
+  const recContractType: string = rec?.contractType ?? bestGroupMarket?.recommendedContractType ?? selectedGroup.types[0];
+  const contractType = (selectedGroup.types as readonly string[]).includes(recContractType)
+    ? recContractType
+    : selectedGroup.types[0];
+
+  // Execute is active only if AI says shouldTrade=true AND the recommended type matches the selected group
+  const isGroupMatch = (selectedGroup.types as readonly string[]).includes(rec?.contractType ?? "");
+  const shouldTrade = !!(rec?.shouldTrade && isGroupMatch);
+
   const ctColor = contractColor(contractType);
   const isUp = contractToDirection(contractType) === "up";
 
-  const handleExecute = (market: any, ct?: string, barrier?: number | null, stake?: number, direction?: string, duration?: number) => {
-    const sym = typeof market === "string" ? market : market?.symbol;
-    const finalCt = ct ?? market?.recommendedContractType ?? "CALL";
-    const finalStake = stake ?? rec?.stake ?? 1;
-    const finalDir = (direction ?? contractToDirection(finalCt)) as "up" | "down";
-    const finalBarrier = barrier ?? (finalCt.includes("DIGIT") && rec?.digitBarrier != null ? rec.digitBarrier : undefined);
-    const finalDuration = duration ?? rec?.recommendedDuration ?? 5;
+  const winProb = rec?.winProbability ?? rec?.confidence ?? 0;
+  const isExecuting = executingSymbol === bestGroupMarket?.symbol;
 
+  const handleExecute = () => {
+    if (!bestGroupMarket || !rec) return;
+    const sym = bestGroupMarket.symbol;
+    const barrier = contractType.includes("DIGIT") && rec.digitBarrier != null ? rec.digitBarrier : undefined;
     setExecutingSymbol(sym);
     executeTrade.mutate({
       data: {
         symbol: sym,
-        contractType: finalCt,
-        stake: finalStake,
-        direction: finalDir,
-        ...(finalBarrier != null && { barrier: finalBarrier }),
-        duration: finalDuration,
+        contractType,
+        stake: rec.stake ?? 1,
+        direction: contractToDirection(contractType),
+        ...(barrier != null && { barrier }),
+        duration: rec.recommendedDuration ?? 5,
         durationUnit: "t",
       } as any
     }, {
       onSuccess: (trade: any) => {
         const won = trade.status === "won";
         toast[won ? "success" : "error"](
-          `${won ? "✓ Won" : "✗ Lost"} $${Math.abs(Number(trade.profit ?? 0)).toFixed(2)} on ${market?.displayName ?? sym}`
+          `${won ? "✓ Won" : "✗ Lost"} $${Math.abs(Number(trade.profit ?? 0)).toFixed(2)} on ${bestGroupMarket.displayName}`
         );
         setExecutingSymbol(null);
         onTrade?.();
@@ -123,8 +144,6 @@ export function MarketOpportunityFlashCard({ onTrade }: MarketOpportunityCardPro
       }
     });
   };
-
-  const isExecuting = executingSymbol === bestMarket?.symbol;
 
   return (
     <div
@@ -151,19 +170,37 @@ export function MarketOpportunityFlashCard({ onTrade }: MarketOpportunityCardPro
       }} />
 
       <div className="relative z-10 p-4 flex flex-col gap-3 h-full">
-        {/* Header */}
+        {/* Header: label + contract group selector + live dot */}
         <div className="flex items-center gap-2">
           <Zap className="w-3.5 h-3.5 text-primary shrink-0" />
           <span className="text-[10px] font-mono uppercase tracking-widest text-primary/70">Quick Strike</span>
-          <span className="ml-auto w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+
+          {/* Contract group tab selector */}
+          <div className="ml-auto flex items-center bg-black/40 rounded-lg p-0.5 gap-0.5">
+            {CONTRACT_GROUPS.map((g, i) => (
+              <button
+                key={g.short}
+                onClick={() => { setSelectedGroupIdx(i); setShowMarkets(false); }}
+                className={`text-[8px] font-mono font-bold px-2 py-1 rounded transition-all ${
+                  i === selectedGroupIdx
+                    ? "text-primary border border-primary/50"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+                style={i === selectedGroupIdx ? { background: `${contractColor(g.types[0])}20` } : {}}
+              >
+                {g.short}
+              </button>
+            ))}
+          </div>
+          <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse ml-1" />
         </div>
 
-        {/* Main row: Market info | Confidence | Execute */}
+        {/* Market info + win prob + execute */}
         <div className="flex items-center gap-3">
-          {/* Left: Market info */}
+          {/* Left: market name + contract badge */}
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-bold leading-tight truncate">{bestMarket?.displayName ?? "Scanning…"}</div>
-            <div className="text-[10px] font-mono text-muted-foreground">{bestMarket?.symbol ?? "—"}</div>
+            <div className="text-sm font-bold leading-tight truncate">{bestGroupMarket?.displayName ?? "Scanning…"}</div>
+            <div className="text-[10px] font-mono text-muted-foreground">{bestGroupMarket?.symbol ?? "—"}</div>
             <div className="mt-2 flex items-center gap-1.5">
               {isUp
                 ? <TrendingUp className="w-3 h-3 shrink-0" style={{ color: ctColor }} />
@@ -174,26 +211,22 @@ export function MarketOpportunityFlashCard({ onTrade }: MarketOpportunityCardPro
               >
                 {formatContractLabel(contractType, rec?.digitBarrier ?? rec?.barrier)}
               </span>
-              <span className="text-[9px] text-muted-foreground font-mono capitalize truncate">{bestMarket?.regime?.replace(/_/g, " ") ?? ""}</span>
+              <span className="text-[9px] text-muted-foreground font-mono capitalize truncate">
+                {(bestGroupMarket?.regime ?? marketDetail?.regime ?? "").replace(/_/g, " ")}
+              </span>
             </div>
           </div>
 
-          {/* Center: Confidence arc */}
-          <div className="flex flex-col items-center shrink-0">
-            <ConfidenceArc value={conf} />
-            <div className="text-[8px] font-mono text-muted-foreground -mt-0.5">confidence</div>
-          </div>
+          {/* Center: win probability */}
+          <WinProbBar value={winProb} />
 
-          {/* Right: Execute button */}
+          {/* Right: execute button */}
           <div className="shrink-0">
             <button
-              onClick={() => {
-                if (!bestMarket || !rec) return;
-                handleExecute(bestMarket, contractType, rec.digitBarrier ?? rec.barrier, rec.stake, rec.direction, rec.recommendedDuration);
-              }}
-              disabled={!rec?.shouldTrade || isExecuting}
+              onClick={handleExecute}
+              disabled={!shouldTrade || isExecuting}
               className="flex flex-col items-center justify-center w-16 h-16 rounded-xl border-2 font-bold font-mono text-[10px] transition-all active:scale-[0.95] disabled:opacity-40 disabled:cursor-not-allowed"
-              style={rec?.shouldTrade ? {
+              style={shouldTrade ? {
                 borderColor: ctColor,
                 background: `${ctColor}20`,
                 color: ctColor,
@@ -205,7 +238,7 @@ export function MarketOpportunityFlashCard({ onTrade }: MarketOpportunityCardPro
             >
               {isExecuting ? (
                 <span className="text-[8px] leading-tight text-center">EXEC…</span>
-              ) : rec?.shouldTrade ? (
+              ) : shouldTrade ? (
                 <>
                   <span className="text-lg leading-none">⚡</span>
                   <span className="text-[8px] mt-0.5 uppercase tracking-widest">Execute</span>
@@ -220,10 +253,9 @@ export function MarketOpportunityFlashCard({ onTrade }: MarketOpportunityCardPro
           </div>
         </div>
 
-        {/* Stats row */}
-        <div className="grid grid-cols-4 gap-1.5">
+        {/* Stats row: EV | Ticks | Stake (win prob moved to center) */}
+        <div className="grid grid-cols-3 gap-1.5">
           {[
-            { label: "Win Prob", value: rec ? `${rec.winProbability?.toFixed(0) ?? conf.toFixed(0)}%` : "—" },
             { label: "EV", value: rec ? (rec.expectedValue > 0 ? `+$${rec.expectedValue.toFixed(2)}` : `$${rec.expectedValue?.toFixed(2) ?? "—"}`) : "—" },
             { label: "Ticks", value: rec ? `${rec.recommendedDuration ?? 5}t` : "—" },
             { label: "Stake", value: rec ? `$${rec.stake?.toFixed(2) ?? "—"}` : "—" },
@@ -235,24 +267,24 @@ export function MarketOpportunityFlashCard({ onTrade }: MarketOpportunityCardPro
           ))}
         </div>
 
-        {/* Footer: markets count + expand toggle */}
+        {/* Footer: count + expand */}
         <div className="flex items-center justify-between mt-auto">
           <span className="text-[9px] font-mono text-muted-foreground">
-            {allMarkets?.length ?? 0} markets scanned · {tradeableMarkets.length} tradeable
+            {allMarkets?.length ?? 0} markets scanned &middot; {tradeableGroupMarkets.length} tradeable in {selectedGroup.short}
           </span>
-          {top5.length > 0 && (
+          {groupMarkets.length > 1 && (
             <button
               onClick={() => setShowMarkets(s => !s)}
               className="flex items-center gap-1 text-[9px] font-mono text-primary/50 hover:text-primary transition-colors"
             >
-              Top 5 {showMarkets ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              Top {Math.min(groupMarkets.length, 5)} {showMarkets ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
             </button>
           )}
         </div>
 
-        {/* Expandable top-5 list */}
+        {/* Expandable group market list */}
         <AnimatePresence>
-          {showMarkets && (
+          {showMarkets && groupMarkets.length > 1 && (
             <motion.div
               initial={{ height: 0, opacity: 0 }}
               animate={{ height: "auto", opacity: 1 }}
@@ -261,8 +293,8 @@ export function MarketOpportunityFlashCard({ onTrade }: MarketOpportunityCardPro
               className="overflow-hidden"
             >
               <div className="space-y-1 pt-1 border-t border-white/[0.07]">
-                {top5.map((market: any, idx: number) => {
-                  const ct = market.recommendedContractType ?? "CALL";
+                {groupMarkets.slice(0, 5).map((market: any, idx: number) => {
+                  const ct = market.recommendedContractType ?? selectedGroup.types[0];
                   const ctCol = contractColor(ct);
                   const isExec = executingSymbol === market.symbol;
                   return (
@@ -275,9 +307,30 @@ export function MarketOpportunityFlashCard({ onTrade }: MarketOpportunityCardPro
                       >
                         {formatContractLabel(ct)}
                       </span>
-                      <span className="text-[9px] font-mono text-muted-foreground w-8 text-right">{market.confidenceScore?.toFixed(0) ?? 0}%</span>
+                      <span className="text-[9px] font-mono text-muted-foreground w-8 text-right">
+                        {market.confidenceScore?.toFixed(0) ?? 0}%
+                      </span>
                       <button
-                        onClick={() => handleExecute(market, ct, null, undefined, contractToDirection(ct))}
+                        onClick={() => {
+                          const sym = market.symbol;
+                          setExecutingSymbol(sym);
+                          executeTrade.mutate({
+                            data: {
+                              symbol: sym, contractType: ct,
+                              stake: rec?.stake ?? 1,
+                              direction: contractToDirection(ct),
+                              duration: rec?.recommendedDuration ?? 5,
+                              durationUnit: "t",
+                            } as any
+                          }, {
+                            onSuccess: (trade: any) => {
+                              const won = trade.status === "won";
+                              toast[won ? "success" : "error"](`${won ? "✓ Won" : "✗ Lost"} on ${market.displayName}`);
+                              setExecutingSymbol(null);
+                            },
+                            onError: () => { toast.error("Trade failed"); setExecutingSymbol(null); }
+                          });
+                        }}
                         disabled={isExec}
                         className="px-2 py-0.5 rounded text-[8px] font-bold font-mono border transition-all active:scale-[0.97] disabled:opacity-40"
                         style={{ background: `${ctCol}15`, borderColor: `${ctCol}50`, color: ctCol }}
