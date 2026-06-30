@@ -135,13 +135,29 @@ function predictGB(stumps: GBStump[], f: number[]): number {
 
 // ── Momentum-based feature estimate ───────────────────────────────────────────
 function momentumProb(pf: FeatureSet["price"]): number {
-  const base = pf.upFrac1 * 0.30 + pf.upFrac5 * 0.45 + pf.upFrac10 * 0.25;
-  const mom5Adj = Math.tanh(pf.momentum5 * 600) * 0.12;
-  const mom10Adj = Math.tanh(pf.momentum10 * 400) * 0.06;
-  const hurstMult = pf.hurst > 0.58 ? 1.35 : pf.hurst > 0.55 ? 1.15 : pf.hurst < 0.45 ? 0.75 : 1.0;
-  const acAdj = Math.tanh(pf.autocorr1 * 5) * 0.06;
-  const zAdj = pf.zScoreLast > 2.0 ? -0.04 : pf.zScoreLast < -2.0 ? 0.04 : 0;
-  return Math.max(0.15, Math.min(0.85, base + (mom5Adj + mom10Adj) * hurstMult + acAdj + zAdj));
+  // Weighted combination of recent up-fraction windows
+  const base = pf.upFrac1 * 0.20 + pf.upFrac5 * 0.50 + pf.upFrac10 * 0.30;
+
+  // Momentum adjustments — scaled more carefully to avoid overshooting
+  const mom5Adj  = Math.tanh(pf.momentum5 * 800)  * 0.10;
+  const mom10Adj = Math.tanh(pf.momentum10 * 500) * 0.08;
+
+  // Hurst multiplier: high Hurst (> 0.55) = trending → amplify signal
+  // low Hurst (< 0.45) = mean-reverting → attenuate (go AGAINST recent direction)
+  const hurstMult = pf.hurst > 0.58 ? 1.40 : pf.hurst > 0.55 ? 1.20 : pf.hurst < 0.42 ? 0.65 : 1.0;
+
+  // Mean-reversion flip when Hurst is strongly mean-reverting
+  const meanRevFlip = pf.hurst < 0.42 ? (0.5 - (base - 0.5)) : 0;
+
+  // Autocorrelation & z-score adjustments
+  const acAdj  = Math.tanh(pf.autocorr1 * 6) * 0.07;
+  const zAdj   = pf.zScoreLast >  2.0 ? -0.06 : pf.zScoreLast < -2.0 ? 0.06 : 0;
+
+  // Volatility penalty: high vol regimes blur direction signal
+  const volPenalty = pf.volRatio > 1.5 ? -0.03 : 0;
+
+  const raw = base + (mom5Adj + mom10Adj) * hurstMult + acAdj + zAdj + volPenalty + meanRevFlip;
+  return Math.max(0.15, Math.min(0.85, raw));
 }
 
 // ── Trend exhaustion detection ─────────────────────────────────────────────────
@@ -220,14 +236,26 @@ export function runRiseFallAgent(
   const result = predictDirection(ctx.symbol, features, horizon);
   const pf = features.price;
 
-  const edgeScore = Math.round(50 + Math.abs(result.probUp - 0.5) * 100);
-  let score = Math.min(95, Math.round(edgeScore * (1 - result.disagreement)));
+  // Edge score: distance from 50% amplified — require a MEANINGFUL edge.
+  // A 52% probability gives only 4 edge points → score = 54 (below buy threshold of 63).
+  // A 55% probability gives 10 edge points → score = 60.
+  // A 58% probability gives 16 edge points → score = 66 (buy).
+  // A 62% probability gives 24 edge points → score = 74 (strong buy).
+  const edgePct = Math.abs(result.probUp - 0.5);
+  // Quadratic amplification: small edges stay small, strong edges get boosted
+  const edgeAmplified = edgePct < 0.05 ? edgePct * 0.5 : edgePct * 1.2;
+  const edgeScore = Math.round(50 + edgeAmplified * 200);
+  let score = Math.min(95, Math.round(edgeScore * (1 - result.disagreement * 0.5)));
 
-  // Penalize exhaustion signals
-  if (result.exhaustionDetected) score = Math.round(score * 0.85);
+  // Penalize exhaustion signals more strongly
+  if (result.exhaustionDetected) score = Math.round(score * 0.80);
 
   // Apply regime multiplier
   score = Math.min(95, Math.round(score * result.regimeMultiplier));
+
+  // Hard floor: if probUp is too close to 50% (< 53% either direction),
+  // cap the score at 58 so it never triggers a "buy" recommendation
+  if (edgePct < 0.03) score = Math.min(score, 58);
 
   const dirLabel = result.direction === "up" ? "UP" : "DOWN";
 

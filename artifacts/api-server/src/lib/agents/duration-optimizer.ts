@@ -195,7 +195,7 @@ export function selectOptimalDuration(
   const runnerUp = allScores[1];
 
   // Confidence: how much better is the winner vs runner-up?
-  const margin = best.score - runnerUp.score;
+  const margin = best.score - (runnerUp?.score ?? 0);
   const confidence = Math.min(90, Math.round(40 + margin * 5));
 
   const reasonParts = best.reasoning.length > 0

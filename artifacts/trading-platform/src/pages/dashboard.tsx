@@ -388,10 +388,10 @@ export default function Dashboard() {
     // Parallel tournament scan events
     es.addEventListener("scan_started", (e: MessageEvent) => {
       try {
-        const payload = JSON.parse(e.data);
-        const scanning: Record<string, "scanning"> = {};
-        for (const g of (payload.groups ?? [])) scanning[g] = "scanning";
-        setGroupScans(scanning);
+        // Do NOT wipe out existing group data — keep last results visible so the
+        // cards never flash to blank/inactive when Even/Odd rescans rapidly (every
+        // 500ms). Only set isScanningGroups=true to show the pulsing indicator.
+        void e.data;
         setIsScanningGroups(true);
         setTournamentWinner(null);
       } catch {}

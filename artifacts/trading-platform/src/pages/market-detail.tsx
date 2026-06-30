@@ -666,21 +666,39 @@ export default function MarketDetail() {
       {(() => {
         const agentOutputs = (rec as any)?.agentOutputs ?? {};
         const dirAgent = agentOutputs?.direction?.data ?? agentOutputs?.riseFallAgent?.data;
-        const masterAgent = agentOutputs?.masterDecision?.data ?? agentOutputs?.confidenceFusion?.data;
         const durationAgent = agentOutputs?.durationOptimizer?.data ?? agentOutputs?.executionTiming?.data;
         const agentRecommendedDuration = durationAgent?.duration ?? (rec as any)?.recommendedDuration ?? 5;
+
+        // Use the rise-fall agent's own score to decide if Rise/Fall should be
+        // highlighted. Previously this used masterAgent?.shouldTrade which was
+        // always undefined (confidenceFusion.data has no shouldTrade field), so
+        // no AI highlights ever appeared. Now we check the riseFallAgent score
+        // directly — score ≥ 63 ("buy" threshold) means the agent has an edge.
+        const rfAgent = agentOutputs?.riseFallAgent ?? agentOutputs?.direction;
+        const rfScore = rfAgent?.score ?? 0;
+        const rfShouldTrade = rfScore >= 63;
 
         const rfAgentData = dirAgent ? {
           probUp: dirAgent.probUp ?? 0.5,
           probDown: dirAgent.probDown ?? 0.5,
-          weightedScore: masterAgent?.weightedScore ?? 0,
-          shouldTrade: masterAgent?.shouldTrade ?? false,
+          weightedScore: rfScore,
+          shouldTrade: rfShouldTrade,
           recommendedDuration: agentRecommendedDuration,
         } : undefined;
 
-        const eoAgentData = masterAgent ? {
-          weightedScore: masterAgent.weightedScore ?? 0,
-          shouldTrade: masterAgent.shouldTrade ?? false,
+        // Even/Odd: use the overall shouldTrade from the recommendation when the
+        // recommended contract is an Even/Odd type, otherwise use digitProbability
+        // agent score for gating.
+        const overallShouldTrade = !!(rec as any)?.shouldTrade;
+        const overallContractType = (rec as any)?.contractType ?? "";
+        const isEOContract = overallContractType === "DIGITEVEN" || overallContractType === "DIGITODD";
+        const digitAgent = agentOutputs?.digitProbability ?? agentOutputs?.digitDistribution;
+        const digitScore = digitAgent?.score ?? 0;
+        const eoShouldTrade = isEOContract ? overallShouldTrade : digitScore >= 60;
+
+        const eoAgentData = (digitAgent || overallShouldTrade) ? {
+          weightedScore: digitScore,
+          shouldTrade: eoShouldTrade,
           recommendedDuration: agentRecommendedDuration,
         } : undefined;
 

@@ -265,14 +265,20 @@ export function analyzeEvenOdd(digits: number[]): {
   const last3 = digits.slice(-3).map(isEven);
   const streakReversalSignal = (last3.every(Boolean) || last3.every(v => !v));
 
-  // Need at least 2 corroborating signals to make a recommendation
+  // Need at least 2 corroborating signals AND a minimum probability edge to trade.
+  // Thresholds raised from 0.52 → 0.54 to reduce false positives on near-50/50 markets.
   let signals = 0;
-  const signalForEven = evenProb > 0.52 ? 1 : evenProb < 0.48 ? -1 : 0;
-  const markovSignal = markovNextEvenProb > 0.52 ? 1 : markovNextEvenProb < 0.48 ? -1 : 0;
+  const signalForEven = evenProb > 0.54 ? 1 : evenProb < 0.46 ? -1 : 0;
+  const markovSignal = markovNextEvenProb > 0.54 ? 1 : markovNextEvenProb < 0.46 ? -1 : 0;
   const reversalSignal = streakReversalSignal ? (lastIsEven ? -1 : 1) : 0; // expect reversal
   signals = signalForEven + markovSignal + reversalSignal;
 
-  const recommendation: "even" | "odd" | "none" = Math.abs(signals) < 2 ? "none"
+  // Additional guard: the dominant probability must show clear edge (> 0.54) for both
+  // the Bayesian estimate AND the Markov estimate to agree. If they disagree, skip.
+  const bayesMarkovAgree = (evenProb > 0.54 && markovNextEvenProb > 0.50) ||
+                           (evenProb < 0.46 && markovNextEvenProb < 0.50);
+
+  const recommendation: "even" | "odd" | "none" = (Math.abs(signals) < 2 || !bayesMarkovAgree) ? "none"
     : signals > 0 ? "even" : "odd";
 
   return {

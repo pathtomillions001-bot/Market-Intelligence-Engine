@@ -795,7 +795,36 @@ async function runAutonomousLoop() {
         broadcastSSE("trade_completed", { id: openTrade.id, symbol: bestMarket.symbol, won: false,
           profit: (-stake).toFixed(2), contract: effectiveContractType, error: errMsg });
         journalManager.forceRefresh();
-        scheduleNext(false);
+
+        // ── IMPORTANT: update all recovery state even on error ────────────────
+        // The stake was spent even if waitForContractResult timed out (Deriv
+        // may still be running the contract). Record the loss so recovery mode
+        // activates correctly and prevents back-to-back trades on Deriv.
+        const lostOnError = stake;
+        if (globalRecovery.isActive) {
+          globalRecovery.recoveryLossCount++;
+        } else {
+          globalRecovery.recoveryLossCount = 0;
+        }
+        globalRecovery.isActive = true;
+        globalRecovery.unrecoveredAmount += lostOnError;
+        if (!globalRecovery.activeFamilies.includes(bestResult.family)) {
+          globalRecovery.activeFamilies.push(bestResult.family);
+        }
+        sessionLossCount++;
+        // Set lastTradeCompletedAt so the journal-settle guard fires on the NEXT loop
+        // iteration — prevents the engine from immediately opening another trade while
+        // Deriv may still be settling the timed-out contract.
+        lastTradeCompletedAt = new Date();
+        // Record cooldown so the same symbol is not re-selected immediately
+        const symNowErr = new Date();
+        const symLogErr = recentTradesBySymbol.get(bestMarket.symbol) ?? [];
+        symLogErr.push(symNowErr);
+        recentTradesBySymbol.set(bestMarket.symbol, symLogErr.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS));
+
+        // Use the same 15s delay as a successful trade — gives Deriv time to settle
+        // the contract before the engine can open another one.
+        scheduleNext(true);
         return;
       }
 
