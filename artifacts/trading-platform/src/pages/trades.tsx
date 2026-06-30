@@ -96,9 +96,13 @@ export default function Trades() {
           pendingRef.current = [trade, ...pendingRef.current.filter((t) => t.id !== trade.id)];
           setPendingTrades([...pendingRef.current]);
         }
-        // Also trigger background refresh from Deriv (catches cases where token is live)
-        setTimeout(() => queryClient.invalidateQueries({ queryKey: ["derivJournal"] }), 3000);
+        // Immediate invalidation — Deriv data arrives via journal_refreshed event
+        queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
       } catch { /* ignore */ }
+    });
+    // journal_refreshed fires AFTER Deriv profit_table is confirmed — invalidate for clean sync
+    es.addEventListener("journal_refreshed", () => {
+      queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
     });
     es.addEventListener("trade_started", () => {
       queryClient.invalidateQueries({ queryKey: ["derivJournal"] });

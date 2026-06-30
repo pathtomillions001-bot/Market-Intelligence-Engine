@@ -371,6 +371,10 @@ router.post("/", async (req, res): Promise<void> => {
       }
     });
     // Immediately refresh the Deriv profit_table so journal + streak reflect this trade
+    // Broadcast journal_refreshed once Deriv confirms the updated profit_table
+    journalManager.once("refreshed", () => {
+      broadcastSSE("journal_refreshed", { ts: Date.now() });
+    });
     journalManager.forceRefresh();
     res.status(201).json(formatTrade(closedTrade));
     return;

@@ -945,39 +945,104 @@ export default function MarketDetail() {
               ))}
             </div>
 
-            {/* Clickable OVER/UNDER trade buttons for each barrier */}
+            {/* ── AI FAVOURS panel ──────────────────────────────────────────── */}
+            {(() => {
+              const isOverRec  = recommendation?.contractType === "DIGITOVER";
+              const isUnderRec = recommendation?.contractType === "DIGITUNDER";
+              const recBarrier = digitBarrier ?? null;
+              const overWinPct  = recBarrier !== null ? Math.round(digitStats.distribution.filter((d: any) => d.digit > recBarrier).reduce((s: number, d: any) => s + d.pct, 0)) : null;
+              const underWinPct = recBarrier !== null ? Math.round(digitStats.distribution.filter((d: any) => d.digit < recBarrier).reduce((s: number, d: any) => s + d.pct, 0)) : null;
+              // Best OVER barrier = smallest b where overPct is still high
+              const bestOverB  = [0,1,2,3,4].find(b => digitStats.distribution.filter((d: any) => d.digit > b).reduce((s: number, d: any) => s + d.pct, 0) >= 55) ?? 2;
+              const bestUnderB = [9,8,7,6,5].find(b => digitStats.distribution.filter((d: any) => d.digit < b).reduce((s: number, d: any) => s + d.pct, 0) >= 55) ?? 7;
+              const displayOverBarrier  = isOverRec  && recBarrier !== null ? recBarrier  : bestOverB;
+              const displayUnderBarrier = isUnderRec && recBarrier !== null ? recBarrier : bestUnderB;
+              const displayOverPct  = Math.round(digitStats.distribution.filter((d: any) => d.digit > displayOverBarrier).reduce((s: number, d: any) => s + d.pct, 0));
+              const displayUnderPct = Math.round(digitStats.distribution.filter((d: any) => d.digit < displayUnderBarrier).reduce((s: number, d: any) => s + d.pct, 0));
+              return (
+                <div className="grid grid-cols-2 gap-3 my-1">
+                  {/* OVER card */}
+                  <button
+                    onClick={() => openTradeDialog("DIGITOVER", "up", displayOverBarrier)}
+                    className={`relative flex flex-col items-center py-3 px-2 rounded-xl border-2 text-center transition-all hover:scale-[1.02] ${isOverRec ? "border-green-500/60 bg-green-500/8 shadow-lg shadow-green-500/10" : "border-border bg-secondary/20 hover:border-green-500/30"}`}
+                  >
+                    {isOverRec && (
+                      <div className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-green-500 text-[9px] font-bold text-black tracking-wider whitespace-nowrap">
+                        AI FAVOURS
+                      </div>
+                    )}
+                    <div className="text-[10px] text-muted-foreground font-medium mt-1">OVER {displayOverBarrier}</div>
+                    <div className={`text-2xl font-mono font-bold mt-0.5 ${isOverRec ? "text-green-400" : displayOverPct >= 55 ? "text-green-400" : "text-foreground"}`}>
+                      {displayOverPct}%
+                    </div>
+                    <div className="text-[9px] text-muted-foreground mt-0.5">win probability</div>
+                    {isOverRec && (
+                      <div className="mt-1.5 w-full">
+                        <div className="h-1 bg-secondary rounded-full overflow-hidden">
+                          <div className="h-full bg-green-500 rounded-full" style={{ width: `${Math.min(100, displayOverPct)}%` }} />
+                        </div>
+                      </div>
+                    )}
+                  </button>
+
+                  {/* UNDER card */}
+                  <button
+                    onClick={() => openTradeDialog("DIGITUNDER", "down", displayUnderBarrier)}
+                    className={`relative flex flex-col items-center py-3 px-2 rounded-xl border-2 text-center transition-all hover:scale-[1.02] ${isUnderRec ? "border-blue-500/60 bg-blue-500/8 shadow-lg shadow-blue-500/10" : "border-border bg-secondary/20 hover:border-blue-500/30"}`}
+                  >
+                    {isUnderRec && (
+                      <div className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-blue-500 text-[9px] font-bold text-white tracking-wider whitespace-nowrap">
+                        AI FAVOURS
+                      </div>
+                    )}
+                    <div className="text-[10px] text-muted-foreground font-medium mt-1">UNDER {displayUnderBarrier}</div>
+                    <div className={`text-2xl font-mono font-bold mt-0.5 ${isUnderRec ? "text-blue-400" : displayUnderPct >= 55 ? "text-blue-400" : "text-foreground"}`}>
+                      {displayUnderPct}%
+                    </div>
+                    <div className="text-[9px] text-muted-foreground mt-0.5">win probability</div>
+                    {isUnderRec && (
+                      <div className="mt-1.5 w-full">
+                        <div className="h-1 bg-secondary rounded-full overflow-hidden">
+                          <div className="h-full bg-blue-500 rounded-full" style={{ width: `${Math.min(100, displayUnderPct)}%` }} />
+                        </div>
+                      </div>
+                    )}
+                  </button>
+                </div>
+              );
+            })()}
+
+            {/* ── Full barrier grid ─────────────────────────────────────────── */}
             <div className="grid grid-cols-5 gap-1.5">
               {[0, 1, 2, 3, 4].map((b) => {
-                const overPct = digitStats.distribution
-                  .filter((d: any) => d.digit > b)
-                  .reduce((s: number, d: any) => s + d.pct, 0);
+                const overPct = Math.round(digitStats.distribution.filter((d: any) => d.digit > b).reduce((s: number, d: any) => s + d.pct, 0));
+                const isRec = recommendation?.contractType === "DIGITOVER" && digitBarrier === b;
                 const isHot = overPct > 60;
                 return (
                   <button
                     key={`ov${b}`}
                     onClick={() => openTradeDialog("DIGITOVER", "up", b)}
-                    className={`flex flex-col items-center p-2 rounded-lg border text-center transition-all hover:scale-[1.02] ${isHot ? "border-green-500/40 bg-green-500/8" : "border-border bg-secondary/20"}`}
+                    className={`flex flex-col items-center p-2 rounded-lg border text-center transition-all hover:scale-[1.02] ${isRec ? "border-green-500/60 bg-green-500/10" : isHot ? "border-green-500/25 bg-green-500/5" : "border-border bg-secondary/20"}`}
                   >
                     <div className="text-[9px] text-muted-foreground">OVER {b}</div>
-                    <div className={`text-sm font-mono font-bold ${isHot ? "text-green-400" : "text-foreground"}`}>{overPct.toFixed(0)}%</div>
-                    {isHot && <div className="text-[8px] text-green-500 mt-0.5">HOT</div>}
+                    <div className={`text-sm font-mono font-bold ${isRec ? "text-green-400" : isHot ? "text-green-400" : "text-foreground"}`}>{overPct}%</div>
+                    {isRec ? <div className="text-[8px] text-green-500 mt-0.5">AI ✓</div> : isHot ? <div className="text-[8px] text-green-500/70 mt-0.5">HOT</div> : null}
                   </button>
                 );
               })}
               {[5, 6, 7, 8, 9].map((b) => {
-                const underPct = digitStats.distribution
-                  .filter((d: any) => d.digit < b)
-                  .reduce((s: number, d: any) => s + d.pct, 0);
+                const underPct = Math.round(digitStats.distribution.filter((d: any) => d.digit < b).reduce((s: number, d: any) => s + d.pct, 0));
+                const isRec = recommendation?.contractType === "DIGITUNDER" && digitBarrier === b;
                 const isHot = underPct > 60;
                 return (
                   <button
                     key={`un${b}`}
                     onClick={() => openTradeDialog("DIGITUNDER", "down", b)}
-                    className={`flex flex-col items-center p-2 rounded-lg border text-center transition-all hover:scale-[1.02] ${isHot ? "border-blue-500/40 bg-blue-500/8" : "border-border bg-secondary/20"}`}
+                    className={`flex flex-col items-center p-2 rounded-lg border text-center transition-all hover:scale-[1.02] ${isRec ? "border-blue-500/60 bg-blue-500/10" : isHot ? "border-blue-500/25 bg-blue-500/5" : "border-border bg-secondary/20"}`}
                   >
                     <div className="text-[9px] text-muted-foreground">UNDER {b}</div>
-                    <div className={`text-sm font-mono font-bold ${isHot ? "text-blue-400" : "text-foreground"}`}>{underPct.toFixed(0)}%</div>
-                    {isHot && <div className="text-[8px] text-blue-500 mt-0.5">HOT</div>}
+                    <div className={`text-sm font-mono font-bold ${isRec ? "text-blue-400" : isHot ? "text-blue-400" : "text-foreground"}`}>{underPct}%</div>
+                    {isRec ? <div className="text-[8px] text-blue-500 mt-0.5">AI ✓</div> : isHot ? <div className="text-[8px] text-blue-500/70 mt-0.5">HOT</div> : null}
                   </button>
                 );
               })}
