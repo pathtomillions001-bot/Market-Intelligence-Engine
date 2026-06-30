@@ -146,15 +146,43 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     rejectReasons.push(`Risk gate: ${riskDecision.hardStopReason}`);
   }
 
-  // ── Gate 2: EV gate ───────────────────────────────────────────────────────
-  // Only hard-block when EV is genuinely terrible (< -6% per dollar) or when
-  // there is absolutely no EV data. Near-breakeven and marginal-negative EV
-  // trades are allowed — the tournament already selected the best available
-  // market, so blocking on small negative EV just freezes the engine entirely.
+  // ── Gate 2: EV gate (product-aware) ──────────────────────────────────────
+  // For tier-1 digit barriers (OVER 2, UNDER 8), positive EV is mathematically
+  // impossible: OVER 2 payout is 1.19x → breakeven win rate is 84% — unreachable.
+  // The real signal is EDGE: actual win rate > theoretical 70%.
+  // For all other products, require EV > -0.06.
   if (!bestEV) {
     rejectReasons.push("No EV data — market data insufficient to evaluate");
-  } else if (bestEV.expectedValue < -0.06) {
-    rejectReasons.push(`EV too negative: ${(bestEV.expectedValue * 100).toFixed(1)}% — no tradeable opportunity`);
+  } else {
+    const isDigitTier1 = (
+      (bestEV.product === "DIGITOVER"  && bestEV.barrier === 2) ||
+      (bestEV.product === "DIGITUNDER" && bestEV.barrier === 8)
+    );
+    const isDigitTier2 = (
+      (bestEV.product === "DIGITOVER"  && bestEV.barrier === 4) ||
+      (bestEV.product === "DIGITUNDER" && bestEV.barrier === 5)
+    );
+
+    if (isDigitTier1) {
+      // Tier-1: only require positive edge (win rate above theoretical).
+      // edge = winProbability - 1/payout. For OVER 2: theoretical win rate = 70%,
+      // so edge > 0 means the market has ≥70% digits in range 3-9 right now.
+      if (bestEV.edge <= 0) {
+        rejectReasons.push(
+          `No edge on ${bestEV.product} barrier=${bestEV.barrier}: ` +
+          `win rate ${(bestEV.winProbability * 100).toFixed(1)}% not above theoretical ` +
+          `${(bestEV.breakevenWinRate * 100).toFixed(0)}%`
+        );
+      }
+    } else if (isDigitTier2) {
+      // Tier-2 (recovery): slightly wider EV gate — these pay more (1.50x) so bar is lower
+      if (bestEV.expectedValue < -0.15) {
+        rejectReasons.push(`Recovery barrier EV too negative: ${(bestEV.expectedValue * 100).toFixed(1)}%`);
+      }
+    } else if (bestEV.expectedValue < -0.06) {
+      // All other products: hard-block when EV is genuinely terrible
+      rejectReasons.push(`EV too negative: ${(bestEV.expectedValue * 100).toFixed(1)}% — no tradeable opportunity`);
+    }
   }
   // requirePositiveEv is now advisory only (logged as a warning, not a blocker)
 

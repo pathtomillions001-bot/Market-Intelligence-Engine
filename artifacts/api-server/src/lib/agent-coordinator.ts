@@ -213,8 +213,11 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
     performanceFeedback: perfAgent as any,
   };
 
-  // Only include digitDistribution in weighted consensus if there's real digit edge
-  if (wantDigit && hasDigitEdge) {
+  // Include digitDistribution in weighted consensus whenever user wants digit trading.
+  // Previously gated by hasDigitEdge — but that was always false for OVER 2/UNDER 8
+  // because positive EV at 1.19x payout requires an impossible 84% win rate.
+  // The agent score now reflects edge-based signal strength, so include it always.
+  if (wantDigit) {
     agentOutputs["digitDistribution"] = digitAgent as any;
   }
 

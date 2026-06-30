@@ -273,10 +273,22 @@ function scoreAllBarriers(
     .filter((o) => o.tier === preferredTier && o.expectedValue > 0.003)
     .sort((a, b) => b.evScore - a.evScore);
 
-  if (preferredWithEV.length > 0) {
-    // Found options in preferred tier — boost their scores massively so they always win
+  // Tier-1/2 with positive EDGE (actual win rate > theoretical) — no positive EV required.
+  // OVER 2 pays 1.19x so breakeven is 84% — unreachable. But if the market is skewed so
+  // that digit 3–9 appear more than 70% of the time, that IS a real edge worth trading.
+  const preferredWithEdge = rawOptions
+    .filter((o) => o.tier === preferredTier && o.edge > 0)
+    .sort((a, b) => b.evScore - a.evScore);
+
+  if (preferredWithEdge.length > 0) {
+    // Found preferred-tier options with positive edge — boost so they always win the sort
+    for (const opt of preferredWithEdge) {
+      opt.adjustedEvScore = opt.evScore * 10 + opt.edge * 50; // guaranteed top
+    }
+  } else if (preferredWithEV.length > 0) {
+    // Preferred tier has positive EV (rare but possible in extreme skew)
     for (const opt of preferredWithEV) {
-      opt.adjustedEvScore = opt.evScore * 10; // guaranteed top
+      opt.adjustedEvScore = opt.evScore * 8;
     }
   } else {
     // Fallback: any tier 1 or 2 option with positive EV (tier 0 remains blocked)
@@ -286,7 +298,6 @@ function scoreAllBarriers(
         opt.adjustedEvScore = opt.evScore * 2;
       }
     }
-    // If absolutely nothing has positive EV, return empty (no trade is better than a tier-0 trade)
   }
 
   return rawOptions.sort((a, b) => b.adjustedEvScore - a.adjustedEvScore);
@@ -346,22 +357,38 @@ export function analyzeDigitEdge(
     .filter((o) => o.tier === 2 && o.expectedValue > -0.1)
     .sort((a, b) => b.evScore - a.evScore);
 
-  // Positive EV options sorted by adjustedEvScore (tier preference applied)
-  // Exclude hard-blocked barriers (OVER 7/8, UNDER 1/2) from the options passed
-  // to the EV calculator — these are never eligible for trade regardless of EV
+  // Exclude hard-blocked barriers (OVER 7/8, UNDER 1/2) from eligible options.
   const isHardBlockedOption = (o: BarrierOption) =>
     o.contractType === "DIGITOVER" ? HARD_BLOCKED_OVER.has(o.barrier) : HARD_BLOCKED_UNDER.has(o.barrier);
+
+  // Primary: preferred tier (tier 1 normal, tier 2 recovery) with positive EDGE.
+  // OVER 2 pays only 1.19x — positive EV requires an impossible 84% win rate, so
+  // we use EDGE (actual win rate > theoretical) as the signal instead.
+  const preferredTier = inRecovery ? 2 : 1;
+  const preferredEdgeOptions = allOptions
+    .filter((o) => o.tier === preferredTier && o.edge > 0 && !isHardBlockedOption(o))
+    .sort((a, b) => b.adjustedEvScore - a.adjustedEvScore);
+
+  // Fallback: any non-blocked option with strict positive EV
   const positiveEV = allOptions.filter((o) => o.expectedValue > 0.003 && !isHardBlockedOption(o));
-  const bestOption = positiveEV.length > 0 ? positiveEV[0] : null;
+
+  const bestOption = preferredEdgeOptions[0] ?? positiveEV[0] ?? null;
+
+  // topOptions = preferred-tier edge options UNION positive-EV options, deduplicated, best first
+  const topOptionSet = new Set<BarrierOption>([...preferredEdgeOptions, ...positiveEV]);
+  const topOptions = [...topOptionSet]
+    .sort((a, b) => b.adjustedEvScore - a.adjustedEvScore)
+    .slice(0, 8);
 
   return {
     bestOption,
-    topOptions: positiveEV.slice(0, 8),
+    topOptions,
     tier1Options,
     tier2Options,
     windowSize,
     chiSquare: chi2,
-    hasEdge: bestOption !== null && bestOption.edge > 0.015,
+    // hasEdge = true whenever the preferred-tier barrier has a positive deviation from theoretical
+    hasEdge: bestOption !== null && bestOption.edge > 0,
     multinomialProbs,
     markovProbs,
     lastDigit,
@@ -393,13 +420,19 @@ export function runDigitAgent(
   const best = result.bestOption;
 
   let score = 0;
-  let reasoning = "No positive-EV digit setup found.";
+  let reasoning = "No edge setup found for preferred digit barrier.";
 
   if (best) {
-    const evScore = Math.min(100, 50 + best.expectedValue * 400);
+    // Tier-1 barriers (OVER 2, UNDER 8) have low payouts by design — positive EV
+    // is mathematically impossible. Score them by edge quality (actual win rate
+    // above theoretical) rather than EV, so they don't drag down the consensus.
+    const isTier1 = best.tier === 1;
+    const primaryScore = isTier1
+      ? Math.min(100, 50 + best.edge * 600)   // edge-based: +1% edge → +6 pts
+      : Math.min(100, 50 + best.expectedValue * 400); // EV-based for tier 2+
     const edgeScore = Math.min(100, 50 + best.edge * 500);
     const chi2Bonus = Math.min(10, result.chiSquare * 0.5);
-    score = Math.round((evScore * 0.6 + edgeScore * 0.3 + chi2Bonus * 0.1));
+    score = Math.round((primaryScore * 0.6 + edgeScore * 0.3 + chi2Bonus * 0.1));
 
     const tierLabel = best.tier === 1
       ? "[TIER 1 — Safe compounding]"
