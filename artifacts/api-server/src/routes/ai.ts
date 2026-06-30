@@ -323,12 +323,12 @@ async function runAutonomousLoop() {
     const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
     tradesExecutedToday = closedToday.length;
 
-    const sortedByTime = [...closedToday].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    // Keep consecutiveLosses for DailyStats context passed to AI agents (unaffected by session counter)
-    let consecutiveLosses = 0;
-    for (const t of sortedByTime) { if (t.status === "lost") consecutiveLosses++; else break; }
-
-    const daily = buildDailyStats(closedToday, consecutiveLosses);
+    // Use sessionLossCount as the authoritative consecutive-loss counter for agents.
+    // This is the same value displayed in the UI and matches the stopEngine threshold check
+    // below. The DB-derived count (from today's full trade history) is intentionally NOT
+    // used here — it includes losses from before the current engine session and would
+    // create a mismatch where the UI shows "2 losses" but agents see "5 losses".
+    const daily = buildDailyStats(closedToday, sessionLossCount);
     const todayProfit = daily.profit;
 
     // Hard stop conditions (also handled inside risk manager, but stop the loop early)
@@ -648,32 +648,32 @@ async function runAutonomousLoop() {
       : rawDuration;
 
     // ── Recovery stake override ───────────────────────────────────────────────
-    // Over/Under (DIGITOVER/DIGITUNDER): digit-agent switches to OVER 4 / UNDER 5.
-    //   Additionally apply a progressive stake multiplier for consecutive recovery losses
-    //   (so the engine recovers faster when multiple recovery trades have failed).
-    // Direction (CALL/PUT) + Even/Odd (DIGITEVEN/DIGITODD): boost stake so one
-    //   win fully covers the unrecovered loss.
+    // ALL contract families use a simple 1.14× geometric multiplier per consecutive
+    // recovery loss. This prevents runaway stake explosion that occurs when trying
+    // to recover the entire accumulated loss in one trade.
+    //
+    // EVEN/ODD & RISE/FALL (payout ~1.95×, profit ~0.95×):
+    //   1.14 × stake × 0.95 ≈ 1.08 × original stake → covers the loss with a buffer.
+    //   1.14^n keeps stakes tightly controlled even over many consecutive losses.
+    //
+    // OVER/UNDER (OVER 4 / UNDER 5 in recovery, payout ~2.15×, profit ~1.15×):
+    //   The better barrier already provides elevated payout — same 1.14× scaling applies.
+    //   No attempt to recover the full accumulated amount in a single trade.
+    //
+    // recoveryLossCount = 0 on the first recovery trade → 1.14^1 = +14% stake.
+    // recoveryLossCount = 1 on the second consecutive recovery loss → 1.14^2 = +30%.
+    // Cap at 4× base stake (Deriv max stake also applies).
     let stake = rec.stake;
     const isOverUnder = effectiveContractType === "DIGITOVER" || effectiveContractType === "DIGITUNDER";
-    if (globalRecovery.isActive && globalRecovery.unrecoveredAmount > 0) {
-      const pm = rec.payoutMultiplier;
-      const profitPerUnitStaked = pm - 1;
-      // Progressive multiplier: each consecutive recovery loss adds 15% to the base stake,
-      // capped at 2× to stay within reasonable risk bounds.
-      const progressiveMult = Math.min(1 + (globalRecovery.recoveryLossCount * 0.15), 2.0);
-
-      if (isOverUnder) {
-        // OU recovery: barrier already switched to OVER 4/UNDER 5 by digit-agent.
-        // Apply progressive stake only when there have been consecutive recovery losses.
-        if (globalRecovery.recoveryLossCount > 0 && profitPerUnitStaked > 0) {
-          const baseRecovery = Math.ceil((globalRecovery.unrecoveredAmount / profitPerUnitStaked) * 100) / 100;
-          stake = Math.min(Math.max(stake, baseRecovery * progressiveMult), tradingSettings.maxTradeStake);
-        }
-      } else if (profitPerUnitStaked > 0) {
-        // Direction/EvenOdd: stake sized to recover the full unrecovered amount in one win
-        const baseRecovery = Math.ceil((globalRecovery.unrecoveredAmount / profitPerUnitStaked) * 1.1 * 100) / 100;
-        stake = Math.min(Math.max(stake, baseRecovery * progressiveMult), tradingSettings.maxTradeStake);
-      }
+    if (globalRecovery.isActive) {
+      const n = globalRecovery.recoveryLossCount; // consecutive losses DURING recovery
+      // recoveryLossCount is 0 for the first recovery trade, so exponent = n+1 → 1.14×.
+      // Each subsequent recovery loss adds another 1.14× factor.
+      const scaleMult = Math.pow(1.14, n + 1);
+      // Hard cap: never exceed 4× the normal stake to limit downside
+      const cappedMult = Math.min(scaleMult, 4.0);
+      const recoveryStake = Math.round(rec.stake * cappedMult * 100) / 100;
+      stake = Math.min(Math.max(stake, recoveryStake), tradingSettings.maxTradeStake);
       // Ensure stake has at most 2 decimal places (Deriv requirement)
       stake = Math.round(stake * 100) / 100;
 
@@ -681,12 +681,12 @@ async function runAutonomousLoop() {
         symbol: bestMarket.symbol,
         family: bestResult.family,
         unrecoveredAmount: globalRecovery.unrecoveredAmount,
-        recoveryLossCount: globalRecovery.recoveryLossCount,
-        progressiveMult,
+        recoveryLossCount: n,
+        scaleMult: cappedMult.toFixed(3),
         normalStake: rec.stake,
         recoveryStake: stake,
-        mode: isOverUnder ? "OVER 4 / UNDER 5 + progressive stake" : "boosted stake",
-      }, "Recovery mode: stake adjusted");
+        contractType: effectiveContractType,
+      }, "Recovery mode: 1.14× geometric stake applied");
     }
 
     // Estimated payout for paper trades (live payout comes from Deriv result)
