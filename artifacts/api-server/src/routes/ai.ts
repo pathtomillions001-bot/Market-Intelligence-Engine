@@ -286,70 +286,113 @@ async function runAutonomousLoop() {
       return;
     }
 
-    // ── Market selection: group-based sequential scanning ────────────────────
-    // Scans groups in priority order. Each group is scanned fully in parallel.
-    // The scan stops at the first group that contains a tradeable opportunity.
-    // Priority: Volatility 1s (1HZ*) → Volatility (R_*) → Jump (JD*) → Bull/Bear
+    // ── Market selection: parallel tournament scanning ───────────────────────
+    // All 4 groups are scanned simultaneously. Each group scans all its markets
+    // in parallel and returns the single best candidate (highest qualityScore).
+    // The best candidate across all 4 groups is then evaluated for execution.
+    // Bull/Bear only participates when CALL/PUT contract types are enabled.
+    // If no candidate passes all gates → rescan immediately (no delay).
     const hasDigitTypes = preferredContractTypes.some(t => t.startsWith("DIGIT"));
     const hasDirectionTypes = preferredContractTypes.some(t => ["CALL", "PUT"].includes(t));
 
     const contractCompatibleMarkets = availableMarkets.filter(m => {
+      // Skip non-digit markets when only digit contract types are enabled
       if (hasDigitTypes && !hasDirectionTypes && !m.digitEnabled) return false;
+      // Bull/Bear markets only support Rise/Fall — skip when no direction types
+      if ((m.symbol === "RDBULL" || m.symbol === "RDBEAR") && !hasDirectionTypes) return false;
       return true;
     });
 
     const getGroupIndex = (sym: string): number => {
-      if (sym.startsWith("1HZ")) return 0; // Volatility 1s
-      if (sym.startsWith("R_"))  return 1; // Volatility
-      if (sym.startsWith("JD"))  return 2; // Jump Indices
-      return 3;                             // Bull/Bear (RDBULL/RDBEAR)
+      if (sym.startsWith("1HZ")) return 0; // Volatility 1s (5 markets)
+      if (sym.startsWith("R_"))  return 1; // Volatility     (5 markets)
+      if (sym.startsWith("JD"))  return 2; // Jump Indices   (5 markets)
+      return 3;                             // Bull/Bear      (2 markets)
     };
     const GROUP_NAMES = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"];
 
-    // Bucket markets into their priority groups, preserving order within each group
+    // Bucket markets into their 4 groups
     const marketGroups: (typeof contractCompatibleMarkets)[] = [[], [], [], []];
     for (const m of contractCompatibleMarkets) marketGroups[getGroupIndex(m.symbol)].push(m);
 
-    let bestResult: { market: typeof availableMarkets[0]; output: Awaited<ReturnType<typeof runCoordinator>>; ctx: ScanContext } | null = null;
     let totalMarketsScanned = 0;
+    const SCAN_TIMEOUT_MS = 4000;
+    const withTimeout = <T>(p: Promise<T>, ms: number, fallback: T): Promise<T> =>
+      Promise.race([p, new Promise<T>((r) => setTimeout(() => r(fallback), ms))]);
 
-    const SCAN_TIMEOUT_MS = 5000;
-    function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
-      return Promise.race([p, new Promise<T>((r) => setTimeout(() => r(fallback), ms))]);
-    }
+    type ScanResult = { market: typeof availableMarkets[0]; output: Awaited<ReturnType<typeof runCoordinator>>; ctx: ScanContext };
 
-    for (let gi = 0; gi < marketGroups.length; gi++) {
-      const group = marketGroups[gi];
-      if (group.length === 0) continue;
+    // ── Phase 1: All groups race in parallel ─────────────────────────────────
+    // Each group scans its markets in parallel and returns ONE winner (best qualityScore).
+    broadcastSSE("scan_started", { groups: GROUP_NAMES.filter((_, i) => marketGroups[i].length > 0), ts: Date.now() });
 
-      // Scan all markets in this group simultaneously
-      const groupResults = (await Promise.allSettled(
-        group.map(async (m) => {
-          const ctx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
-          const output = await withTimeout(runCoordinator(ctx), SCAN_TIMEOUT_MS, null as any);
-          if (!output) return null;
-          return { market: m, output, ctx };
-        })
-      )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
+    const groupWinners = (await Promise.allSettled(
+      marketGroups.map(async (group, gi): Promise<(ScanResult & { groupName: string }) | null> => {
+        if (group.length === 0) return null;
 
-      totalMarketsScanned += groupResults.length;
+        const marketResults = (await Promise.allSettled(
+          group.map(async (m) => {
+            const ctx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
+            const output = await withTimeout(runCoordinator(ctx), SCAN_TIMEOUT_MS, null as any);
+            if (!output) return null;
+            return { market: m, output, ctx } as ScanResult;
+          })
+        )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 
-      // Look for markets the master-decision agent approved for trading
-      const tradeable = groupResults.filter(r => r.output.shouldTrade);
-      if (tradeable.length > 0) {
-        tradeable.sort((a, b) => b.output.qualityScore - a.output.qualityScore);
-        bestResult = tradeable[0];
+        totalMarketsScanned += marketResults.length;
+
+        if (marketResults.length === 0) return null;
+
+        // Pick the best market in this group — prefer shouldTrade=true, then highest qualityScore
+        const tradeable = marketResults.filter(r => r.output.shouldTrade);
+        const groupBest = tradeable.length > 0
+          ? tradeable.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
+          : marketResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0];
+
         logger.info({
-          group: GROUP_NAMES[gi], symbol: bestResult.market.symbol,
-          quality: bestResult.output.qualityScore, groupsChecked: gi + 1,
-        }, "Opportunity found");
-        break;
-      }
+          group: GROUP_NAMES[gi],
+          scanned: marketResults.length,
+          bestSymbol: groupBest.market.symbol,
+          quality: groupBest.output.qualityScore,
+          shouldTrade: groupBest.output.shouldTrade,
+          tradeableCount: tradeable.length,
+        }, "Group scan complete");
 
-      logger.info({ group: GROUP_NAMES[gi], scanned: group.length }, "No opportunity — trying next group");
+        broadcastSSE("group_scanned", {
+          group: GROUP_NAMES[gi],
+          scanned: marketResults.length,
+          bestSymbol: groupBest.market.symbol,
+          bestDisplayName: groupBest.market.displayName,
+          quality: groupBest.output.qualityScore,
+          shouldTrade: groupBest.output.shouldTrade,
+          contract: groupBest.output.recommendation?.product ?? null,
+          confidence: groupBest.output.confidenceScore,
+        });
+
+        return { ...groupBest, groupName: GROUP_NAMES[gi] };
+      })
+    )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
+
+    // ── Phase 2: Tournament — pick the overall winner ────────────────────────
+    // Among tradeable group winners, pick the highest qualityScore.
+    const tradeableWinners = groupWinners.filter(w => w.output.shouldTrade);
+    const bestResult: (ScanResult & { groupName: string }) | null = tradeableWinners.length > 0
+      ? tradeableWinners.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
+      : null;
+
+    if (bestResult) {
+      logger.info({
+        symbol: bestResult.market.symbol,
+        group: bestResult.groupName,
+        quality: bestResult.output.qualityScore,
+        groupsScanned: groupWinners.length,
+        marketsScanned: totalMarketsScanned,
+      }, "Tournament winner — executing");
+    } else {
+      logger.info({ groupsScanned: groupWinners.length, marketsScanned: totalMarketsScanned }, "No qualifying opportunity across all groups — rescanning");
+      scheduleNext(false, 500); // Near-instant rescan
+      return;
     }
-
-    if (!bestResult) { scheduleNext(); return; }
 
     const { market: bestMarket, output } = bestResult;
     // Rebuild ctx with real token for live trade execution (scan used null for speed)
@@ -563,12 +606,12 @@ async function runAutonomousLoop() {
   scheduleNext(true);
 }
 
-function scheduleNext(tradeExecuted = false) {
+function scheduleNext(tradeExecuted = false, overrideDelayMs?: number) {
   if (!engineRunning) return;
   // Clear any pending timer before scheduling a new one (prevents double-fires)
   if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
-  // 5s after a trade (to let Deriv account settle), 3s otherwise
-  const delayMs = tradeExecuted ? 5000 : 3000;
+  // 5s after a trade (to let Deriv account settle), 500ms when rescanning for opportunity, 3s otherwise
+  const delayMs = overrideDelayMs ?? (tradeExecuted ? 5000 : 3000);
   nextScanIn = Math.ceil(delayMs / 1000);
   loopIntervalSec = nextScanIn;
   autonomousTimer = setTimeout(runAutonomousLoop, delayMs);

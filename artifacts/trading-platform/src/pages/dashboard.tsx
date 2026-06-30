@@ -33,6 +33,18 @@ interface PendingResult {
   createdAt: string;
 }
 
+interface GroupScanResult {
+  group: string;
+  scanned: number;
+  bestSymbol: string;
+  bestDisplayName: string;
+  quality: number;
+  shouldTrade: boolean;
+  contract: string | null;
+  confidence: number;
+  scanningAt?: number;
+}
+
 function formatCooldown(secs: number): string {
   const m = Math.floor(secs / 60);
   const s = secs % 60;
@@ -153,6 +165,113 @@ function AIOpportunityScanner() {
   );
 }
 
+const GROUP_COLORS: Record<string, string> = {
+  "Volatility 1s": "#00ffff",
+  "Volatility":    "#8b5cf6",
+  "Jump Indices":  "#f59e0b",
+  "Bull/Bear":     "#10b981",
+};
+const CONTRACT_SHORT: Record<string, string> = {
+  CALL: "RISE", PUT: "FALL", DIGITOVER: "OVER", DIGITUNDER: "UNDER", DIGITEVEN: "EVEN", DIGITODD: "ODD",
+};
+
+function ParallelGroupScanner({ groups, isScanning, winner }: {
+  groups: Record<string, GroupScanResult | "scanning">;
+  isScanning: boolean;
+  winner: string | null;
+}) {
+  const GROUP_ORDER = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"];
+  const hasAnyData = Object.keys(groups).length > 0;
+
+  if (!isScanning && !hasAnyData) return null;
+
+  return (
+    <div className="rounded-lg border border-primary/15 bg-primary/3 p-3 space-y-2">
+      <div className="flex items-center gap-2 mb-2">
+        <div className="flex gap-0.5">
+          {[0,1,2].map(i => (
+            <span key={i} className="w-1 h-1 rounded-full bg-primary animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
+          ))}
+        </div>
+        <span className="text-[10px] font-mono text-primary/80 uppercase tracking-widest">
+          {isScanning ? "Parallel group tournament — all 4 groups racing" : "Last scan results"}
+        </span>
+        {winner && (
+          <span className="ml-auto text-[9px] font-mono text-green-400 border border-green-500/30 px-1.5 py-0.5 rounded">
+            ✓ EXECUTING: {winner}
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        {GROUP_ORDER.map(groupName => {
+          const result = groups[groupName];
+          const color = GROUP_COLORS[groupName] ?? "#00ffff";
+          const isGroupScanning = result === "scanning";
+          const isWinner = result !== "scanning" && result && winner && result.bestSymbol === winner;
+
+          return (
+            <div
+              key={groupName}
+              className="rounded-md p-2 border transition-all"
+              style={{
+                borderColor: isWinner ? color : `${color}25`,
+                background: isWinner ? `${color}12` : `${color}06`,
+                boxShadow: isWinner ? `0 0 8px ${color}30` : undefined,
+              }}
+            >
+              {/* Group header */}
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[9px] font-mono font-bold uppercase tracking-wide" style={{ color }}>
+                  {groupName}
+                </span>
+                {isGroupScanning ? (
+                  <span className="w-1 h-1 rounded-full animate-pulse" style={{ background: color }} />
+                ) : result ? (
+                  <span className={`text-[8px] font-mono px-1 py-0.5 rounded ${result.shouldTrade ? "text-green-400 bg-green-500/15" : "text-zinc-500 bg-zinc-800/50"}`}>
+                    {result.shouldTrade ? "GO" : "SKIP"}
+                  </span>
+                ) : (
+                  <span className="text-[8px] text-zinc-600 font-mono">—</span>
+                )}
+              </div>
+
+              {isGroupScanning ? (
+                <div className="space-y-1">
+                  <div className="h-2 rounded bg-black/20 overflow-hidden">
+                    <div className="h-full rounded animate-pulse" style={{ width: "60%", background: color, opacity: 0.4 }} />
+                  </div>
+                  <div className="text-[8px] text-muted-foreground font-mono">Scanning…</div>
+                </div>
+              ) : result && result !== "scanning" ? (
+                <div className="space-y-1">
+                  <div className="text-[10px] font-semibold leading-tight truncate">{result.bestDisplayName}</div>
+                  <div className="text-[8px] font-mono text-muted-foreground">{result.bestSymbol}</div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-mono font-bold" style={{ color: result.shouldTrade ? color : "#71717a" }}>
+                      {result.confidence.toFixed(0)}%
+                    </span>
+                    {result.contract && (
+                      <span className="text-[8px] font-mono" style={{ color: `${color}90` }}>
+                        {CONTRACT_SHORT[result.contract] ?? result.contract}
+                      </span>
+                    )}
+                  </div>
+                  <div className="h-0.5 w-full bg-black/20 rounded-full overflow-hidden">
+                    <div className="h-full rounded-full transition-all duration-500"
+                      style={{ width: `${Math.min(100, result.quality)}%`, background: result.shouldTrade ? color : "#52525b" }} />
+                  </div>
+                </div>
+              ) : (
+                <div className="text-[8px] text-muted-foreground font-mono mt-1">Waiting…</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const { data: summary } = useGetDailySummary({ query: { refetchInterval: 5000 } } as { query: any });
   const { data: topMarket } = useGetTopMarket({ query: { refetchInterval: 8000 } } as { query: any });
@@ -174,6 +293,10 @@ export default function Dashboard() {
 
   // Optimistic trade results — applied immediately when trade_completed SSE fires
   const [pendingResults, setPendingResults] = useState<PendingResult[]>([]);
+  // Parallel group scanner state — driven by scan_started + group_scanned SSE events
+  const [groupScans, setGroupScans] = useState<Record<string, GroupScanResult | "scanning">>({});
+  const [isScanningGroups, setIsScanningGroups] = useState(false);
+  const [tournamentWinner, setTournamentWinner] = useState<string | null>(null);
 
   // SSE: journal_refreshed syncs journal; trade_completed applies immediate stat delta
   const sseRef = useRef<EventSource | null>(null);
@@ -181,18 +304,49 @@ export default function Dashboard() {
     const es = new EventSource("/api/ai/events");
     sseRef.current = es;
 
+    // Parallel tournament scan events
+    es.addEventListener("scan_started", (e: MessageEvent) => {
+      try {
+        const payload = JSON.parse(e.data);
+        const scanning: Record<string, "scanning"> = {};
+        for (const g of (payload.groups ?? [])) scanning[g] = "scanning";
+        setGroupScans(scanning);
+        setIsScanningGroups(true);
+        setTournamentWinner(null);
+      } catch {}
+    });
+
+    es.addEventListener("group_scanned", (e: MessageEvent) => {
+      try {
+        const payload: GroupScanResult = JSON.parse(e.data);
+        setGroupScans(prev => ({ ...prev, [payload.group]: payload }));
+      } catch {}
+    });
+
+    es.addEventListener("scan_complete", (e: MessageEvent) => {
+      try {
+        const payload = JSON.parse(e.data);
+        setIsScanningGroups(false);
+        if (payload.shouldTrade && payload.symbol) setTournamentWinner(payload.symbol);
+        else setTournamentWinner(null);
+      } catch {}
+    });
+
     es.addEventListener("trade_completed", (e: MessageEvent) => {
       try {
         const payload = JSON.parse(e.data);
-        const trade = payload?.trade;
-        if (trade) {
+        const won = payload?.won;
+        const profit = parseFloat(payload?.profit ?? "0");
+        if (won !== undefined) {
           setPendingResults(prev => [...prev.slice(-9), {
-            won: !!trade.won,
-            profit: trade.profit ?? 0,
-            createdAt: trade.createdAt ?? new Date().toISOString(),
+            won: !!won,
+            profit,
+            createdAt: new Date().toISOString(),
           }]);
           queryClient.invalidateQueries({ queryKey: ["getDailySummary"] });
         }
+        setTournamentWinner(null);
+        setIsScanningGroups(false);
       } catch {}
     });
 
@@ -466,7 +620,7 @@ export default function Dashboard() {
                 <div className="flex items-center gap-2 flex-1">
                   <RefreshCw className="w-3.5 h-3.5 text-green-500 animate-spin" />
                   <span className="text-xs text-green-400 font-mono">
-                    {engine.currentMarket ? `Scanning ${engine.currentMarket}` : "Scanning markets…"}
+                    {isScanningGroups ? "Running 4-group parallel tournament…" : tournamentWinner ? `Executing: ${tournamentWinner}` : "Scanning markets…"}
                   </span>
                 </div>
                 {countdown !== null && (
@@ -475,9 +629,6 @@ export default function Dashboard() {
                     <span>Next trade in <span className="text-foreground font-bold">{countdown}s</span></span>
                   </div>
                 )}
-                <div className="text-[10px] text-muted-foreground font-mono">
-                  every {(engine as any).loopIntervalSec ?? 30}s
-                </div>
               </motion.div>
             )}
             {!engine?.isRunning && !cooldownSecs && engine?.stopReasons && engine.stopReasons.length > 0 && (
@@ -491,6 +642,15 @@ export default function Dashboard() {
               </motion.div>
             )}
           </AnimatePresence>
+
+          {/* Parallel group scanner — shows all 4 groups racing in real time */}
+          {engine?.isRunning && (
+            <ParallelGroupScanner
+              groups={groupScans}
+              isScanning={isScanningGroups}
+              winner={tournamentWinner}
+            />
+          )}
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {(engine?.agentStatuses ?? []).map((agent: any) => {
