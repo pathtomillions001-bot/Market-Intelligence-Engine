@@ -795,11 +795,160 @@ export interface ContractProposal {
   askPrice: number;
 }
 
+// ── Persistent journal WebSocket manager ─────────────────────────────────────
+// Maintains a single long-lived WS connection for fetching the Deriv profit
+// table so the journal never disconnects as long as a token is active.
+class DerivJournalManager extends EventEmitter {
+  private ws: WebSocket | null = null;
+  private token: string | null = null;
+  private cachedTransactions: any[] = [];
+  private lastFetchMs = 0;
+  private isAuthorized = false;
+  private reconnectDelay = 3000;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private lastPongMs = Date.now();
+
+  setToken(token: string) {
+    if (this.token === token && this.ws?.readyState === WebSocket.OPEN && this.isAuthorized) return;
+    this.token = token;
+    this.reconnectDelay = 3000;
+    this.connect();
+    this.startRefreshTimer();
+  }
+
+  clearToken() {
+    this.token = null;
+    this.cachedTransactions = [];
+    this.lastFetchMs = 0;
+    this.isAuthorized = false;
+    this.stopTimers();
+    if (this.ws) { try { this.ws.terminate(); } catch { /* ignore */ } this.ws = null; }
+    logger.info("JournalManager: cleared (token disconnected)");
+  }
+
+  getCached(): any[] { return this.cachedTransactions; }
+
+  isCacheFresh(maxAgeMs = 120_000): boolean {
+    return this.lastFetchMs > 0 && (Date.now() - this.lastFetchMs) < maxAgeMs;
+  }
+
+  private stopTimers() {
+    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+    if (this.refreshTimer) { clearInterval(this.refreshTimer); this.refreshTimer = null; }
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+  }
+
+  private startRefreshTimer() {
+    if (this.refreshTimer) clearInterval(this.refreshTimer);
+    this.refreshTimer = setInterval(() => {
+      if (this.isAuthorized && this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 200 }));
+      }
+    }, 60_000);
+  }
+
+  private connect() {
+    if (this.ws) { try { this.ws.terminate(); } catch { /* ignore */ } this.ws = null; }
+    if (!this.token) return;
+
+    try {
+      this.ws = new WebSocket(DERIV_WS_URL);
+    } catch (err) {
+      logger.warn({ err }, "JournalManager: failed to create WS, will retry");
+      this.scheduleReconnect();
+      return;
+    }
+
+    this.ws.on("open", () => {
+      this.isAuthorized = false;
+      this.lastPongMs = Date.now();
+      logger.info("JournalManager: WS connected, authorizing");
+      this.ws!.send(JSON.stringify({ authorize: this.token }));
+      this.startPing();
+    });
+
+    this.ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.msg_type === "authorize" && msg.authorize && !this.isAuthorized) {
+          this.isAuthorized = true;
+          this.reconnectDelay = 3000;
+          logger.info({ loginId: msg.authorize.loginid }, "JournalManager: authorized, fetching profit table");
+          this.ws!.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 200 }));
+        }
+        if (msg.msg_type === "profit_table" && msg.profit_table) {
+          this.cachedTransactions = msg.profit_table.transactions ?? [];
+          this.lastFetchMs = Date.now();
+          logger.info({ count: this.cachedTransactions.length }, "JournalManager: profit table refreshed");
+          this.emit("refreshed", this.cachedTransactions);
+        }
+        if (msg.msg_type === "pong" || msg.msg_type === "ping") {
+          this.lastPongMs = Date.now();
+        }
+        if (msg.error) {
+          logger.warn({ code: msg.error.code, message: msg.error.message }, "JournalManager: error from Deriv");
+          // If invalid token, don't retry
+          if (msg.error.code === "InvalidToken" || msg.error.code === "AuthorizationRequired") {
+            this.token = null;
+            this.stopTimers();
+          }
+        }
+      } catch { /* ignore */ }
+    });
+
+    this.ws.on("error", (err) => {
+      logger.warn({ msg: (err as Error).message }, "JournalManager: WS error");
+    });
+
+    this.ws.on("close", () => {
+      this.isAuthorized = false;
+      if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+      logger.info("JournalManager: WS closed, scheduling reconnect");
+      this.scheduleReconnect();
+    });
+  }
+
+  private startPing() {
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = setInterval(() => {
+      if (Date.now() - this.lastPongMs > 60_000) {
+        logger.warn("JournalManager: no pong for 60s — reconnecting");
+        this.connect();
+        return;
+      }
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ ping: 1 }));
+      }
+    }, 25_000);
+  }
+
+  private scheduleReconnect() {
+    if (!this.token) return;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, 30_000);
+      logger.info({ delay: this.reconnectDelay }, "JournalManager: reconnecting");
+      this.connect();
+    }, this.reconnectDelay);
+  }
+}
+
+export const journalManager = new DerivJournalManager();
+
 let cachedToken: string | null = null;
 let cachedAccountInfo: DerivAccountInfo | null = null;
 
-export function setDerivToken(token: string) { cachedToken = token; }
-export function clearDerivToken() { cachedToken = null; cachedAccountInfo = null; }
+export function setDerivToken(token: string) {
+  cachedToken = token;
+  journalManager.setToken(token);
+}
+export function clearDerivToken() {
+  cachedToken = null;
+  cachedAccountInfo = null;
+  journalManager.clearToken();
+}
 export function getCachedAccountInfo() { return cachedAccountInfo; }
 export function getCachedToken() { return cachedToken; }
 

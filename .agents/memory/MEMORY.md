@@ -11,3 +11,4 @@
 - [Deriv contract settlement status](deriv-settlement-status.md) — waitForContractResult must check status "won"/"lost"/"expired" not just "sold"; is_sold can be 1 not true; profit sign determines won when status is ambiguous.
 - [Digit barrier tier system](digit-tier-system.md) — Tier 1: OVER 1-3 / UNDER 6-8; Tier 2: OVER 4-6 / UNDER 3-5; hard-blocked: OVER 7/8, UNDER 1/2 (never selected); OVER 0 / UNDER 9 are tier-0 but not blocked.
 - [Autonomous loop safety](autonomous-loop-safety.md) — isLoopRunning flag + open-trade DB guard prevent concurrent trades; Deriv profit used as ground truth for P&L; settlement timeout +30s buffer.
+- [Journal manager + no-fallback policy](journal-manager.md) — DerivJournalManager in deriv.ts: persistent WS, ping every 25s, reconnect if no pong 60s, profit_table refresh every 60s; no local DB fallback anywhere in journal/stats/daily-summary routes.

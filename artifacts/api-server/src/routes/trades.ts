@@ -3,7 +3,7 @@ import { db } from "@workspace/db";
 import { tradesTable, accountsTable, settingsTable } from "@workspace/db";
 import { eq, desc, and, sql } from "drizzle-orm";
 import { ExecuteTradeBody, GetTradesQueryParams, GetTradeParams } from "@workspace/api-zod";
-import { tickManager, DERIV_MARKETS, getCachedToken, executeLiveTrade, waitForContractResult, getLiveBalance, fetchDerivProfitTable } from "../lib/deriv";
+import { tickManager, DERIV_MARKETS, getCachedToken, executeLiveTrade, waitForContractResult, getLiveBalance, fetchDerivProfitTable, journalManager } from "../lib/deriv";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome, updateDigitRecovery } from "../lib/agent-coordinator";
 import { logger } from "../lib/logger";
 import { broadcastSSE } from "../lib/sse";
@@ -44,85 +44,59 @@ function buildDailyStatsForManual(closedToday: any[]): DailyStats {
   return { tradesCount: closedToday.length, wins, losses, profit, consecutiveLosses, consecutiveWins };
 }
 
+// ── Helper: get Deriv journal transactions (cache-first, one-shot fallback) ────
+async function getDerivTransactions(token: string): Promise<any[]> {
+  // Return cached data if fresh (within 2 min)
+  if (journalManager.isCacheFresh(120_000)) {
+    return journalManager.getCached();
+  }
+  // Cache stale or empty — do a one-shot fetch and let the persistent manager update async
+  try {
+    return await fetchDerivProfitTable(token, 200);
+  } catch {
+    // Use whatever is in cache even if stale
+    return journalManager.getCached();
+  }
+}
+
+const EMPTY_STATS = {
+  totalTrades: 0, wonTrades: 0, lostTrades: 0, winRate: 0,
+  totalProfit: 0, avgProfit: 0, bestTrade: 0, worstTrade: 0,
+  currentStreak: 0, longestWinStreak: 0, longestLoseStreak: 0,
+};
+
 // ── Stats ──────────────────────────────────────────────────────────────────────
 
 router.get("/stats", async (_req, res): Promise<void> => {
   const accounts = await db.select().from(accountsTable).limit(1);
   const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
 
-  // When Deriv token exists use profit_table as source of truth — same as the journal
-  if (token) {
-    try {
-      const transactions = await fetchDerivProfitTable(token, 200);
-      if (transactions.length > 0) {
-        const mapped = transactions.map((t: any) => {
-          const buyPrice = Number(t.buy_price ?? 0);
-          const sellPrice = Number(t.sell_price ?? 0);
-          const profit = Math.round((sellPrice - buyPrice) * 100) / 100;
-          return { won: profit > 0, profit, createdAt: t.purchase_time ? new Date(t.purchase_time * 1000).toISOString() : new Date().toISOString() };
-        });
-        const stats = computeJournalStats(mapped);
-        res.json({
-          totalTrades: stats.totalTrades,
-          wonTrades: stats.wonTrades,
-          lostTrades: stats.lostTrades,
-          winRate: stats.winRate,
-          totalProfit: stats.totalProfit,
-          avgProfit: stats.avgProfit,
-          bestTrade: stats.bestTrade,
-          worstTrade: stats.worstTrade,
-          currentStreak: stats.currentStreak,
-          longestWinStreak: stats.longestWinStreak,
-          longestLoseStreak: stats.longestLoseStreak,
-        });
-        return;
-      }
-    } catch { /* fall through to local */ }
+  if (!token) {
+    res.json(EMPTY_STATS);
+    return;
   }
 
-  // Fallback: local DB
-  const trades = await db.select().from(tradesTable).where(
-    sql`${tradesTable.status} IN ('won', 'lost')`
-  );
+  const transactions = await getDerivTransactions(token);
+  const mapped = transactions.map((t: any) => {
+    const buyPrice = Number(t.buy_price ?? 0);
+    const sellPrice = Number(t.sell_price ?? 0);
+    const profit = Math.round((sellPrice - buyPrice) * 100) / 100;
+    return { won: profit > 0, profit, createdAt: t.purchase_time ? new Date(t.purchase_time * 1000).toISOString() : new Date().toISOString() };
+  });
 
-  const won = trades.filter((t) => t.status === "won");
-  const lost = trades.filter((t) => t.status === "lost");
-  const profits = trades.map((t) => Number(t.profit ?? 0));
-  const winProfits = won.map((t) => Number(t.profit ?? 0));
-  const lossProfits = lost.map((t) => Number(t.profit ?? 0));
-
-  const sorted = [...trades].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  let longestWin = 0, longestLose = 0;
-  let curWin = 0, curLose = 0;
-  for (const t of sorted) {
-    if (t.status === "won") { curWin++; curLose = 0; }
-    else { curLose++; curWin = 0; }
-    longestWin = Math.max(longestWin, curWin);
-    longestLose = Math.max(longestLose, curLose);
-  }
-  let currentStreak = 0;
-  if (sorted.length > 0) {
-    const last = sorted[0];
-    let streak = 0;
-    for (const t of sorted) {
-      if (t.status === last.status) streak++;
-      else break;
-    }
-    currentStreak = last.status === "won" ? streak : -streak;
-  }
-
+  const stats = computeJournalStats(mapped);
   res.json({
-    totalTrades: trades.length,
-    wonTrades: won.length,
-    lostTrades: lost.length,
-    winRate: trades.length > 0 ? won.length / trades.length : 0,
-    totalProfit: profits.reduce((a, b) => a + b, 0),
-    avgProfit: profits.length > 0 ? profits.reduce((a, b) => a + b, 0) / profits.length : 0,
-    bestTrade: winProfits.length > 0 ? Math.max(...winProfits) : 0,
-    worstTrade: lossProfits.length > 0 ? Math.min(...lossProfits) : 0,
-    currentStreak,
-    longestWinStreak: longestWin,
-    longestLoseStreak: longestLose,
+    totalTrades: stats.totalTrades,
+    wonTrades: stats.wonTrades,
+    lostTrades: stats.lostTrades,
+    winRate: stats.winRate,
+    totalProfit: stats.totalProfit,
+    avgProfit: stats.avgProfit,
+    bestTrade: stats.bestTrade,
+    worstTrade: stats.worstTrade,
+    currentStreak: stats.currentStreak,
+    longestWinStreak: stats.longestWinStreak,
+    longestLoseStreak: stats.longestLoseStreak,
   });
 });
 
@@ -130,39 +104,52 @@ router.get("/daily-summary", async (_req, res): Promise<void> => {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const todayTrades = await db.select().from(tradesTable).where(
-    sql`${tradesTable.createdAt} >= ${today}`
-  );
-
   const settings = await db.select().from(settingsTable).limit(1);
   const accounts = await db.select().from(accountsTable).limit(1);
+  const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
 
   const dailyTarget = settings.length > 0 ? Number(settings[0].dailyTarget) : 50;
   const dailyLossLimit = settings.length > 0 ? Number(settings[0].dailyLossLimit) : 30;
-  const balance = accounts.length > 0 ? Number(accounts[0].balance) : DEMO_BALANCE;
+  const balance = accounts.length > 0 ? Number(accounts[0].balance) : 0;
 
-  const closed = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
-  const totalProfit = closed.reduce((s, t) => s + Number(t.profit ?? 0), 0);
-  const won = closed.filter((t) => t.status === "won").length;
-
-  // Compute today's streak from today's trades (newest first)
-  const sortedToday = [...closed].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  let currentStreak = 0;
-  if (sortedToday.length > 0) {
-    const lastStatus = sortedToday[0].status;
-    let streak = 0;
-    for (const t of sortedToday) {
-      if (t.status === lastStatus) streak++;
-      else break;
-    }
-    currentStreak = lastStatus === "won" ? streak : -streak;
+  if (!token) {
+    // No Deriv connection — use local DB for engine-tracked trades only
+    const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
+    const closed = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
+    const totalProfit = closed.reduce((s, t) => s + Number(t.profit ?? 0), 0);
+    const won = closed.filter((t) => t.status === "won").length;
+    res.json({
+      date: today.toISOString().split("T")[0],
+      tradesCount: closed.length, wonCount: won, lostCount: closed.length - won,
+      totalProfit, dailyTarget, dailyLossLimit,
+      targetProgress: dailyTarget > 0 ? Math.min(totalProfit / dailyTarget, 1) : 0,
+      isTargetMet: totalProfit >= dailyTarget, isLossLimitHit: totalProfit <= -dailyLossLimit,
+      balanceStart: balance - totalProfit, balanceNow: balance, currentStreak: 0,
+    });
+    return;
   }
+
+  // Use Deriv journal as source of truth
+  const transactions = await getDerivTransactions(token);
+  const allMapped = transactions.map((t: any) => {
+    const buyPrice = Number(t.buy_price ?? 0);
+    const sellPrice = Number(t.sell_price ?? 0);
+    const profit = Math.round((sellPrice - buyPrice) * 100) / 100;
+    return { won: profit > 0, profit, createdAt: t.purchase_time ? new Date(t.purchase_time * 1000).toISOString() : new Date().toISOString() };
+  });
+
+  const todayMapped = allMapped.filter((t) => new Date(t.createdAt) >= today);
+  const totalProfit = Math.round(todayMapped.reduce((s, t) => s + t.profit, 0) * 100) / 100;
+  const won = todayMapped.filter((t) => t.won).length;
+
+  // Streak from ALL recent trades (newest first from Deriv API — most accurate)
+  const allStats = computeJournalStats(allMapped);
 
   res.json({
     date: today.toISOString().split("T")[0],
-    tradesCount: closed.length,
+    tradesCount: todayMapped.length,
     wonCount: won,
-    lostCount: closed.length - won,
+    lostCount: todayMapped.length - won,
     totalProfit,
     dailyTarget,
     dailyLossLimit,
@@ -171,7 +158,7 @@ router.get("/daily-summary", async (_req, res): Promise<void> => {
     isLossLimitHit: totalProfit <= -dailyLossLimit,
     balanceStart: balance - totalProfit,
     balanceNow: balance,
-    currentStreak,
+    currentStreak: allStats.currentStreak,
   });
 });
 
@@ -444,6 +431,7 @@ router.post("/", async (req, res): Promise<void> => {
 });
 
 // ── Shared: compute stats from a trade list ────────────────────────────────────
+// NOTE: trades must be sorted newest-first (Deriv profit_table default: sort:"DESC")
 function computeJournalStats(trades: any[]) {
   const won = trades.filter((t) => t.won);
   const lost = trades.filter((t) => !t.won);
@@ -452,9 +440,9 @@ function computeJournalStats(trades: any[]) {
   const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
   const today = trades.filter((t) => new Date(t.createdAt) >= todayStart);
 
-  // Streak (from newest to oldest)
+  // Streak: iterate newest-first (trades[0] is most recent) — correct consecutive count
   let currentStreak = 0;
-  for (const t of [...trades].reverse()) {
+  for (const t of trades) {
     if (currentStreak === 0) currentStreak = t.won ? 1 : -1;
     else if (t.won && currentStreak > 0) currentStreak++;
     else if (!t.won && currentStreak < 0) currentStreak--;
@@ -498,62 +486,53 @@ function normalizeDerivContractType(ct: string): string {
   return ct;
 }
 
-// ── Deriv profit_table journal (source of truth for all P&L / win stats) ───────
+// ── Deriv profit_table journal (sole source of truth — no local fallback) ───────
 router.get("/deriv-journal", async (_req, res): Promise<void> => {
   const accounts = await db.select().from(accountsTable).limit(1);
   const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
 
-  const mapLocal = (trades: any[]) => {
-    const list = trades.map(formatTrade).map((t) => ({ ...t, contractType: normalizeDerivContractType(t.contractType) }));
-    return { source: "local" as const, trades: list, stats: computeJournalStats(list) };
-  };
+  const emptyResponse = { source: "none" as const, trades: [], stats: computeJournalStats([]) };
 
   if (!token) {
-    const trades = await db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(200);
-    res.json(mapLocal(trades));
+    res.json(emptyResponse);
     return;
   }
 
-  try {
-    const transactions = await fetchDerivProfitTable(token, 200);
-    if (transactions.length === 0) {
-      const trades = await db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(200);
-      res.json(mapLocal(trades));
-      return;
-    }
+  const transactions = await getDerivTransactions(token);
 
-    const mapped = transactions.map((t: any) => {
-      const buyPrice = Number(t.buy_price ?? 0);
-      const sellPrice = Number(t.sell_price ?? 0);
-      const profit = Math.round((sellPrice - buyPrice) * 100) / 100;
-      const market = DERIV_MARKETS.find((m) => m.symbol === t.underlying_symbol);
-      return {
-        id: t.transaction_id,
-        symbol: t.underlying_symbol ?? "—",
-        displayName: market?.displayName ?? t.underlying_symbol ?? "—",
-        contractType: normalizeDerivContractType(t.contract_type ?? "UNKNOWN"),
-        barrier: null,
-        stake: buyPrice,
-        payout: sellPrice,
-        profit,
-        won: profit > 0,
-        status: profit > 0 ? "won" : "lost",
-        duration: t.duration,
-        durationUnit: t.duration_unit,
-        createdAt: t.purchase_time ? new Date(t.purchase_time * 1000).toISOString() : new Date().toISOString(),
-        closedAt: t.sell_time ? new Date(t.sell_time * 1000).toISOString() : null,
-        longcode: t.longcode ?? null,
-        isAutonomous: false,
-        aiConfidence: null,
-        source: "deriv",
-      };
-    });
-
-    res.json({ source: "deriv" as const, trades: mapped, stats: computeJournalStats(mapped) });
-  } catch {
-    const trades = await db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(200);
-    res.json(mapLocal(trades));
+  if (transactions.length === 0) {
+    res.json({ source: "deriv" as const, trades: [], stats: computeJournalStats([]) });
+    return;
   }
+
+  const mapped = transactions.map((t: any) => {
+    const buyPrice = Number(t.buy_price ?? 0);
+    const sellPrice = Number(t.sell_price ?? 0);
+    const profit = Math.round((sellPrice - buyPrice) * 100) / 100;
+    const market = DERIV_MARKETS.find((m) => m.symbol === t.underlying_symbol);
+    return {
+      id: t.transaction_id,
+      symbol: t.underlying_symbol ?? "—",
+      displayName: market?.displayName ?? t.underlying_symbol ?? "—",
+      contractType: normalizeDerivContractType(t.contract_type ?? "UNKNOWN"),
+      barrier: null,
+      stake: buyPrice,
+      payout: sellPrice,
+      profit,
+      won: profit > 0,
+      status: profit > 0 ? "won" : "lost",
+      duration: t.duration,
+      durationUnit: t.duration_unit,
+      createdAt: t.purchase_time ? new Date(t.purchase_time * 1000).toISOString() : new Date().toISOString(),
+      closedAt: t.sell_time ? new Date(t.sell_time * 1000).toISOString() : null,
+      longcode: t.longcode ?? null,
+      isAutonomous: false,
+      aiConfidence: null,
+      source: "deriv",
+    };
+  });
+
+  res.json({ source: "deriv" as const, trades: mapped, stats: computeJournalStats(mapped) });
 });
 
 router.get("/:id", async (req, res): Promise<void> => {
