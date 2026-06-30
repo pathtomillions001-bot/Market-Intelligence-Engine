@@ -104,7 +104,7 @@ function AIOpportunityScanner() {
           </Link>
         </div>
         <p className="text-[11px] text-muted-foreground mt-0.5">
-          Top 6 markets by AI quality score — 9-agent ensemble · click to view &amp; trade
+          Top 6 markets by AI quality score — 13-agent ensemble · click to view &amp; trade
         </p>
       </CardHeader>
       <CardContent>
@@ -691,7 +691,7 @@ export default function Dashboard() {
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <CardTitle className="text-sm font-medium flex items-center gap-2">
-              <Activity className="w-4 h-4 text-primary" /> AI Engine — 8 Agents
+              <Activity className="w-4 h-4 text-primary" /> AI Engine — 13 Agents
             </CardTitle>
             <div className="flex items-center gap-3">
               <span className="text-xs text-muted-foreground font-mono">

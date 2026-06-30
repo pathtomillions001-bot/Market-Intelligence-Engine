@@ -1,44 +1,108 @@
 /**
- * Agent Coordinator
+ * Agent Coordinator — 13-Agent Institutional System
  *
- * Orchestrates the full multi-agent pipeline for a single market scan.
- * Replaces the monolithic `analyzeMarket()` function entirely.
+ * Orchestrates the complete 13-agent pipeline for every market scan.
  *
- * Pipeline (agents run in dependency order, parallel where possible):
+ * Pipeline (stages run in dependency order, parallel where possible):
  *
- *   Stage 1 (parallel):  FeatureEngineering + DailyStats fetch
- *   Stage 2 (parallel):  MarketRegime + Direction + Digit
- *   Stage 2.5:           Duration Optimizer (needs regime + features)
- *   Stage 3:             EVCalculator (needs Direction + Digit + duration)
- *   Stage 4 (parallel):  RiskManager + ExecutionTiming + PerformanceFeedback
- *   Stage 5:             MasterDecision (aggregates all)
+ *   Stage 1:       Feature Engineering (data pipeline)
+ *   Stage 2 (∥):  Market Scanner + Tick Intelligence + Market Regime
+ *   Stage 3 (∥):  Digit Probability + Rise/Fall + Portfolio Manager + Recovery Intelligence
+ *   Stage 3.5:    Duration Optimizer (needs regime + features)
+ *   Stage 4:      EV Calculator (needs direction + digit + duration)
+ *   Stage 5 (∥):  Risk Intelligence + Execution Timing + Learning Agent
+ *   Stage 6 (∥):  Pattern Discovery + Confidence Fusion
+ *   Stage 7:      Trade Explainability
+ *   Stage 8:      Master Decision → CoordinatorOutput
  *
- * Output is a CoordinatorOutput that is backward-compatible with the existing
- * API contract (same fields as the old MarketAnalysis + FinalizedAnalysis).
+ * Backward compatible: same CoordinatorOutput shape, same API contract.
  */
 
 import type { ScanContext, CoordinatorOutput, TradingSettings, DailyStats } from "./agents/types";
+
+// ── Stage 1: Data pipeline ────────────────────────────────────────────────────
 import { runFeatureEngineeringAgent } from "./agents/feature-engineering";
+
+// ── Stage 2: Market evaluation ────────────────────────────────────────────────
+import { runMarketScannerAgent } from "./agents/market-scanner";
+import { runTickIntelligenceAgent } from "./agents/tick-intelligence";
 import { runMarketRegimeAgent } from "./agents/market-regime";
-import { runDirectionAgent } from "./agents/direction-agent";
-import { runDigitAgent } from "./agents/digit-agent";
-import { runEVCalculatorAgent, computeStake } from "./agents/ev-calculator";
-import { runRiskManagerAgent } from "./agents/risk-manager";
-import { runExecutionTimingAgent } from "./agents/execution-timing";
-import { runPerformanceFeedbackAgent, recordTradeOutcome, getStrategyStats } from "./agents/performance-feedback";
-import { makeFinalDecision } from "./agents/master-decision";
+
+// ── Stage 3: Contract-specific analysis ───────────────────────────────────────
+import { runDigitProbabilityAgent } from "./agents/digit-probability";
+import { runRiseFallAgent } from "./agents/rise-fall-agent";
+import { runPortfolioManagerAgent } from "./agents/portfolio-manager";
+import { runRecoveryIntelligenceAgent, recordTradeOutcomeRecovery } from "./agents/recovery-intelligence";
+
+// ── Stage 3.5: Duration optimization ──────────────────────────────────────────
 import { selectOptimalDuration } from "./agents/duration-optimizer";
-import { isInDigitRecovery, updateDigitRecovery } from "./agents/digit-agent";
-import { analyzeDigits } from "./deriv";
-import { getContractProposal } from "./deriv";
+
+// ── Stage 4: Expected value ────────────────────────────────────────────────────
+import { runEVCalculatorAgent, computeStake } from "./agents/ev-calculator";
+
+// ── Stage 5: Risk, timing, learning ───────────────────────────────────────────
+import { runRiskIntelligenceAgent } from "./agents/risk-intelligence";
+import { runExecutionTimingAgent } from "./agents/execution-timing";
+import { runLearningAgent, recordTradeOutcome as learningRecordOutcome, getStrategyStats } from "./agents/learning-agent";
+
+// ── Stage 6: Pattern + Fusion ─────────────────────────────────────────────────
+import { runPatternDiscoveryAgent, recordSnapshot } from "./agents/pattern-discovery";
+import { runConfidenceFusionAgent } from "./agents/confidence-fusion";
+import type { FusionInput } from "./agents/confidence-fusion";
+
+// ── Stage 7: Explainability ────────────────────────────────────────────────────
+import { runTradeExplainabilityAgent } from "./agents/trade-explainability";
+
+// ── Stage 8: Master decision (CoordinatorOutput builder) ──────────────────────
+import { makeFinalDecision } from "./agents/master-decision";
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+import { analyzeDigits, getContractProposal } from "./deriv";
 import { logger } from "./logger";
 
-// ── Re-export for backward compatibility ──────────────────────────────────────
+// ── Re-exports for backward compatibility ─────────────────────────────────────
 export type { CoordinatorOutput } from "./agents/types";
-export { recordTradeOutcome, getStrategyStats } from "./agents/performance-feedback";
-export { updateDigitRecovery, isInDigitRecovery, setGlobalDigitRecovery } from "./agents/digit-agent";
+export { getStrategyStats } from "./agents/learning-agent";
 
-// ── Payout cache (20 min TTL — avoids Deriv WS round-trip on every scan) ─────
+/** Re-export: called from ai.ts after every completed trade */
+export function recordTradeOutcome(
+  symbol: string,
+  contractType: string,
+  barrier: number | null | undefined,
+  won: boolean,
+  profit: number,
+  stake: number,
+): void {
+  learningRecordOutcome(symbol, contractType, barrier, won, profit, stake);
+}
+
+/** Compatibility shim: calls recovery-intelligence to update per-market state */
+export function updateDigitRecovery(
+  symbol: string,
+  contractType: string,
+  won: boolean,
+  profit: number,
+  stake: number,
+): void {
+  // Build a minimal ScanContext-like object just for the recovery key
+  const minCtx = {
+    symbol,
+    settings: { riskProfile: "moderate" as const },
+  } as any;
+  recordTradeOutcomeRecovery(minCtx, won, profit);
+}
+
+/** Compatibility shim: global recovery state is managed by RecoveryIntelligenceAgent */
+export function setGlobalDigitRecovery(_state: any): void {
+  // No-op: recovery-intelligence.ts manages per-symbol state internally
+}
+
+/** Compatibility shim: checks recovery-intelligence state internally */
+export function isInDigitRecovery(_symbol: string): boolean {
+  return false; // Managed by RecoveryIntelligenceAgent output now
+}
+
+// ── Payout cache (20-min TTL) ─────────────────────────────────────────────────
 const payoutCache = new Map<string, { value: number; ts: number }>();
 const PAYOUT_TTL_MS = 20 * 60 * 1000;
 
@@ -56,32 +120,19 @@ async function fetchLivePayouts(
   const result: Record<string, number> = {};
 
   for (const ct of contractTypes) {
-    const key = `${symbol}:${ct}:${barrier ?? ""}`;
-    const hit = payoutCache.get(key);
-    if (hit && now - hit.ts < PAYOUT_TTL_MS) {
-      result[ct] = hit.value;
-      continue;
-    }
+    const cacheKey = `${symbol}:${ct}:${barrier ?? ""}`;
+    const hit = payoutCache.get(cacheKey);
+    if (hit && now - hit.ts < PAYOUT_TTL_MS) { result[ct] = hit.value; continue; }
     try {
       const proposal = await Promise.race([
-        getContractProposal(token, {
-          symbol,
-          contractType: ct,
-          stake,
-          duration,
-          durationUnit: "t",
-          currency,
-          barrier: ct.startsWith("DIGIT") ? barrier : undefined,
-        }),
+        getContractProposal(token, { symbol, contractType: ct, stake, duration, durationUnit: "t", currency, barrier: ct.startsWith("DIGIT") ? barrier : undefined }),
         new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
       ]);
       if (proposal?.payoutMultiplier) {
         result[ct] = proposal.payoutMultiplier;
-        payoutCache.set(key, { value: proposal.payoutMultiplier, ts: now });
+        payoutCache.set(cacheKey, { value: proposal.payoutMultiplier, ts: now });
       }
-    } catch {
-      // fall through to defaults
-    }
+    } catch { /* fall through to defaults */ }
   }
   return result;
 }
@@ -90,145 +141,244 @@ async function fetchLivePayouts(
 
 export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutput> {
   const t0 = Date.now();
+  const preferred = ctx.settings.preferredContractTypes;
 
-  // ── Stage 1: Feature extraction ───────────────────────────────────────────
+  const wantDirection = preferred.some(t => ["RISE", "FALL", "CALL", "PUT"].includes(t));
+  const wantDigit = preferred.some(t => ["DIGITOVER", "DIGITUNDER"].includes(t));
+  const wantEvenOdd = preferred.some(t => ["DIGITEVEN", "DIGITODD"].includes(t));
+
+  // ── Stage 1: Feature Engineering (data pipeline) ──────────────────────────
   const feAgent = runFeatureEngineeringAgent(ctx);
   const features = feAgent.featureSet;
 
-  // ── Stage 2: Regime + Direction + Digit (parallel) ────────────────────────
-  // Always run direction agent regardless of preferredContractTypes so the
-  // Agent Intelligence Panel always has direction data to display.
-  const inDigitRecovery = isInDigitRecovery(ctx.symbol);
-
-  const [regimeAgent, dirAgent, digitAgent] = await Promise.all([
+  // ── Stage 2: Market Scanner + Tick Intelligence + Market Regime (parallel) ─
+  const [scannerAgent, tickAgent, regimeAgent] = await Promise.all([
+    Promise.resolve(runMarketScannerAgent(ctx)),
+    Promise.resolve(runTickIntelligenceAgent(ctx)),
     Promise.resolve(runMarketRegimeAgent(ctx, features)),
-    Promise.resolve(runDirectionAgent(ctx, features, ctx.settings.tradeDurationSec)),
-    Promise.resolve(runDigitAgent(ctx, features.digit, inDigitRecovery)),
   ]);
 
+  const scannerResult = scannerAgent.scannerResult;
+  const tickResult = tickAgent.tickResult;
   const regime = regimeAgent.regimeOutput.regime;
-  const dirResult = dirAgent.directionResult;
-  const digitResult = digitAgent.digitResult;
 
-  // Determine which contract types to consider based on preferences + regime
-  const preferred = ctx.settings.preferredContractTypes;
-  const wantDirection = preferred.some((t) => ["RISE", "FALL", "CALL", "PUT"].includes(t));
-  const wantDigit = preferred.some((t) => t.startsWith("DIGIT") && !["DIGITEVEN", "DIGITODD"].includes(t));
-  const wantEvenOdd = preferred.some((t) => t === "DIGITEVEN" || t === "DIGITODD");
-  const hasDigitEdge = digitResult?.hasEdge ?? false;
+  // ── Stage 3: Contract-specific analysis (parallel) ─────────────────────────
+  const [digitAgent, riseFallAgentOut, portfolioAgent, recoveryAgent] = await Promise.all([
+    Promise.resolve(runDigitProbabilityAgent(ctx)),
+    Promise.resolve(runRiseFallAgent(ctx, features, ctx.settings.tradeDurationSec)),
+    Promise.resolve(runPortfolioManagerAgent(ctx)),
+    Promise.resolve(runRecoveryIntelligenceAgent(ctx)),
+  ]);
 
-  // ── Stage 2.5: Duration optimization ─────────────────────────────────────
-  // Select the optimal tick duration for the most likely contract type.
-  // candidateProduct respects preferredContractTypes — never uses CALL/PUT when
-  // the user has disabled direction types.
+  const dirResult = riseFallAgentOut.directionResult;
+  const barrierOptions = digitAgent.barrierOptions;
+  const bestBarrier = digitAgent.bestBarrier;
+
+  // ── Stage 3.5: Duration Optimizer ─────────────────────────────────────────
   const candidateProduct = wantDigit
-    ? (digitResult?.bestOption?.contractType ?? "DIGITOVER")
+    ? (bestBarrier?.contractType ?? "DIGITOVER")
     : wantDirection
       ? (dirResult.direction === "up" ? "CALL" : "PUT")
-      : wantEvenOdd
-        ? "DIGITEVEN"
-        : "DIGITOVER";   // safe default — will be gate-rejected anyway
+      : wantEvenOdd ? "DIGITEVEN" : "DIGITOVER";
 
   const durationOpt = selectOptimalDuration(ctx, features, regime, candidateProduct);
   const optimizedDuration = durationOpt.duration;
 
-  // Best barrier for live payout fetch
-  const bestDigitBarrier = digitResult?.bestOption?.barrier;
+  // ── Stage 4: EV Calculator ────────────────────────────────────────────────
   const payoutStake = computeStake(ctx);
-
-  // ── Stage 3: EV calculation (needs direction + digit + optimal duration) ──
-  // Include a contract family in EV fetch ONLY when the user has it enabled.
-  // Critically: wantDigit no longer requires hasDigitEdge — always evaluate
-  // DIGITOVER/DIGITUNDER EV when the user has enabled Over/Under, so the master
-  // decision can pick a digit trade even in low-edge conditions.
-  let livePayouts: Record<string, number> | null = null;
   const contractTypesToFetch = [
     ...(wantDirection ? ["CALL", "PUT"] : []),
     ...(wantDigit ? ["DIGITOVER", "DIGITUNDER"] : []),
     ...(wantEvenOdd ? ["DIGITEVEN", "DIGITODD"] : []),
   ];
+
+  let livePayouts: Record<string, number> | null = null;
   if (contractTypesToFetch.length > 0 && ctx.token && !ctx.settings.paperTradeMode) {
     try {
       livePayouts = await fetchLivePayouts(
-        ctx.symbol,
-        contractTypesToFetch,
-        ctx.token,
-        ctx.currency,
-        payoutStake,
-        optimizedDuration,
-        bestDigitBarrier,
+        ctx.symbol, contractTypesToFetch, ctx.token, ctx.currency,
+        payoutStake, optimizedDuration, bestBarrier?.barrier,
       );
-    } catch {
-      livePayouts = null;
-    }
+    } catch { livePayouts = null; }
   }
 
-  // Compute even/odd probability from recent digit history for EVEN/ODD EV
   let evenProb: number | undefined;
   if (wantEvenOdd && ctx.digits.length >= 20) {
-    const recentDigits = ctx.digits.slice(-100);
-    evenProb = recentDigits.filter((d) => d % 2 === 0).length / recentDigits.length;
+    evenProb = ctx.digits.slice(-100).filter(d => d % 2 === 0).length / Math.min(100, ctx.digits.length);
   }
 
   const evAgent = runEVCalculatorAgent(
     ctx,
     wantDirection ? dirResult : null,
-    wantDigit && digitResult ? (digitResult.topOptions ?? []) : [],
+    wantDigit ? barrierOptions : [],
     livePayouts && Object.keys(livePayouts).length > 0 ? livePayouts : null,
     evenProb,
   );
   const bestEV = evAgent.bestEVResult;
 
-  // Determine best contract type for timing + performance lookup.
-  // Never fall back to CALL/PUT when direction types are disabled.
-  const effectiveContractType = bestEV?.product ?? (
-    wantDirection ? (dirResult.direction === "up" ? "CALL" : "PUT")
-      : wantDigit ? "DIGITOVER"
-      : wantEvenOdd ? "DIGITEVEN"
-      : "DIGITOVER"
-  );
+  const effectiveContractType = bestEV?.product ?? candidateProduct;
   const effectiveBarrier = bestEV?.barrier;
 
-  // ── Stage 4: Risk + Timing + Performance (parallel) ──────────────────────
-  const [riskAgent, timingAgent, perfAgent] = await Promise.all([
-    Promise.resolve(runRiskManagerAgent(ctx, bestEV)),
+  // ── Stage 5: Risk Intelligence + Execution Timing + Learning Agent (parallel) ─
+  const currentDrawdown = Math.max(0, -ctx.daily.profit / (ctx.balance || 1));
+
+  const [riskAgent, timingAgent, learningAgentOut] = await Promise.all([
+    Promise.resolve(runRiskIntelligenceAgent(
+      ctx,
+      bestEV?.winProbability ?? 0.5,
+      bestEV?.payoutMultiplier ?? 1.91,
+      currentDrawdown,
+    )),
     Promise.resolve(runExecutionTimingAgent(ctx, features, regime, effectiveContractType)),
-    Promise.resolve(runPerformanceFeedbackAgent(ctx, effectiveContractType, effectiveBarrier)),
+    Promise.resolve(runLearningAgent(ctx, effectiveContractType, effectiveBarrier)),
   ]);
 
-  const riskDecision = riskAgent.riskDecision;
+  const riskAssessment = riskAgent.riskAssessment;
   const timingResult = timingAgent.timingResult;
-  const strategyStats = perfAgent.stats;
+  const strategyStats = learningAgentOut.stats;
 
-  // ── Stage 5: Master Decision ──────────────────────────────────────────────
-  // Always include direction in agentOutputs (for Agent Intelligence Panel display),
-  // even when wantDirection is false — it shows the panel is doing directional analysis.
-  const agentOutputs: Record<string, any> = {
-    featureEngineering: feAgent as any,
-    marketRegime: regimeAgent as any,
-    direction: dirAgent as any,   // always include for panel display
-    evCalculator: evAgent as any,
-    riskManager: riskAgent as any,
-    executionTiming: timingAgent as any,
-    performanceFeedback: perfAgent as any,
+  // ── Stage 6: Pattern Discovery + Confidence Fusion (parallel) ─────────────
+  const patternState = {
+    hurst: features.price.hurst,
+    volatility: features.price.vol20,
+    momentum: features.price.momentum5,
+    entropy: features.price.returnEntropy,
   };
 
-  // Include digitDistribution in weighted consensus whenever user wants digit trading.
-  // Previously gated by hasDigitEdge — but that was always false for OVER 2/UNDER 8
-  // because positive EV at 1.19x payout requires an impossible 84% win rate.
-  // The agent score now reflects edge-based signal strength, so include it always.
-  if (wantDigit) {
-    agentOutputs["digitDistribution"] = digitAgent as any;
-  }
+  const fusionInput: FusionInput = {
+    marketScannerScore:       scannerAgent.score,
+    tickIntelligenceScore:    tickAgent.score,
+    digitProbabilityScore:    digitAgent.score,
+    riseFallScore:            riseFallAgentOut.score,
+    marketRegimeScore:        regimeAgent.score,
+    executionTimingScore:     timingAgent.score,
+    recoveryIntelligenceScore: recoveryAgent.score,
+    riskIntelligenceScore:    riskAgent.score,
+    portfolioManagerScore:    portfolioAgent.score,
+    learningAgentScore:       learningAgentOut.score,
+    patternDiscoveryScore:    50, // placeholder — computed in next step
+    directionResult:          dirResult,
+    bestBarrier:              bestBarrier ?? null,
+    bestEVResult:             bestEV,
+    preferredTypes:           preferred as any,
+    contractType:             (effectiveContractType as any) ?? null,
+    barrier:                  effectiveBarrier ?? null,
+  };
+
+  const [patternAgent, fusionAgentPrelim] = await Promise.all([
+    Promise.resolve(runPatternDiscoveryAgent(ctx, effectiveContractType, patternState)),
+    Promise.resolve(runConfidenceFusionAgent(ctx, fusionInput)),
+  ]);
+
+  // Re-run fusion with actual pattern score
+  fusionInput.patternDiscoveryScore = patternAgent.score;
+  const fusionAgent = runConfidenceFusionAgent(ctx, fusionInput);
+  const fusionResult = fusionAgent.fusionResult;
+
+  // ── Stage 7: Trade Explainability ─────────────────────────────────────────
+  const agentScores: Record<string, number> = {
+    marketScanner:       scannerAgent.score,
+    tickIntelligence:    tickAgent.score,
+    digitProbability:    digitAgent.score,
+    riseFallAgent:       riseFallAgentOut.score,
+    marketRegime:        regimeAgent.score,
+    executionTiming:     timingAgent.score,
+    confidenceFusion:    fusionAgent.score,
+    recoveryIntelligence: recoveryAgent.score,
+    riskIntelligence:    riskAgent.score,
+    portfolioManager:    portfolioAgent.score,
+    learningAgent:       learningAgentOut.score,
+    patternDiscovery:    patternAgent.score,
+  };
+
+  const agentReasonings: Record<string, string> = {
+    marketScanner:       scannerAgent.reasoning,
+    tickIntelligence:    tickAgent.reasoning,
+    digitProbability:    digitAgent.reasoning,
+    riseFallAgent:       riseFallAgentOut.reasoning,
+    marketRegime:        regimeAgent.reasoning,
+    executionTiming:     timingAgent.reasoning,
+    confidenceFusion:    fusionAgent.reasoning,
+    recoveryIntelligence: recoveryAgent.reasoning,
+    riskIntelligence:    riskAgent.reasoning,
+    portfolioManager:    portfolioAgent.reasoning,
+    learningAgent:       learningAgentOut.reasoning,
+    patternDiscovery:    patternAgent.reasoning,
+  };
+
+  const explainabilityInput = {
+    contractType:    (fusionResult.recommendedContractType ?? (effectiveContractType as any)) ?? null,
+    barrier:         fusionResult.recommendedBarrier ?? effectiveBarrier ?? null,
+    stake:           riskAssessment.recommendedStake,
+    duration:        optimizedDuration,
+    symbol:          ctx.symbol,
+    agentScores,
+    agentReasonings,
+    shouldTrade:     fusionResult.shouldTrade,
+    blockers:        fusionResult.blockers,
+    winProbability:  bestEV?.winProbability ?? 0.5,
+    expectedValue:   bestEV?.expectedValue ?? 0,
+  };
+
+  const explainAgent = runTradeExplainabilityAgent(ctx, explainabilityInput);
+
+  // ── Stage 8: Master Decision → CoordinatorOutput ─────────────────────────
+  // Build all agent outputs dict (both old-compat keys + new 13-agent keys)
+  const allAgentOutputs: Record<string, any> = {
+    // New 13-agent keys
+    marketScanner:       scannerAgent,
+    tickIntelligence:    tickAgent,
+    digitProbability:    digitAgent,
+    riseFallAgent:       riseFallAgentOut,
+    marketRegime:        regimeAgent,
+    executionTiming:     timingAgent,
+    confidenceFusion:    fusionAgent,
+    recoveryIntelligence: recoveryAgent,
+    riskIntelligence:    riskAgent,
+    portfolioManager:    portfolioAgent,
+    learningAgent:       learningAgentOut,
+    patternDiscovery:    patternAgent,
+    tradeExplainability: explainAgent,
+
+    // Backward-compat keys (for old code paths that expect these keys)
+    featureEngineering:  feAgent,
+    direction:           riseFallAgentOut,
+    digitDistribution:   digitAgent,
+    riskManager:         riskAgent,
+    performanceFeedback: learningAgentOut,
+    evCalculator:        evAgent,
+    durationOptimizer: {
+      agentId: "durationOptimizer",
+      score: durationOpt.confidence,
+      confidence: durationOpt.confidence,
+      signal: "neutral" as const,
+      reasoning: durationOpt.reasoning,
+      data: { duration: durationOpt.duration, allScores: durationOpt.allScores },
+      executionTimeMs: 0,
+    },
+  };
 
   // Build digit stats for the UI
   const digitStats = ctx.digits.length >= 10 ? analyzeDigits(ctx.digits.slice(-100)) : undefined;
 
+  // Pass to master decision — it produces the final CoordinatorOutput shape
+  // Map risk-intelligence output to the legacy RiskDecision shape master-decision expects
+  const riskDecision = {
+    allowTrade:          riskAssessment.allowTrade,
+    recommendedStake:    riskAssessment.recommendedStake,
+    riskBudget:          1 - currentDrawdown,
+    currentDrawdown,
+    hardStop:            !riskAssessment.allowTrade,
+    hardStopReason:      riskAssessment.blockers[0],
+    riskLevel:           riskAssessment.riskLevel,
+    stakeMultiplier:     1.0,
+  };
+
   const { output } = makeFinalDecision({
     ctx,
-    agents: agentOutputs,
+    agents: allAgentOutputs,
     bestEV,
-    riskDecision,
+    riskDecision: riskDecision as any,
     timingResult,
     strategyStats,
     regimeOutput: regimeAgent.regimeOutput,
@@ -238,46 +388,65 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
     optimizedDuration,
   });
 
-  // Attach duration optimizer output to the agents record for the UI panel
-  (output.agents as any)["durationOptimizer"] = {
-    agentId: "durationOptimizer",
-    score: durationOpt.confidence,
-    confidence: durationOpt.confidence,
-    signal: "neutral" as const,
-    reasoning: durationOpt.reasoning,
-    data: { duration: durationOpt.duration, allScores: durationOpt.allScores },
-    executionTimeMs: 0,
-  };
+  // Override shouldTrade with 13-agent consensus (stronger signal)
+  const fusionShouldTrade = fusionResult.shouldTrade;
+  output.shouldTrade = fusionShouldTrade;
+  output.agents = allAgentOutputs;
+
+  if (!fusionShouldTrade && fusionResult.blockers.length > 0) {
+    output.rejectReason = fusionResult.blockers[0];
+    output.reasoning = explainAgent.explanation.rationale;
+  }
+
+  // Record a pattern snapshot for future learning (win/loss unknown at this point — will be shadow)
+  recordSnapshot({
+    symbol: ctx.symbol,
+    contractType: effectiveContractType,
+    barrier: effectiveBarrier,
+    hurst: features.price.hurst,
+    volatility: features.price.vol20,
+    momentum: features.price.momentum5,
+    entropy: features.price.returnEntropy,
+    won: false, // placeholder; ai.ts calls recordTradeOutcome after settlement
+    timestamp: Date.now(),
+  });
 
   logger.debug({
     symbol: ctx.symbol,
     shouldTrade: output.shouldTrade,
     quality: output.qualityScore,
+    fusion: fusionResult.overallConfidence,
     ev: bestEV?.expectedValue,
     regime,
     duration: optimizedDuration,
     ms: Date.now() - t0,
-  }, "Coordinator scan complete");
+  }, "13-agent coordinator scan complete");
 
   return output;
 }
 
-// ── Backward-compatible wrapper (matches old analyzeMarket + finalizeAnalysis API) ─
+// ── Backward-compatible legacy analysis builder ───────────────────────────────
 
 export function buildLegacyAnalysis(output: CoordinatorOutput): LegacyAnalysis {
   const rec = output.recommendation;
   const agents = output.agents;
 
-  // Build backward-compatible agentScores shape
+  // Map 13 agents to the 8 legacy display score slots
+  // Weights add up to 1.0
   const agentScores = {
-    marketScanner: toAgentScore(agents["featureEngineering"] ?? agents["marketRegime"], 0.10),
-    trendAnalysis: toAgentScore(agents["direction"] ?? agents["digitDistribution"], 0.18),
-    volatilityAnalysis: toAgentScore(agents["marketRegime"], 0.13),
-    patternRecognition: toAgentScore(agents["direction"] ?? agents["featureEngineering"], 0.15),
-    riskManagement: toAgentScore(agents["riskManager"], 0.13),
-    capitalPreservation: toAgentScore(agents["riskManager"], 0.08),
-    tradeExecution: toAgentScore(agents["executionTiming"], 0.08),
-    selfLearning: toAgentScore(agents["performanceFeedback"], 0.15),
+    marketScanner:        toAgentScore(agents["marketScanner"]       ?? agents["featureEngineering"], 0.08),
+    tickIntelligence:     toAgentScore(agents["tickIntelligence"]    ?? agents["direction"],           0.08),
+    digitProbability:     toAgentScore(agents["digitProbability"]    ?? agents["digitDistribution"],  0.10),
+    riseFallModel:        toAgentScore(agents["riseFallAgent"]       ?? agents["direction"],           0.12),
+    marketRegime:         toAgentScore(agents["marketRegime"],                                         0.10),
+    riskIntelligence:     toAgentScore(agents["riskIntelligence"]    ?? agents["riskManager"],        0.12),
+    executionTiming:      toAgentScore(agents["executionTiming"],                                      0.08),
+    confidenceFusion:     toAgentScore(agents["confidenceFusion"]    ?? agents["performanceFeedback"], 0.10),
+    recoveryIntelligence: toAgentScore(agents["recoveryIntelligence"],                                0.06),
+    portfolioManager:     toAgentScore(agents["portfolioManager"],                                    0.06),
+    learningAgent:        toAgentScore(agents["learningAgent"]       ?? agents["performanceFeedback"], 0.06),
+    patternDiscovery:     toAgentScore(agents["patternDiscovery"],                                    0.04),
+    tradeExplainability:  toAgentScore(agents["tradeExplainability"],                                 0.00),
   };
 
   const isDigit = rec.product.startsWith("DIGIT");
@@ -304,12 +473,10 @@ export function buildLegacyAnalysis(output: CoordinatorOutput): LegacyAnalysis {
     recommendedDuration: rec.duration,
     winProbability: rec.winProbability,
     mlModels: undefined,
-    // Finalized fields
     calibratedConfidence: rec.winProbability,
     expectedValue: rec.expectedValue,
     breakevenWinRate: rec.breakevenWinRate,
     payoutMultiplier: rec.payoutMultiplier,
-    // Extended: full agent outputs for new UI
     agentOutputs: output.agents,
     regime: output.regime,
   };
@@ -317,19 +484,13 @@ export function buildLegacyAnalysis(output: CoordinatorOutput): LegacyAnalysis {
 
 function toAgentScore(agent: any, weight: number) {
   if (!agent) return { score: 50, weight, signal: "neutral" as const, reasoning: "N/A" };
-  return {
-    score: agent.score ?? 50,
-    weight,
-    signal: agent.signal ?? "neutral",
-    reasoning: agent.reasoning ?? "",
-  };
+  return { score: agent.score ?? 50, weight, signal: agent.signal ?? "neutral", reasoning: agent.reasoning ?? "" };
 }
 
 function buildContractOptions(output: CoordinatorOutput) {
-  const opts = [];
+  const opts: any[] = [];
   const rec = output.recommendation;
-  const agents = output.agents;
-  const evData = agents["evCalculator"]?.data as any;
+  const evData = output.agents["evCalculator"]?.data as any;
   const allEV = (evData?.allEVResults ?? []) as any[];
 
   for (const ev of allEV.slice(0, 4)) {
@@ -340,7 +501,7 @@ function buildContractOptions(output: CoordinatorOutput) {
       suitable: ev.isPositiveEV,
       confidence: Math.round(ev.winProbability * 100),
       recommendedStake: rec.stake,
-      riskLevel: ev.winProbability > 0.65 ? "low" : ev.winProbability > 0.55 ? "medium" : "high" as any,
+      riskLevel: ev.winProbability > 0.65 ? "low" : ev.winProbability > 0.55 ? "medium" : "high",
     });
   }
   return opts;

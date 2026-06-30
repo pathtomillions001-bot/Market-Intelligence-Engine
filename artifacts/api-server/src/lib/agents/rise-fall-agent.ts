@@ -1,0 +1,258 @@
+/**
+ * Agent 4: Rise/Fall Intelligence Agent
+ *
+ * RESPONSIBILITY: Estimate the probability that price will be higher (CALL/RISE)
+ * or lower (PUT/FALL) than entry after N ticks. Enhanced replacement for the
+ * original direction-agent.ts — adds regime-adjusted ML, trend exhaustion
+ * detection, and multi-model consensus scoring.
+ */
+
+import type { AgentOutput, ScanContext } from "./types";
+import { scoreToSignal } from "./types";
+import type { FeatureSet } from "./feature-engineering";
+import { mean, stddev } from "./feature-engineering";
+
+export interface DirectionResult {
+  probUp: number;
+  probDown: number;
+  confidence: number;
+  direction: "up" | "down";
+  models: { rf: number; gb: number; momentum: number };
+  horizon: number;
+  disagreement: number;
+  exhaustionDetected: boolean;
+  regimeMultiplier: number;
+}
+
+// ── Per-symbol ML model cache ─────────────────────────────────────────────────
+interface GBStump { fi: number; thr: number; lv: number; rv: number; alpha: number; }
+interface ModelCache { stumps: GBStump[]; pricesLen: number; trainedAt: number; }
+const modelCache = new Map<string, ModelCache>();
+const RETRAIN_INTERVAL_MS = 30_000;
+const MIN_NEW_SAMPLES = 10;
+
+// ── Feature vector ─────────────────────────────────────────────────────────────
+function toFeatureVector(pf: FeatureSet["price"]): number[] {
+  return [
+    pf.autocorr1, pf.autocorr3, pf.autocorr5,
+    Math.tanh(pf.momentum1 * 5000),
+    Math.tanh(pf.momentum5 * 2000),
+    Math.tanh(pf.momentum10 * 1000),
+    pf.hurst - 0.5,
+    pf.returnEntropy - 1.0,
+    pf.zScoreLast * 0.1,
+    pf.volRatio - 1.0,
+    pf.vol20 * 10000,
+    pf.upFrac1 - 0.5,
+    pf.upFrac5 - 0.5,
+    pf.tickVelocity * 10000,
+    (pf.upFrac1 - 0.5) * (pf.hurst - 0.5) * 4, // interaction
+  ];
+}
+
+// ── Training data builder ──────────────────────────────────────────────────────
+function buildTrainingSet(prices: number[], horizon: number) {
+  const X: number[][] = [];
+  const y: number[] = [];
+  const w = Math.min(40, Math.floor(prices.length / 3));
+  for (let end = w + 1; end < prices.length - horizon; end++) {
+    const slice = prices.slice(Math.max(0, end - w), end);
+    if (slice.length < 5) continue;
+    const fv = quickFeatures(slice);
+    X.push(fv);
+    y.push(prices[end + horizon - 1] > prices[end - 1] ? 1 : 0);
+  }
+  return { X, y };
+}
+
+function quickFeatures(prices: number[]): number[] {
+  const r: number[] = [];
+  for (let i = 1; i < prices.length; i++) r.push((prices[i] - prices[i - 1]) / (prices[i - 1] || 1));
+  if (!r.length) return Array(15).fill(0);
+  const m = mean(r), sd = stddev(r) || 1e-10;
+  const ac1Num = r.slice(1).reduce((s, v, i) => s + (v - m) * (r[i] - m), 0);
+  const ac1Den = r.reduce((s, v) => s + (v - m) ** 2, 0);
+  return [
+    ac1Den > 0 ? ac1Num / ac1Den : 0, 0, 0,
+    Math.tanh(mean(r.slice(-1)) * 5000),
+    Math.tanh(mean(r.slice(-5)) * 2000),
+    Math.tanh(mean(r.slice(-10)) * 1000),
+    0, 0,
+    r.length > 0 ? (r[r.length - 1] - m) / sd * 0.1 : 0,
+    0, sd * 10000,
+    r.filter(v => v > 0).length / r.length - 0.5,
+    r.slice(-5).filter(v => v > 0).length / Math.max(1, Math.min(5, r.length)) - 0.5,
+    sd * 10000, 0,
+  ];
+}
+
+// ── Gradient Boosting ──────────────────────────────────────────────────────────
+function trainGB(X: number[][], y: number[], rounds = 12): GBStump[] {
+  if (X.length < 5) return [];
+  const n = y.length;
+  let w = Array(n).fill(1 / n);
+  const stumps: GBStump[] = [];
+  const nF = X[0].length;
+
+  for (let r = 0; r < rounds; r++) {
+    let bestErr = Infinity, best: GBStump | null = null;
+    const fSubset = Array.from({ length: nF }, (_, i) => i).sort(() => Math.random() - 0.5).slice(0, Math.ceil(nF / 2));
+    for (const f of fSubset) {
+      const vals = [...new Set(X.map(row => row[f]))].sort((a, b) => a - b);
+      for (const thr of vals) {
+        const lI = X.map((row, i) => row[f] <= thr ? i : -1).filter(i => i >= 0);
+        const rI = X.map((row, i) => row[f] > thr ? i : -1).filter(i => i >= 0);
+        if (!lI.length || !rI.length) continue;
+        const lW = lI.reduce((s, i) => s + w[i], 0), rW = rI.reduce((s, i) => s + w[i], 0);
+        const lv = lW > 0 ? lI.reduce((s, i) => s + w[i] * y[i], 0) / lW : 0.5;
+        const rv = rW > 0 ? rI.reduce((s, i) => s + w[i] * y[i], 0) / rW : 0.5;
+        const err = lI.reduce((s, i) => s + w[i] * Math.abs(y[i] - lv), 0) + rI.reduce((s, i) => s + w[i] * Math.abs(y[i] - rv), 0);
+        if (err < bestErr) { bestErr = err; best = { fi: f, thr, lv, rv, alpha: 0 }; }
+      }
+    }
+    if (!best || bestErr >= 0.5) break;
+    best.alpha = 0.5 * Math.log((1 - bestErr + 1e-9) / (bestErr + 1e-9));
+    stumps.push(best);
+    for (let i = 0; i < n; i++) {
+      const p = X[i][best.fi] <= best.thr ? best.lv : best.rv;
+      w[i] *= Math.exp(-best.alpha * (2 * y[i] - 1) * (2 * p - 1));
+    }
+    const ws = w.reduce((a, b) => a + b, 0);
+    w = w.map(v => v / ws);
+  }
+  return stumps;
+}
+
+function predictGB(stumps: GBStump[], f: number[]): number {
+  if (!stumps.length) return 0.5;
+  let score = 0, alphaSum = 0;
+  for (const s of stumps) {
+    const p = f[s.fi] <= s.thr ? s.lv : s.rv;
+    score += s.alpha * p; alphaSum += Math.abs(s.alpha);
+  }
+  return Math.max(0.05, Math.min(0.95, alphaSum > 0 ? score / alphaSum : 0.5));
+}
+
+// ── Momentum-based feature estimate ───────────────────────────────────────────
+function momentumProb(pf: FeatureSet["price"]): number {
+  const base = pf.upFrac1 * 0.30 + pf.upFrac5 * 0.45 + pf.upFrac10 * 0.25;
+  const mom5Adj = Math.tanh(pf.momentum5 * 600) * 0.12;
+  const mom10Adj = Math.tanh(pf.momentum10 * 400) * 0.06;
+  const hurstMult = pf.hurst > 0.58 ? 1.35 : pf.hurst > 0.55 ? 1.15 : pf.hurst < 0.45 ? 0.75 : 1.0;
+  const acAdj = Math.tanh(pf.autocorr1 * 5) * 0.06;
+  const zAdj = pf.zScoreLast > 2.0 ? -0.04 : pf.zScoreLast < -2.0 ? 0.04 : 0;
+  return Math.max(0.15, Math.min(0.85, base + (mom5Adj + mom10Adj) * hurstMult + acAdj + zAdj));
+}
+
+// ── Trend exhaustion detection ─────────────────────────────────────────────────
+function detectExhaustion(pf: FeatureSet["price"]): boolean {
+  // Extreme z-score combined with low recent autocorrelation signals exhaustion
+  const extremeZ = Math.abs(pf.zScoreLast) > 2.5;
+  const lowAC = Math.abs(pf.autocorr1) < 0.05;
+  const highVol = pf.volRatio > 1.8;
+  return extremeZ && (lowAC || highVol);
+}
+
+// ── Reconstruct prices ─────────────────────────────────────────────────────────
+function reconstructPrices(returns: number[]): number[] {
+  const prices = [1000];
+  for (const r of returns) prices.push(prices[prices.length - 1] * (1 + r));
+  return prices;
+}
+
+// ── Public API ─────────────────────────────────────────────────────────────────
+export function predictDirection(symbol: string, features: FeatureSet, horizon = 5): DirectionResult {
+  const pf = features.price;
+  const fv = toFeatureVector(pf);
+  const now = Date.now();
+  const cached = modelCache.get(symbol);
+
+  let stumps: GBStump[] = [];
+  const needsRetrain = !cached
+    || (now - cached.trainedAt > RETRAIN_INTERVAL_MS)
+    || (pf.priceN - cached.pricesLen >= MIN_NEW_SAMPLES);
+
+  if (needsRetrain && pf.returns1.length > 20) {
+    const synPrices = reconstructPrices(pf.returns1);
+    const { X, y } = buildTrainingSet(synPrices, horizon);
+    if (X.length >= 5) {
+      stumps = trainGB(X, y, 12);
+      modelCache.set(symbol, { stumps, pricesLen: pf.priceN, trainedAt: now });
+    }
+  } else if (cached) {
+    stumps = cached.stumps;
+  }
+
+  const gbProb = stumps.length > 0 ? predictGB(stumps, fv) : 0.5;
+  const momProb = momentumProb(pf);
+
+  // Ensemble: 55% GB (when trained), 45% momentum
+  const hasModel = stumps.length > 0;
+  const rawProb = hasModel ? gbProb * 0.55 + momProb * 0.45 : momProb;
+
+  // Platt calibration
+  const logit = Math.log(rawProb / (1 - rawProb + 1e-9) + 1e-9);
+  const probUp = Math.max(0.05, Math.min(0.95, 1 / (1 + Math.exp(-logit))));
+
+  const disagreement = Math.abs(gbProb - momProb);
+  const edgeStrength = Math.abs(probUp - 0.5) * 2;
+  const agreementBonus = 1 - Math.min(1, disagreement * 2);
+  const confidence = Math.round(Math.max(0, Math.min(100, edgeStrength * agreementBonus * 100)));
+
+  const exhaustionDetected = detectExhaustion(pf);
+  // In trending regime (high Hurst), amplify; in mean-reverting, attenuate
+  const regimeMultiplier = pf.hurst > 0.58 ? 1.1 : pf.hurst < 0.42 ? 0.9 : 1.0;
+
+  return {
+    probUp, probDown: 1 - probUp, confidence,
+    direction: probUp >= 0.5 ? "up" : "down",
+    models: { rf: gbProb, gb: gbProb, momentum: momProb },
+    horizon, disagreement, exhaustionDetected, regimeMultiplier,
+  };
+}
+
+export function runRiseFallAgent(
+  ctx: ScanContext,
+  features: FeatureSet,
+  horizon = 5,
+): AgentOutput & { directionResult: DirectionResult } {
+  const t0 = Date.now();
+  const result = predictDirection(ctx.symbol, features, horizon);
+  const pf = features.price;
+
+  const edgeScore = Math.round(50 + Math.abs(result.probUp - 0.5) * 100);
+  let score = Math.min(95, Math.round(edgeScore * (1 - result.disagreement)));
+
+  // Penalize exhaustion signals
+  if (result.exhaustionDetected) score = Math.round(score * 0.85);
+
+  // Apply regime multiplier
+  score = Math.min(95, Math.round(score * result.regimeMultiplier));
+
+  const dirLabel = result.direction === "up" ? "UP" : "DOWN";
+
+  const reasoning = [
+    `Direction: ${dirLabel} (↑${(result.probUp * 100).toFixed(1)}% ↓${(result.probDown * 100).toFixed(1)}%).`,
+    `GB=${(result.models.gb * 100).toFixed(0)}% Mom=${(result.models.momentum * 100).toFixed(0)}% Disagreement=${(result.disagreement * 100).toFixed(0)}%.`,
+    `Horizon: ${horizon}t. Hurst: ${pf.hurst.toFixed(2)}. Regime ×${result.regimeMultiplier.toFixed(2)}.`,
+    result.exhaustionDetected ? "⚠ Trend exhaustion detected — reduced confidence." : "",
+  ].filter(Boolean).join(" ");
+
+  return {
+    agentId: "riseFallAgent",
+    score,
+    confidence: result.confidence,
+    signal: result.direction === "up" ? scoreToSignal(score) : scoreToSignal(100 - score),
+    reasoning,
+    data: {
+      probUp: result.probUp,
+      probDown: result.probDown,
+      direction: result.direction,
+      models: result.models,
+      horizon: result.horizon,
+      exhaustionDetected: result.exhaustionDetected,
+    },
+    executionTimeMs: Date.now() - t0,
+    directionResult: result,
+  };
+}

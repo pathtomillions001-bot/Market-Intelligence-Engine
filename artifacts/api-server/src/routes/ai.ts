@@ -66,17 +66,21 @@ const GROUP_NAMES = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"]
 // Index: 0=Volatility 1s, 1=Volatility, 2=Jump Indices, 3=Bull/Bear
 const groupCursors = [0, 0, 0, 0];
 
-// New-style agent names matching the coordinator agents
+// 13-agent system names and score keys
 const AGENT_NAMES = [
-  "Feature Engineering", "Market Regime", "Direction Model",
-  "Digit Distribution", "EV Calculator", "Risk Manager",
-  "Execution Timing", "Performance Feedback",
+  "Market Scanner", "Tick Intelligence", "Digit Probability",
+  "Rise/Fall Model", "Market Regime", "Execution Timing",
+  "Confidence Fusion", "Recovery Intelligence", "Risk Intelligence",
+  "Portfolio Manager", "Learning Agent", "Pattern Discovery",
+  "Trade Explainability",
 ];
 
 const AGENT_SCORE_KEYS = [
-  "featureEngineering", "marketRegime", "direction",
-  "digitDistribution", "evCalculator", "riskManager",
-  "executionTiming", "performanceFeedback",
+  "marketScanner", "tickIntelligence", "digitProbability",
+  "riseFallAgent", "marketRegime", "executionTiming",
+  "confidenceFusion", "recoveryIntelligence", "riskIntelligence",
+  "portfolioManager", "learningAgent", "patternDiscovery",
+  "tradeExplainability",
 ];
 
 // ── Settings builders ─────────────────────────────────────────────────────────
