@@ -320,10 +320,18 @@ async function runAutonomousLoop() {
     const withTimeout = <T>(p: Promise<T>, ms: number, fallback: T): Promise<T> =>
       Promise.race([p, new Promise<T>((r) => setTimeout(() => r(fallback), ms))]);
 
-    type ScanResult = { market: typeof availableMarkets[0]; output: Awaited<ReturnType<typeof runCoordinator>>; ctx: ScanContext };
+    type ScanResult = { market: typeof availableMarkets[0]; output: Awaited<ReturnType<typeof runCoordinator>>; ctx: ScanContext; family: string };
+
+    // ── Contract family definitions ───────────────────────────────────────────
+    // Each market is evaluated by up to 3 families simultaneously.
+    // Only families with enabled contract types are run per market.
+    const dirTypes  = preferredContractTypes.filter(t => ["CALL", "PUT"].includes(t));
+    const ouTypes   = preferredContractTypes.filter(t => ["DIGITOVER", "DIGITUNDER"].includes(t));
+    const eoTypes   = preferredContractTypes.filter(t => ["DIGITEVEN", "DIGITODD"].includes(t));
 
     // ── Phase 1: All groups race in parallel ─────────────────────────────────
-    // Each group scans its markets in parallel and returns ONE winner (best qualityScore).
+    // Each group scans all its markets in parallel.
+    // Each market runs its enabled contract families in parallel and returns its best result.
     broadcastSSE("scan_started", { groups: GROUP_NAMES.filter((_, i) => marketGroups[i].length > 0), ts: Date.now() });
 
     const groupWinners = (await Promise.allSettled(
@@ -331,11 +339,41 @@ async function runAutonomousLoop() {
         if (group.length === 0) return null;
 
         const marketResults = (await Promise.allSettled(
-          group.map(async (m) => {
-            const ctx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
-            const output = await withTimeout(runCoordinator(ctx), SCAN_TIMEOUT_MS, null as any);
-            if (!output) return null;
-            return { market: m, output, ctx } as ScanResult;
+          group.map(async (m): Promise<ScanResult | null> => {
+            const isBullBear = m.symbol === "RDBULL" || m.symbol === "RDBEAR";
+
+            // Decide which families apply to this specific market
+            const families: Array<{ name: string; types: string[] }> = [];
+            if (dirTypes.length > 0)                               families.push({ name: "direction", types: dirTypes });
+            if (!isBullBear && m.digitEnabled && ouTypes.length > 0) families.push({ name: "overunder", types: ouTypes });
+            if (!isBullBear && m.digitEnabled && eoTypes.length > 0) families.push({ name: "evenodd",   types: eoTypes });
+
+            if (families.length === 0) return null;
+
+            const baseCtx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
+
+            // Run each family coordinator in parallel — each gets a context focused
+            // on its contract types so the agents optimise for that family exclusively
+            const familyResults = (await Promise.allSettled(
+              families.map(async (fam) => {
+                const famCtx: ScanContext = {
+                  ...baseCtx,
+                  settings: { ...baseCtx.settings, preferredContractTypes: fam.types },
+                };
+                const output = await withTimeout(runCoordinator(famCtx), SCAN_TIMEOUT_MS, null as any);
+                if (!output) return null;
+                return { market: m, output, ctx: famCtx, family: fam.name } as ScanResult;
+              })
+            )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
+
+            if (familyResults.length === 0) return null;
+
+            // Pick the best family result for this market:
+            // prefer shouldTrade=true, then highest qualityScore
+            const tradeableFamilies = familyResults.filter(r => r.output.shouldTrade);
+            return tradeableFamilies.length > 0
+              ? tradeableFamilies.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
+              : familyResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0];
           })
         )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 
@@ -353,6 +391,7 @@ async function runAutonomousLoop() {
           group: GROUP_NAMES[gi],
           scanned: marketResults.length,
           bestSymbol: groupBest.market.symbol,
+          bestFamily: groupBest.family,
           quality: groupBest.output.qualityScore,
           shouldTrade: groupBest.output.shouldTrade,
           tradeableCount: tradeable.length,
@@ -367,6 +406,7 @@ async function runAutonomousLoop() {
           shouldTrade: groupBest.output.shouldTrade,
           contract: groupBest.output.recommendation?.product ?? null,
           confidence: groupBest.output.confidenceScore,
+          family: groupBest.family,
         });
 
         return { ...groupBest, groupName: GROUP_NAMES[gi] };
