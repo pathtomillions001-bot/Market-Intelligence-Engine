@@ -130,12 +130,7 @@ function RiseFallPanel({ trendStats, agentData, onTrade }: {
               RSI {rsi} {rsiOverbought ? "OB" : "OS"}
             </span>
           )}
-          {agentData && (
-            <span className={`ml-auto text-[9px] px-1.5 py-0.5 rounded-full border font-mono ${wscore >= 70 ? "bg-green-500/10 border-green-500/30 text-green-400" : wscore >= 50 ? "bg-amber-500/10 border-amber-500/30 text-amber-400" : "bg-zinc-800 border-zinc-700 text-zinc-400"}`}>
-              13-Agents {wscore.toFixed(0)}/100
-            </span>
-          )}
-          <span className={`${agentData ? "" : "ml-auto"} w-2 h-2 rounded-full bg-green-500 animate-pulse`} title="Live" />
+          <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
