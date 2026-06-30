@@ -5,7 +5,7 @@ import { sql, desc, eq } from "drizzle-orm";
 import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, journalManager } from "../lib/deriv";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
-import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome, updateDigitRecovery } from "../lib/agent-coordinator";
+import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome, updateDigitRecovery, setGlobalDigitRecovery } from "../lib/agent-coordinator";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 import { broadcastSSE, addSSEClient, removeSSEClient } from "../lib/sse";
 
@@ -35,6 +35,30 @@ let exploitQualityThreshold = 0;
 
 // Real-time agent scores (updated each scan)
 let lastAgentScores: Record<string, number> = {};
+
+// ── Global cross-market recovery state ───────────────────────────────────────
+// When any trade is lost, ALL enabled market families enter recovery mode.
+// Over/Under: switches from OVER 2/UNDER 8 → OVER 4/UNDER 5
+// Direction/EvenOdd: stake is increased to recover the loss in one trade
+// Recovery ends when the cumulative profit from recovery trades ≥ unrecovered amount
+interface GlobalRecoveryState {
+  isActive: boolean;
+  unrecoveredAmount: number;    // total USD still to recover
+  activeFamilies: string[];     // which families are being tracked
+  recoveredFamilies: string[];  // which families have recovered
+}
+let globalRecovery: GlobalRecoveryState = {
+  isActive: false,
+  unrecoveredAmount: 0,
+  activeFamilies: [],
+  recoveredFamilies: [],
+};
+
+// ── Per-group scan cursors (sequential rotation) ──────────────────────────────
+// Tracks the starting index for scanning within each market group.
+// Groups: 0=Volatility 1s (1HZ*), 1=Volatility (R_*), 2=Jump (JD*), 3=Bull/Bear
+// Advances by 1 each loop so scanning rotates through all markets fairly.
+const groupCursors: [number, number, number, number] = [0, 0, 0, 0];
 
 // New-style agent names matching the coordinator agents
 const AGENT_NAMES = [
@@ -329,17 +353,25 @@ async function runAutonomousLoop() {
     const ouTypes   = preferredContractTypes.filter(t => ["DIGITOVER", "DIGITUNDER"].includes(t));
     const eoTypes   = preferredContractTypes.filter(t => ["DIGITEVEN", "DIGITODD"].includes(t));
 
-    // ── Phase 1: All groups race in parallel ─────────────────────────────────
-    // Each group scans all its markets in parallel.
-    // Each market runs its enabled contract families in parallel and returns its best result.
+    // ── Phase 1: All groups scan in parallel, but WITHIN each group markets
+    //    are scanned SEQUENTIALLY in order (V10→V25→V50→V75→V100) using a
+    //    rotating cursor so every market gets equal attention over time.
     broadcastSSE("scan_started", { groups: GROUP_NAMES.filter((_, i) => marketGroups[i].length > 0), ts: Date.now() });
 
     const groupWinners = (await Promise.allSettled(
       marketGroups.map(async (group, gi): Promise<(ScanResult & { groupName: string }) | null> => {
         if (group.length === 0) return null;
 
-        const marketResults = (await Promise.allSettled(
-          group.map(async (m): Promise<ScanResult | null> => {
+        // ── Sequential rotation: start from cursor, wrap around ──────────────
+        // Advance cursor BEFORE scanning so it rotates even if we short-circuit
+        const startIdx = groupCursors[gi] % group.length;
+        groupCursors[gi] = (groupCursors[gi] + 1) % group.length;
+        // Build ordered list starting from cursor position (maintains V10→V100 order within window)
+        const orderedGroup = [...group.slice(startIdx), ...group.slice(0, startIdx)];
+
+        const marketResults: ScanResult[] = [];
+        for (const m of orderedGroup) {
+          try {
             const isBullBear = m.symbol === "RDBULL" || m.symbol === "RDBEAR";
 
             // Decide which families apply to this specific market
@@ -348,7 +380,7 @@ async function runAutonomousLoop() {
             if (!isBullBear && m.digitEnabled && ouTypes.length > 0) families.push({ name: "overunder", types: ouTypes });
             if (!isBullBear && m.digitEnabled && eoTypes.length > 0) families.push({ name: "evenodd",   types: eoTypes });
 
-            if (families.length === 0) return null;
+            if (families.length === 0) continue;
 
             const baseCtx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
 
@@ -366,16 +398,17 @@ async function runAutonomousLoop() {
               })
             )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 
-            if (familyResults.length === 0) return null;
+            if (familyResults.length === 0) continue;
 
             // Pick the best family result for this market:
             // prefer shouldTrade=true, then highest qualityScore
             const tradeableFamilies = familyResults.filter(r => r.output.shouldTrade);
-            return tradeableFamilies.length > 0
+            const bestForMarket = tradeableFamilies.length > 0
               ? tradeableFamilies.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
               : familyResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0];
-          })
-        )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
+            marketResults.push(bestForMarket);
+          } catch { /* skip this market on error */ }
+        }
 
         totalMarketsScanned += marketResults.length;
 
@@ -481,10 +514,38 @@ async function runAutonomousLoop() {
 
     // ── Trade execution ──────────────────────────────────────────────────────
     const rec = output.recommendation;
-    const stake = rec.stake;
     const effectiveContractType = rec.product;
     const effectiveBarrier = rec.barrier;
     const duration = rec.duration;
+
+    // ── Recovery stake override ───────────────────────────────────────────────
+    // For non-digit trades (direction/evenodd) during recovery: increase stake
+    // to a level where ONE win covers the full unrecovered loss.
+    // For digit trades, the digit-agent handles recovery via Tier 2 barrier selection
+    // (OVER 4 / UNDER 5 instead of OVER 2 / UNDER 8).
+    let stake = rec.stake;
+    const isDigitTrade = effectiveContractType.startsWith("DIGIT");
+    if (globalRecovery.isActive && !isDigitTrade && globalRecovery.unrecoveredAmount > 0) {
+      const pm = rec.payoutMultiplier;
+      const profitPerUnitStaked = pm - 1;  // net profit per dollar staked if win
+      if (profitPerUnitStaked > 0) {
+        // Stake needed so that one win covers unrecovered loss + 10% buffer
+        const recoveryStake = (globalRecovery.unrecoveredAmount / profitPerUnitStaked) * 1.1;
+        // Never go below the normal recommended stake; never exceed max allowed
+        stake = Math.min(
+          Math.max(stake, Math.ceil(recoveryStake * 100) / 100),
+          tradingSettings.maxTradeStake,
+        );
+      }
+      logger.info({
+        symbol: bestMarket.symbol,
+        family: bestResult.family,
+        unrecoveredAmount: globalRecovery.unrecoveredAmount,
+        normalStake: rec.stake,
+        recoveryStake: stake,
+      }, "Recovery mode: stake boosted to cover unrecovered loss");
+    }
+
     // Estimated payout for paper trades (live payout comes from Deriv result)
     const estimatedPayout = stake * rec.payoutMultiplier;
     const barrierToStore = effectiveContractType.includes("DIGIT") ? (effectiveBarrier ?? null) : null;
@@ -612,6 +673,68 @@ async function runAutonomousLoop() {
     // Track consecutive losses — a win resets it to 0; cooldown expiry also resets it
     if (!won) sessionLossCount++;
     else sessionLossCount = 0;
+
+    // ── Global cross-market recovery state update ────────────────────────────
+    if (won) {
+      if (globalRecovery.isActive) {
+        // Subtract the actual profit from the unrecovered amount
+        globalRecovery.unrecoveredAmount = Math.max(0, globalRecovery.unrecoveredAmount - profit);
+        if (globalRecovery.unrecoveredAmount <= 0) {
+          // Loss fully recovered — switch back to normal trading
+          globalRecovery.isActive = false;
+          globalRecovery.unrecoveredAmount = 0;
+          globalRecovery.activeFamilies = [];
+          globalRecovery.recoveredFamilies = [];
+          setGlobalDigitRecovery(false, 0);
+          logger.info({ symbol: bestMarket.symbol, family: bestResult.family, profit }, "Recovery complete — switching back to normal mode (OVER 2 / UNDER 8)");
+          broadcastSSE("recovery_complete", { symbol: bestMarket.symbol, ts: Date.now() });
+        } else {
+          // Partial recovery — update running total
+          setGlobalDigitRecovery(true, globalRecovery.unrecoveredAmount);
+          broadcastSSE("recovery_progress", {
+            symbol: bestMarket.symbol,
+            profit,
+            remainingAmount: globalRecovery.unrecoveredAmount,
+          });
+        }
+      }
+    } else {
+      // Trade lost — activate recovery mode for all enabled families
+      const lostAmount = Math.abs(profit);
+      globalRecovery.isActive = true;
+      globalRecovery.unrecoveredAmount += lostAmount;
+      // Track which families are now in recovery
+      const lostFamily = bestResult.family;
+      if (!globalRecovery.activeFamilies.includes(lostFamily)) {
+        globalRecovery.activeFamilies.push(lostFamily);
+      }
+      // Activate recovery on all currently enabled families (cross-market)
+      if (dirTypes.length > 0 && !globalRecovery.activeFamilies.includes("direction")) {
+        globalRecovery.activeFamilies.push("direction");
+      }
+      if (ouTypes.length > 0 && !globalRecovery.activeFamilies.includes("overunder")) {
+        globalRecovery.activeFamilies.push("overunder");
+      }
+      if (eoTypes.length > 0 && !globalRecovery.activeFamilies.includes("evenodd")) {
+        globalRecovery.activeFamilies.push("evenodd");
+      }
+      // Sync digit-agent global recovery (switches to OVER 4 / UNDER 5)
+      setGlobalDigitRecovery(true, globalRecovery.unrecoveredAmount);
+      logger.info({
+        symbol: bestMarket.symbol,
+        family: lostFamily,
+        lostAmount,
+        totalUnrecovered: globalRecovery.unrecoveredAmount,
+        activeFamilies: globalRecovery.activeFamilies,
+      }, "Recovery mode ACTIVE — switching to recovery barriers/stakes");
+      broadcastSSE("recovery_active", {
+        symbol: bestMarket.symbol,
+        lostAmount,
+        totalUnrecoveredAmount: globalRecovery.unrecoveredAmount,
+        activeFamilies: globalRecovery.activeFamilies,
+        mode: { overunder: "OVER 4 / UNDER 5", direction: "boosted stake", evenodd: "boosted stake" },
+      });
+    }
 
     tradesExecutedToday++;
     lastTradeTime = new Date();
@@ -904,6 +1027,11 @@ router.get("/engine/status", async (_req, res): Promise<void> => {
     sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: DERIV_MARKETS.length,
+    recoveryMode: {
+      isActive: globalRecovery.isActive,
+      unrecoveredAmount: globalRecovery.unrecoveredAmount,
+      activeFamilies: globalRecovery.activeFamilies,
+    },
   });
 });
 
@@ -921,6 +1049,11 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     cooldownUntil = null;
     engineRunning = true; autonomousMode = "autonomous"; stopReasons = []; nextScanIn = loopIntervalSec;
     exploitSymbol = null; exploitCount = 0;
+    // Reset recovery state when engine is manually (re)started
+    globalRecovery = { isActive: false, unrecoveredAmount: 0, activeFamilies: [], recoveredFamilies: [] };
+    setGlobalDigitRecovery(false, 0);
+    // Reset group cursors so scanning starts from V10 each time
+    groupCursors[0] = 0; groupCursors[1] = 0; groupCursors[2] = 0; groupCursors[3] = 0;
     if (settings.length > 0) await db.update(settingsTable).set({ autonomousEnabled: true });
     if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
     autonomousTimer = setTimeout(runAutonomousLoop, 2000);
@@ -953,6 +1086,11 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: DERIV_MARKETS.length,
+    recoveryMode: {
+      isActive: globalRecovery.isActive,
+      unrecoveredAmount: globalRecovery.unrecoveredAmount,
+      activeFamilies: globalRecovery.activeFamilies,
+    },
   });
 });
 

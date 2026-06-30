@@ -36,7 +36,7 @@ import { logger } from "./logger";
 // ── Re-export for backward compatibility ──────────────────────────────────────
 export type { CoordinatorOutput } from "./agents/types";
 export { recordTradeOutcome, getStrategyStats } from "./agents/performance-feedback";
-export { updateDigitRecovery, isInDigitRecovery } from "./agents/digit-agent";
+export { updateDigitRecovery, isInDigitRecovery, setGlobalDigitRecovery } from "./agents/digit-agent";
 
 // ── Payout cache (20 min TTL — avoids Deriv WS round-trip on every scan) ─────
 const payoutCache = new Map<string, { value: number; ts: number }>();

@@ -86,6 +86,18 @@ interface RecoveryState {
 }
 const recoveryStore = new Map<string, RecoveryState>();
 
+// ── Global digit recovery state (set by the autonomous loop) ─────────────────
+// When the global cross-market recovery is active, ALL symbols enter digit
+// recovery tier 2 (OVER 4 / UNDER 5) regardless of per-symbol history.
+let _globalDigitRecoveryActive = false;
+let _globalDigitUnrecoveredAmount = 0;
+
+/** Called by the autonomous loop to sync global recovery state into the digit agent. */
+export function setGlobalDigitRecovery(active: boolean, amount: number): void {
+  _globalDigitRecoveryActive = active;
+  _globalDigitUnrecoveredAmount = amount;
+}
+
 /** Call after every DIGIT trade to update recovery state. */
 export function updateDigitRecovery(
   symbol: string,
@@ -98,7 +110,7 @@ export function updateDigitRecovery(
   const prev = recoveryStore.get(symbol) ?? { unrecoveredLoss: 0, lastLossAt: 0 };
   let unrecoveredLoss: number;
   if (won) {
-    // Any win fully clears recovery — streak resets from zero
+    // Any win fully clears per-symbol recovery
     unrecoveredLoss = 0;
   } else {
     // New loss: add stake to unrecovered amount
@@ -107,13 +119,20 @@ export function updateDigitRecovery(
   recoveryStore.set(symbol, { unrecoveredLoss, lastLossAt: won ? prev.lastLossAt : Date.now() });
 }
 
-/** True when there's an unrecovered loss for this symbol's digit trades. */
+/**
+ * True when this symbol's digit trades are in recovery mode.
+ * Returns true if EITHER the global recovery is active (cross-market loss)
+ * OR there is a per-symbol unrecovered loss.
+ */
 export function isInDigitRecovery(symbol: string): boolean {
+  if (_globalDigitRecoveryActive) return true;
   return (recoveryStore.get(symbol)?.unrecoveredLoss ?? 0) > 0;
 }
 
 export function getDigitRecoveryAmount(symbol: string): number {
-  return recoveryStore.get(symbol)?.unrecoveredLoss ?? 0;
+  // Return the larger of global or per-symbol amount
+  const perSymbol = recoveryStore.get(symbol)?.unrecoveredLoss ?? 0;
+  return Math.max(perSymbol, _globalDigitUnrecoveredAmount);
 }
 
 // ── Markov chain ──────────────────────────────────────────────────────────────
