@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@workspace/db";
 import { sql, desc, eq } from "drizzle-orm";
-import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd } from "../lib/deriv";
+import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, journalManager } from "../lib/deriv";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome, updateDigitRecovery } from "../lib/agent-coordinator";
@@ -124,6 +124,11 @@ function buildScanContext(
     currency,
   };
 }
+
+// ── Wire up JournalManager → SSE so dashboard updates instantly on refresh ────
+journalManager.on("refreshed", () => {
+  broadcastSSE("journal_refreshed", { ts: Date.now() });
+});
 
 // ── Wire up TickManager → SSE for live prices + live analysis ─────────────────
 
@@ -281,56 +286,68 @@ async function runAutonomousLoop() {
       return;
     }
 
-    // ── Market selection: scan ALL contract-compatible markets every cycle ────
-    // Filter markets by which contract types are enabled in settings
+    // ── Market selection: group-based sequential scanning ────────────────────
+    // Scans groups in priority order. Each group is scanned fully in parallel.
+    // The scan stops at the first group that contains a tradeable opportunity.
+    // Priority: Volatility 1s (1HZ*) → Volatility (R_*) → Jump (JD*) → Bull/Bear
     const hasDigitTypes = preferredContractTypes.some(t => t.startsWith("DIGIT"));
     const hasDirectionTypes = preferredContractTypes.some(t => ["CALL", "PUT"].includes(t));
 
     const contractCompatibleMarkets = availableMarkets.filter(m => {
-      // Bull/Bear (RDBULL/RDBEAR) have no digit support — skip them when only digit contracts are enabled
       if (hasDigitTypes && !hasDirectionTypes && !m.digitEnabled) return false;
       return true;
     });
 
-    // Scan in priority order: Volatility 1s → Volatility → Jump Indices → Bull/Bear
-    // (parallel execution, but priority used as tiebreaker when quality scores are equal)
-    const SYMBOL_PRIORITY: Record<string, number> = { "1HZ": 0, "R_": 1, "JD": 2, "RD": 3 };
-    const getSymbolPriority = (sym: string): number => {
-      for (const [prefix, pri] of Object.entries(SYMBOL_PRIORITY)) {
-        if (sym.startsWith(prefix)) return pri;
-      }
-      return 9;
+    const getGroupIndex = (sym: string): number => {
+      if (sym.startsWith("1HZ")) return 0; // Volatility 1s
+      if (sym.startsWith("R_"))  return 1; // Volatility
+      if (sym.startsWith("JD"))  return 2; // Jump Indices
+      return 3;                             // Bull/Bear (RDBULL/RDBEAR)
     };
-    const orderedMarkets = [...contractCompatibleMarkets].sort(
-      (a, b) => getSymbolPriority(a.symbol) - getSymbolPriority(b.symbol)
-    );
+    const GROUP_NAMES = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"];
+
+    // Bucket markets into their priority groups, preserving order within each group
+    const marketGroups: (typeof contractCompatibleMarkets)[] = [[], [], [], []];
+    for (const m of contractCompatibleMarkets) marketGroups[getGroupIndex(m.symbol)].push(m);
 
     let bestResult: { market: typeof availableMarkets[0]; output: Awaited<ReturnType<typeof runCoordinator>>; ctx: ScanContext } | null = null;
+    let totalMarketsScanned = 0;
 
-    // Scan without token — skips live WS payout calls so all markets complete in parallel quickly.
-    // The winning market gets a full ctx (with real token) built before execution.
     const SCAN_TIMEOUT_MS = 5000;
     function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
       return Promise.race([p, new Promise<T>((r) => setTimeout(() => r(fallback), ms))]);
     }
 
-    const scanResults = (await Promise.allSettled(
-      orderedMarkets.map(async (m) => {
-        const ctx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
-        const output = await withTimeout(runCoordinator(ctx), SCAN_TIMEOUT_MS, null as any);
-        if (!output) return null;
-        return { market: m, output, ctx };
-      })
-    )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
+    for (let gi = 0; gi < marketGroups.length; gi++) {
+      const group = marketGroups[gi];
+      if (group.length === 0) continue;
 
-    // Sort by quality score first; break ties by scan priority order (1s > regular > jump > bull/bear)
-    scanResults.sort((a, b) => {
-      const scoreDiff = b.output.qualityScore - a.output.qualityScore;
-      if (Math.abs(scoreDiff) > 1) return scoreDiff;
-      return getSymbolPriority(a.market.symbol) - getSymbolPriority(b.market.symbol);
-    });
-    const top = scanResults[0];
-    if (top) bestResult = top;
+      // Scan all markets in this group simultaneously
+      const groupResults = (await Promise.allSettled(
+        group.map(async (m) => {
+          const ctx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
+          const output = await withTimeout(runCoordinator(ctx), SCAN_TIMEOUT_MS, null as any);
+          if (!output) return null;
+          return { market: m, output, ctx };
+        })
+      )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
+
+      totalMarketsScanned += groupResults.length;
+
+      // Look for markets the master-decision agent approved for trading
+      const tradeable = groupResults.filter(r => r.output.shouldTrade);
+      if (tradeable.length > 0) {
+        tradeable.sort((a, b) => b.output.qualityScore - a.output.qualityScore);
+        bestResult = tradeable[0];
+        logger.info({
+          group: GROUP_NAMES[gi], symbol: bestResult.market.symbol,
+          quality: bestResult.output.qualityScore, groupsChecked: gi + 1,
+        }, "Opportunity found");
+        break;
+      }
+
+      logger.info({ group: GROUP_NAMES[gi], scanned: group.length }, "No opportunity — trying next group");
+    }
 
     if (!bestResult) { scheduleNext(); return; }
 
@@ -361,7 +378,7 @@ async function runAutonomousLoop() {
       quality: output.qualityScore,
       confidence: output.confidenceScore,
       agentScores: lastAgentScores,
-      marketsScanned: orderedMarkets.length,
+      marketsScanned: totalMarketsScanned,
       regime: output.regime,
       shouldTrade: output.shouldTrade,
       rejectReason: output.rejectReason,

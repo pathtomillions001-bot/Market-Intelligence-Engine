@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, useEffect, useRef } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   useGetTopMarket,
   useGetAiEngineStatus,
@@ -44,14 +44,28 @@ export default function Dashboard() {
   const executeTrade = useExecuteTrade();
   const toggleEngine = useToggleAutonomousEngine();
 
+  const queryClient = useQueryClient();
+
   // Journal stats — same source as the Trade Journal mini dashboard
   const { data: journalData } = useQuery({
     queryKey: ["derivJournal"],
     queryFn: () => fetch("/api/trades/deriv-journal").then(r => r.json()),
-    refetchInterval: 15000,
-    staleTime: 5000,
+    refetchInterval: 60000,
+    staleTime: 30000,
   });
   const stats: JournalStats | undefined = (journalData as any)?.stats;
+
+  // SSE: invalidate journal + daily-summary immediately whenever the journal manager refreshes
+  const sseRef = useRef<EventSource | null>(null);
+  useEffect(() => {
+    const es = new EventSource("/api/ai/events");
+    sseRef.current = es;
+    es.addEventListener("journal_refreshed", () => {
+      queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
+      queryClient.invalidateQueries({ queryKey: ["getDailySummary"] });
+    });
+    return () => { es.close(); sseRef.current = null; };
+  }, [queryClient]);
 
   // Live countdown to next autonomous trade
   const [countdown, setCountdown] = useState<number | null>(null);
