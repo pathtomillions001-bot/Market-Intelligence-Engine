@@ -26,7 +26,7 @@ let isLoopRunning = false;
 // Cooldown state — set when engine stops due to consecutive losses
 let cooldownUntil: Date | null = null;
 let cooldownResumeTimer: ReturnType<typeof setTimeout> | null = null;
-// Session loss counter — increments on each loss; a win does NOT reset it; only cooldown expiry does
+// Consecutive loss counter — increments on each loss; resets to 0 on any win; full reset on cooldown expiry
 let sessionLossCount = 0;
 
 let exploitSymbol: string | null = null;
@@ -281,8 +281,30 @@ async function runAutonomousLoop() {
       return;
     }
 
-    // ── Market selection: always scan ALL markets in parallel every cycle ────
-    // No exploit mode — every cycle scans all markets for the best opportunity
+    // ── Market selection: scan ALL contract-compatible markets every cycle ────
+    // Filter markets by which contract types are enabled in settings
+    const hasDigitTypes = preferredContractTypes.some(t => t.startsWith("DIGIT"));
+    const hasDirectionTypes = preferredContractTypes.some(t => ["CALL", "PUT"].includes(t));
+
+    const contractCompatibleMarkets = availableMarkets.filter(m => {
+      // Bull/Bear (RDBULL/RDBEAR) have no digit support — skip them when only digit contracts are enabled
+      if (hasDigitTypes && !hasDirectionTypes && !m.digitEnabled) return false;
+      return true;
+    });
+
+    // Scan in priority order: Volatility 1s → Volatility → Jump Indices → Bull/Bear
+    // (parallel execution, but priority used as tiebreaker when quality scores are equal)
+    const SYMBOL_PRIORITY: Record<string, number> = { "1HZ": 0, "R_": 1, "JD": 2, "RD": 3 };
+    const getSymbolPriority = (sym: string): number => {
+      for (const [prefix, pri] of Object.entries(SYMBOL_PRIORITY)) {
+        if (sym.startsWith(prefix)) return pri;
+      }
+      return 9;
+    };
+    const orderedMarkets = [...contractCompatibleMarkets].sort(
+      (a, b) => getSymbolPriority(a.symbol) - getSymbolPriority(b.symbol)
+    );
+
     let bestResult: { market: typeof availableMarkets[0]; output: Awaited<ReturnType<typeof runCoordinator>>; ctx: ScanContext } | null = null;
 
     // Scan without token — skips live WS payout calls so all markets complete in parallel quickly.
@@ -293,7 +315,7 @@ async function runAutonomousLoop() {
     }
 
     const scanResults = (await Promise.allSettled(
-      availableMarkets.map(async (m) => {
+      orderedMarkets.map(async (m) => {
         const ctx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
         const output = await withTimeout(runCoordinator(ctx), SCAN_TIMEOUT_MS, null as any);
         if (!output) return null;
@@ -301,7 +323,12 @@ async function runAutonomousLoop() {
       })
     )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 
-    scanResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore);
+    // Sort by quality score first; break ties by scan priority order (1s > regular > jump > bull/bear)
+    scanResults.sort((a, b) => {
+      const scoreDiff = b.output.qualityScore - a.output.qualityScore;
+      if (Math.abs(scoreDiff) > 1) return scoreDiff;
+      return getSymbolPriority(a.market.symbol) - getSymbolPriority(b.market.symbol);
+    });
     const top = scanResults[0];
     if (top) bestResult = top;
 
@@ -334,7 +361,7 @@ async function runAutonomousLoop() {
       quality: output.qualityScore,
       confidence: output.confidenceScore,
       agentScores: lastAgentScores,
-      marketsScanned: availableMarkets.length,
+      marketsScanned: orderedMarkets.length,
       regime: output.regime,
       shouldTrade: output.shouldTrade,
       rejectReason: output.rejectReason,
@@ -481,8 +508,9 @@ async function runAutonomousLoop() {
       }).where(eq(tradesTable.id, openTrade.id));
     }
 
-    // Increment session loss counter on loss — persists across wins until cooldown resets it
+    // Track consecutive losses — a win resets it to 0; cooldown expiry also resets it
     if (!won) sessionLossCount++;
+    else sessionLossCount = 0;
 
     tradesExecutedToday++;
     lastTradeTime = new Date();

@@ -109,8 +109,8 @@ export default function Dashboard() {
             </div>
           ) : (
             <Link href="/connect">
-              <Badge variant="outline" className="cursor-pointer border-amber-500/50 text-amber-500 hover:bg-amber-500/10">
-                Demo Mode — Connect Account
+              <Badge variant="outline" className="cursor-pointer border-primary/50 text-primary hover:bg-primary/10">
+                Connect Deriv Account
               </Badge>
             </Link>
           )}

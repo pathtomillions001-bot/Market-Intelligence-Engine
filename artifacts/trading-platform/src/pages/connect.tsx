@@ -93,7 +93,7 @@ export default function Connect() {
   const handleDisconnect = () => {
     disconnect.mutate(undefined, {
       onSuccess: () => {
-        toast.success("Account unlinked — switched to demo mode");
+        toast.success("Account unlinked successfully");
         queryClient.invalidateQueries();
       },
       onError: (err: any) => {
@@ -178,9 +178,9 @@ export default function Connect() {
             <CardTitle className="text-sm">What happens when you unlink?</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground space-y-2">
-            <p>• NeuroTrade switches to Demo Mode (simulated $10,000 balance)</p>
-            <p>• Your trade history and settings are preserved</p>
-            <p>• The AI engine continues scanning markets in simulation mode</p>
+            <p>• Live trading is paused until you re-link a Deriv account</p>
+            <p>• Your trade history and settings are fully preserved</p>
+            <p>• The AI engine continues scanning markets in paper trade mode</p>
             <p>• You can re-link your Deriv account at any time</p>
           </CardContent>
         </Card>
@@ -298,12 +298,6 @@ export default function Connect() {
         </button>
       )}
 
-      <div className="p-4 rounded-lg bg-amber-500/5 border border-amber-500/20">
-        <p className="text-sm text-amber-400">
-          <strong>Demo Mode active</strong> — trading on a simulated $10,000 balance.
-          Connect your Deriv account to trade with real funds.
-        </p>
-      </div>
     </motion.div>
   );
 }

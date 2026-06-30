@@ -52,7 +52,7 @@ function Router() {
   const [, setLocation] = useLocation();
 
   if (showLanding) {
-    return <LandingPage onEnter={() => { dismiss(); setLocation("/"); }} />;
+    return <LandingPage onEnter={() => { dismiss(); setLocation("/connect"); }} />;
   }
 
   return (

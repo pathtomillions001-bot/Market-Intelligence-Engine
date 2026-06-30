@@ -327,21 +327,10 @@ export default function LandingPage({ onEnter }: { onEnter: () => void }) {
                 Connect with Deriv
                 <ChevronRight className="w-3.5 h-3.5" />
               </motion.button>
-              <motion.button
-                whileHover={{ scale: 1.015 }}
-                whileTap={{ scale: 0.985 }}
-                onClick={onEnter}
-                className="w-full py-2.5 rounded-xl font-medium text-sm transition-colors"
-                style={{ color: "rgba(140,150,180,0.7)", border: "1px solid rgba(76,201,255,0.1)", background: "rgba(76,201,255,0.03)" }}
-                onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(76,201,255,0.2)"; e.currentTarget.style.color = "rgba(180,190,220,0.85)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(76,201,255,0.1)"; e.currentTarget.style.color = "rgba(140,150,180,0.7)"; }}
-              >
-                Explore Demo Mode
-              </motion.button>
             </div>
 
             <p className="text-[9px] text-center mt-3" style={{ color: "rgba(80,90,120,0.7)" }}>
-              OAuth · No credentials stored · Paper trade mode available
+              OAuth · No credentials stored locally · Real-time Deriv trading
             </p>
           </div>
         </div>
