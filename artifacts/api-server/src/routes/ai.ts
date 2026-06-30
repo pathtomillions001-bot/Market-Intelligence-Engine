@@ -54,11 +54,9 @@ let globalRecovery: GlobalRecoveryState = {
   recoveredFamilies: [],
 };
 
-// ── Per-group scan cursors (sequential rotation) ──────────────────────────────
-// Tracks the starting index for scanning within each market group.
 // Groups: 0=Volatility 1s (1HZ*), 1=Volatility (R_*), 2=Jump (JD*), 3=Bull/Bear
-// Advances by 1 each loop so scanning rotates through all markets fairly.
-const groupCursors: [number, number, number, number] = [0, 0, 0, 0];
+// All groups always scan in strict canonical order: V10→V25→V50→V75→V100 (no rotation).
+const GROUP_NAMES = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"];
 
 // New-style agent names matching the coordinator agents
 const AGENT_NAMES = [
@@ -333,8 +331,6 @@ async function runAutonomousLoop() {
       if (sym.startsWith("JD"))  return 2; // Jump Indices   (5 markets)
       return 3;                             // Bull/Bear      (2 markets)
     };
-    const GROUP_NAMES = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"];
-
     // Bucket markets into their 4 groups
     const marketGroups: (typeof contractCompatibleMarkets)[] = [[], [], [], []];
     for (const m of contractCompatibleMarkets) marketGroups[getGroupIndex(m.symbol)].push(m);
@@ -362,12 +358,9 @@ async function runAutonomousLoop() {
       marketGroups.map(async (group, gi): Promise<(ScanResult & { groupName: string }) | null> => {
         if (group.length === 0) return null;
 
-        // ── Sequential rotation: start from cursor, wrap around ──────────────
-        // Advance cursor BEFORE scanning so it rotates even if we short-circuit
-        const startIdx = groupCursors[gi] % group.length;
-        groupCursors[gi] = (groupCursors[gi] + 1) % group.length;
-        // Build ordered list starting from cursor position (maintains V10→V100 order within window)
-        const orderedGroup = [...group.slice(startIdx), ...group.slice(0, startIdx)];
+        // Always scan in strict canonical order: V10→V25→V50→V75→V100
+        // (order is determined by DERIV_MARKETS definition, never rotated)
+        const orderedGroup = group;
 
         const marketResults: ScanResult[] = [];
         for (const m of orderedGroup) {
@@ -519,13 +512,13 @@ async function runAutonomousLoop() {
     const duration = rec.duration;
 
     // ── Recovery stake override ───────────────────────────────────────────────
-    // For non-digit trades (direction/evenodd) during recovery: increase stake
-    // to a level where ONE win covers the full unrecovered loss.
-    // For digit trades, the digit-agent handles recovery via Tier 2 barrier selection
-    // (OVER 4 / UNDER 5 instead of OVER 2 / UNDER 8).
+    // Over/Under (DIGITOVER/DIGITUNDER): digit-agent switches to Tier 2 barriers
+    //   (OVER 4 / UNDER 5 instead of OVER 2 / UNDER 8) — no stake boost needed.
+    // Direction (CALL/PUT) + Even/Odd (DIGITEVEN/DIGITODD): boost stake so one
+    //   win fully covers the unrecovered loss.
     let stake = rec.stake;
-    const isDigitTrade = effectiveContractType.startsWith("DIGIT");
-    if (globalRecovery.isActive && !isDigitTrade && globalRecovery.unrecoveredAmount > 0) {
+    const isOverUnder = effectiveContractType === "DIGITOVER" || effectiveContractType === "DIGITUNDER";
+    if (globalRecovery.isActive && !isOverUnder && globalRecovery.unrecoveredAmount > 0) {
       const pm = rec.payoutMultiplier;
       const profitPerUnitStaked = pm - 1;  // net profit per dollar staked if win
       if (profitPerUnitStaked > 0) {
@@ -1052,8 +1045,7 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     // Reset recovery state when engine is manually (re)started
     globalRecovery = { isActive: false, unrecoveredAmount: 0, activeFamilies: [], recoveredFamilies: [] };
     setGlobalDigitRecovery(false, 0);
-    // Reset group cursors so scanning starts from V10 each time
-    groupCursors[0] = 0; groupCursors[1] = 0; groupCursors[2] = 0; groupCursors[3] = 0;
+    // Scanning always starts from V10 (canonical order enforced by DERIV_MARKETS definition)
     if (settings.length > 0) await db.update(settingsTable).set({ autonomousEnabled: true });
     if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
     autonomousTimer = setTimeout(runAutonomousLoop, 2000);
