@@ -40,10 +40,11 @@ export const DEFAULT_PAYOUTS: Record<string, number> = {
   DIGITODD:    1.95,   // 50/50 contract: odd digit wins
 };
 
-// Minimum EV threshold to consider an option positive.
-// For direction trades, we allow slight negative EV when consensus is very high
-// (see master-decision.ts gate). This avoids completely blocking direction trades.
-export const MIN_POSITIVE_EV = -0.005; // -0.5% (near-zero negative EV allowed)
+// Minimum EV threshold for "near-breakeven" classification.
+// Widened to -0.05 so direction trades at ~50% win rate are still returned as
+// candidates (EV ≈ -4.5%) rather than null. The master-decision gate then decides
+// whether to execute; returning null here permanently kills the engine.
+export const MIN_POSITIVE_EV = -0.05; // -5% lower bound for near-breakeven
 
 // ── EV calculation ────────────────────────────────────────────────────────────
 
@@ -129,8 +130,10 @@ function evForDigitProducts(
   barrierOptions: BarrierOption[],
   stake: number,
 ): EVResult[] {
+  // Include ALL barriers (not just positive EV) so there is always a candidate
+  // for the master-decision to evaluate. Sort best-first so index [0] is optimal.
   return barrierOptions
-    .filter((opt) => opt.expectedValue > 0)
+    .sort((a, b) => b.expectedValue - a.expectedValue)
     .map((opt) => ({
       product: opt.contractType,
       barrier: opt.barrier,
@@ -208,13 +211,16 @@ export function runEVCalculatorAgent(
     allEV.push(...evForEvenOddProducts(evenProb, stake, livePayouts));
   }
 
-  // Best result: prefer strictly positive EV; fall back to near-breakeven for direction
+  // Best result: prefer strictly positive EV → near-breakeven → any result (best EV overall).
+  // Never return null when there are candidates — a null bestEV permanently kills the engine
+  // because master-decision blocks with "No EV calculation available".
   const strictPositiveEV = allEV.filter((r) => r.isPositiveEV).sort((a, b) => b.dollarEV - a.dollarEV);
-  const nearBreakevenDirection = allEV
-    .filter((r) => r.isNearBreakeven && ["CALL", "PUT", "RISE", "FALL"].includes(r.product))
+  const nearBreakevenAny = allEV
+    .filter((r) => r.isNearBreakeven)
     .sort((a, b) => b.dollarEV - a.dollarEV);
+  const anySorted = [...allEV].sort((a, b) => b.expectedValue - a.expectedValue);
 
-  const bestEVResult = strictPositiveEV[0] ?? nearBreakevenDirection[0] ?? null;
+  const bestEVResult = strictPositiveEV[0] ?? nearBreakevenAny[0] ?? anySorted[0] ?? null;
 
   const score = bestEVResult
     ? Math.min(95, Math.round(50 + bestEVResult.expectedValue * 300))

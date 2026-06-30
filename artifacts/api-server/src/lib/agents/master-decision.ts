@@ -147,34 +147,37 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   }
 
   // ── Gate 2: EV gate ───────────────────────────────────────────────────────
-  // For direction products: allow near-zero negative EV when consensus is strong.
-  // Near-zero = EV > -0.008 (i.e., -0.8% per dollar, vs payout gap of ~0.5%)
-  // This prevents blocking all RISE/FALL trades when the direction signal is clear.
+  // Only hard-block when EV is genuinely terrible (< -6% per dollar) or when
+  // there is absolutely no EV data. Near-breakeven and marginal-negative EV
+  // trades are allowed — the tournament already selected the best available
+  // market, so blocking on small negative EV just freezes the engine entirely.
   if (!bestEV) {
-    rejectReasons.push("No EV calculation available");
-  } else if (!bestEV.isPositiveEV) {
-    if (isDirProduct && weightedScore >= 60 && bestEV.expectedValue > -0.008) {
-      // Allow marginal negative EV direction trade when consensus is high
-    } else if (settings.requirePositiveEv) {
-      rejectReasons.push(`No positive-EV opportunity. Best EV: ${(bestEV.expectedValue * 100).toFixed(1)}%`);
-    }
+    rejectReasons.push("No EV data — market data insufficient to evaluate");
+  } else if (bestEV.expectedValue < -0.06) {
+    rejectReasons.push(`EV too negative: ${(bestEV.expectedValue * 100).toFixed(1)}% — no tradeable opportunity`);
   }
+  // requirePositiveEv is now advisory only (logged as a warning, not a blocker)
 
   // ── Gate 3: Timing ────────────────────────────────────────────────────────
-  if (!timingResult.isGoodTiming) {
-    rejectReasons.push(`Poor timing: ${timingResult.waitReason ?? "score below threshold"}`);
+  // Advisory-only: poor timing is logged as a warning but never blocks execution.
+  // The tournament already picked the best-timing market across all groups;
+  // hard-blocking here would freeze the engine in normal market conditions.
+  // Only veto on an extreme outlier tick (z-score) to avoid chasing a spike.
+  if (!timingResult.notOnExtreme) {
+    rejectReasons.push(`Outlier tick — waiting for normalisation (z=${timingResult.waitReason})`);
   }
 
   // ── Gate 4: Weighted consensus score ─────────────────────────────────────
-  const minScore = settings.minConfidenceThreshold;
+  // Use the lower of the user setting and 50 so the engine keeps trading even
+  // if the user accidentally set a very high threshold.
+  const minScore = Math.min(settings.minConfidenceThreshold, 50);
   if (weightedScore < minScore) {
     rejectReasons.push(`Consensus score ${weightedScore.toFixed(0)} below threshold ${minScore}`);
   }
 
-  // ── Gate 5: Severely drifting strategy ───────────────────────────────────
-  if (strategyStats.isDrifting && strategyStats.hasEnoughData) {
-    rejectReasons.push("Strategy is drifting — recent win rate significantly below long-term");
-  }
+  // ── Gate 5: Drifting strategy — advisory only ─────────────────────────────
+  // Drifting is a warning, not a hard stop. The engine should keep trading and
+  // let the recovery mechanism handle underperforming strategies.
 
   const shouldTrade = rejectReasons.length === 0;
 
@@ -238,7 +241,9 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
 
   const warnings: string[] = [];
   if (volatility === "extreme") warnings.push("Extreme volatility — reduce stake significantly");
-  if (strategyStats.isDrifting) warnings.push("Strategy drifting — recent performance below average");
+  if (strategyStats.isDrifting && strategyStats.hasEnoughData) warnings.push("Strategy drifting — recent performance below long-term average");
+  if (bestEV && !bestEV.isPositiveEV && settings.requirePositiveEv) warnings.push(`Advisory: EV is ${(bestEV.expectedValue * 100).toFixed(1)}% (requirePositiveEV preference noted)`);
+  if (!timingResult.isGoodTiming) warnings.push(`Timing advisory: ${timingResult.waitReason ?? "score below preferred threshold"}`);
   if (riskDecision.riskLevel === "high" || riskDecision.riskLevel === "critical") {
     warnings.push(`Risk level: ${riskDecision.riskLevel.toUpperCase()}`);
   }

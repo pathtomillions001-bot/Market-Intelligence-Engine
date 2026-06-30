@@ -12,3 +12,4 @@
 - [Digit barrier tier system](digit-tier-system.md) — Tier 1: OVER 1-3 / UNDER 6-8; Tier 2: OVER 4-6 / UNDER 3-5; hard-blocked: OVER 7/8, UNDER 1/2 (never selected); OVER 0 / UNDER 9 are tier-0 but not blocked.
 - [Autonomous loop safety](autonomous-loop-safety.md) — isLoopRunning flag + open-trade DB guard prevent concurrent trades; Deriv profit used as ground truth for P&L; settlement timeout +30s buffer.
 - [Journal manager + no-fallback policy](journal-manager.md) — DerivJournalManager in deriv.ts: persistent WS, ping every 25s, reconnect if no pong 60s, profit_table refresh every 60s; no local DB fallback anywhere in journal/stats/daily-summary routes.
+- [Continuous trading gates](continuous-trading-gates.md) — engine was freezing after 2 trades; EV gate, timing gate, drifting gate were all hard-blocking; fixed by widening MIN_POSITIVE_EV to -0.05 and making gates advisory except hard risk stops.

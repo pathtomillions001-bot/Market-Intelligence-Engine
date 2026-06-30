@@ -117,9 +117,10 @@ export function assessEntryTiming(
   }
 
   score = Math.max(0, Math.min(100, score));
-  // Direction trades use a lower threshold (48 vs 55) because the direction model's
-  // own probability signal is the primary edge, not the timing score.
-  const timingThreshold = isDirection ? 48 : 55;
+  // Thresholds are intentionally low — timing is advisory in the master-decision gate.
+  // Only extreme timing failures (score < 38 for direction, < 45 for digit) flag as
+  // "not good timing", which the master decision treats as a warning, not a hard block.
+  const timingThreshold = isDirection ? 38 : 45;
   const isGoodTiming = score >= timingThreshold && notOnExtreme;
 
   return {
