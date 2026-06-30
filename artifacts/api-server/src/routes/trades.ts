@@ -46,8 +46,8 @@ function buildDailyStatsForManual(closedToday: any[]): DailyStats {
 
 // ── Helper: get Deriv journal transactions (cache-first, one-shot fallback) ────
 async function getDerivTransactions(token: string): Promise<any[]> {
-  // Return cached data if fresh (within 2 min)
-  if (journalManager.isCacheFresh(120_000)) {
+  // Return cached data if fresh (within 20s — short window so force-refreshed data lands quickly)
+  if (journalManager.isCacheFresh(20_000)) {
     return journalManager.getCached();
   }
   // Cache stale or empty — do a one-shot fetch and let the persistent manager update async

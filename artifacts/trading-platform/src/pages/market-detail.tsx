@@ -13,284 +13,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useQueryClient } from "@tanstack/react-query";
 
-function AgentBar({ name, score, weight, signal, reasoning }: { name: string; score: number; weight: number; signal: string; reasoning: string }) {
-  const color = score >= 70 ? "bg-green-500" : score >= 50 ? "bg-amber-500" : "bg-red-500";
-  const textColor = score >= 70 ? "text-green-500" : score >= 50 ? "text-amber-500" : "text-red-500";
-  const sigColor = signal.includes("buy") ? "text-green-500 border-green-500/30" : signal.includes("sell") ? "text-red-500 border-red-500/30" : "text-zinc-400 border-zinc-700";
-  return (
-    <div className="p-3 rounded-lg border border-border bg-secondary/20">
-      <div className="flex items-center justify-between mb-1.5">
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{name}</span>
-        <div className="flex items-center gap-1.5">
-          <Badge variant="outline" className={`text-[9px] px-1.5 py-0 ${sigColor}`}>{signal.replace(/_/g, " ")}</Badge>
-          <span className="text-[10px] text-zinc-600 font-mono">{(weight * 100).toFixed(0)}%</span>
-        </div>
-      </div>
-      <div className="flex items-center gap-2 mb-1.5">
-        <span className={`text-lg font-mono font-bold ${textColor}`}>{score.toFixed(0)}</span>
-        <div className="flex-1 h-1.5 bg-secondary rounded-full overflow-hidden">
-          <div className={`h-full rounded-full transition-all duration-500 ${color}`} style={{ width: `${score}%` }} />
-        </div>
-      </div>
-      <p className="text-[10px] text-muted-foreground leading-relaxed line-clamp-2" title={reasoning}>{reasoning}</p>
-    </div>
-  );
-}
-
-const AGENT_LABELS: Record<string, string> = {
-  marketScanner: "Market Scanner", trendAnalysis: "Trend Analysis", volatilityAnalysis: "Volatility Analysis",
-  patternRecognition: "Pattern Recognition", riskManagement: "Risk Management", capitalPreservation: "Capital Preservation",
-  tradeExecution: "Trade Execution", selfLearning: "Self-Learning Performance",
-};
-
-// ── AI Smart Pick Panel ────────────────────────────────────────────────────────
-// Simplified execution panel — combines all 9 agents + all contract types to surface
-// the single best trade for this specific market with configurable inputs.
-
-function ContractPill({ label, winPct, ev, isWinner, color }: { label: string; winPct: number; ev: number; isWinner: boolean; color: string }) {
-  return (
-    <div
-      className={`flex flex-col items-center p-2 rounded-xl border transition-all ${
-        isWinner ? "border-opacity-60 scale-[1.04]" : "border-white/[0.08] bg-white/[0.02] opacity-60"
-      }`}
-      style={isWinner ? { borderColor: `${color}50`, background: `${color}10` } : {}}
-    >
-      {isWinner && <span className="text-[7px] font-bold mb-1" style={{ color }}>★ BEST</span>}
-      <span className="text-[9px] font-mono font-bold" style={{ color: isWinner ? color : undefined }}>{label}</span>
-      <span className={`text-sm font-mono font-bold mt-0.5 ${winPct >= 60 ? "text-green-400" : winPct >= 50 ? "text-amber-400" : "text-red-400"}`}>{winPct}%</span>
-      <span className={`text-[8px] font-mono ${ev > 0 ? "text-green-500/70" : "text-zinc-500"}`}>{ev > 0 ? `+$${ev.toFixed(2)}` : `$${ev.toFixed(2)}`}</span>
-    </div>
-  );
-}
-
-function AgentIntelligencePanel({ agentOutputs, recommendation, openTradeDialog }: {
-  agentOutputs: any;
-  recommendation: any;
-  openTradeDialog: (ct: string, dir: "up" | "down", barrier?: number, duration?: number) => void;
-}) {
-  const [stake, setStake] = useState(recommendation?.stake?.toFixed(2) ?? "1.00");
-  const [ticks, setTicks] = useState<number>(recommendation?.recommendedDuration ?? 5);
-
-  if (!agentOutputs || Object.keys(agentOutputs).length === 0) {
-    return (
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm flex items-center gap-2">
-            <Activity className="w-4 h-4 text-primary" />
-            AI Smart Pick
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="text-xs text-muted-foreground text-center py-4">Analysing market…</div>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  const master = agentOutputs["masterDecision"];
-  const dirAgent = agentOutputs["direction"];
-  const digitAgent = agentOutputs["digitDistribution"];
-  const durationAgent = agentOutputs["durationOptimizer"];
-
-  const shouldTrade: boolean = master?.data?.shouldTrade ?? false;
-  const weightedScore: number = master?.data?.weightedScore ?? 0;
-  const rejectReasons: string[] = master?.data?.rejectReasons ?? [];
-  const optimizedDuration: number = durationAgent?.data?.duration ?? recommendation?.recommendedDuration ?? 5;
-  const regime: string = (recommendation?.regime ?? "").replace(/_/g, " ");
-
-  // Best trade from coordinator
-  const bestCt: string = recommendation?.contractType ?? "CALL";
-  const bestWinPct: number = Math.round(recommendation?.winProbability ?? 50);
-  const bestEv: number = recommendation?.expectedValue ?? 0;
-  const bestBarrier: number | undefined = recommendation?.digitBarrier ?? undefined;
-  const bestPayoutMult: number = recommendation?.payoutMultiplier ?? 1.91;
-
-  // Rise/Fall signal
-  const probUp: number = dirAgent?.data?.probUp ?? 0.5;
-  const risePct = Math.round(probUp * 100);
-  const fallPct = 100 - risePct;
-  const bestRF = risePct >= fallPct ? { label: "RISE", winPct: risePct, ct: "CALL" } : { label: "FALL", winPct: fallPct, ct: "PUT" };
-  const rfEv = bestRF.winPct / 100 * bestPayoutMult - 1;
-
-  // Over/Under signal (from bestOption in digit agent)
-  const bestDigitOpt = digitAgent?.data?.bestOption;
-  const ouLabel = bestDigitOpt
-    ? `${bestDigitOpt.contractType === "DIGITOVER" ? "OVER" : "UNDER"} ${bestDigitOpt.barrier}`
-    : "OVER 3";
-  const ouWinPct = bestDigitOpt ? Math.round(bestDigitOpt.winProbability * 100) : 50;
-  const ouEv = bestDigitOpt ? bestDigitOpt.expectedValue : 0;
-  const ouCt = bestDigitOpt?.contractType ?? "DIGITOVER";
-  const ouBarrier = bestDigitOpt?.barrier;
-
-  // Determine which category is best — Rise/Fall vs Over/Under only (Even/Odd excluded)
-  type Category = "rf" | "ou";
-  const cats: { id: Category; label: string; winPct: number; ev: number; ct: string; barrier?: number }[] = [
-    { id: "rf", label: bestRF.label, winPct: bestRF.winPct, ev: rfEv, ct: bestRF.ct },
-    { id: "ou", label: ouLabel,      winPct: ouWinPct,       ev: ouEv, ct: ouCt, barrier: ouBarrier },
-  ];
-
-  // Winner = highest EV; fall back to highest win probability
-  const winnerCat = cats.reduce((best, cat) => {
-    if (cat.ev > best.ev) return cat;
-    if (cat.ev === best.ev && cat.winPct > best.winPct) return cat;
-    return best;
-  }, cats[0]);
-
-  const isWinner = (id: Category) => winnerCat.id === id;
-
-  const catColors: Record<Category, string> = {
-    rf: "#10b981",
-    ou: "#06b6d4",
-  };
-
-  const scoreColor = weightedScore >= 70 ? "text-green-400" : weightedScore >= 50 ? "text-amber-400" : "text-red-400";
-
-  const directionMap: Record<string, "up" | "down"> = {
-    CALL: "up", PUT: "down", RISE: "up", FALL: "down",
-    DIGITOVER: "up", DIGITUNDER: "down", DIGITEVEN: "up", DIGITODD: "down",
-  };
-
-  return (
-    <Card className="bg-card border-border">
-      <CardHeader className="pb-3">
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <CardTitle className="text-sm flex items-center gap-2">
-            <Activity className="w-4 h-4 text-primary" />
-            AI Smart Pick
-            <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-          </CardTitle>
-          <div className="flex items-center gap-1.5">
-            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-              shouldTrade ? "bg-green-500/15 text-green-400 border-green-500/30" : "bg-amber-500/10 text-amber-400 border-amber-500/30"
-            }`}>
-              {shouldTrade ? "✓ TRADE" : "⏸ WAIT"}
-            </span>
-            {regime && (
-              <span className="text-[10px] px-2 py-0.5 rounded-full bg-secondary/40 border border-border text-muted-foreground capitalize">{regime}</span>
-            )}
-          </div>
-        </div>
-      </CardHeader>
-
-      <CardContent className="space-y-4 pt-0">
-        {/* 9-Agent Consensus bar */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium">9-Agent Consensus</span>
-            <span className={`text-sm font-mono font-bold ${scoreColor}`}>{weightedScore.toFixed(0)}<span className="text-xs text-muted-foreground font-normal">/100</span></span>
-          </div>
-          <div className="h-2 w-full bg-secondary rounded-full overflow-hidden">
-            <div
-              className="h-full rounded-full transition-all duration-700"
-              style={{
-                width: `${weightedScore}%`,
-                background: weightedScore >= 70 ? "linear-gradient(90deg,#16a34a,#22c55e)" : weightedScore >= 50 ? "linear-gradient(90deg,#d97706,#f59e0b)" : "linear-gradient(90deg,#b91c1c,#ef4444)"
-              }}
-            />
-          </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            {rejectReasons.length > 0
-              ? rejectReasons.slice(0, 2).map((r, i) => (
-                  <span key={i} className="flex items-center gap-1 text-[9px] text-amber-400">
-                    <AlertTriangle className="w-2.5 h-2.5" />{r}
-                  </span>
-                ))
-              : <span className="text-[9px] text-muted-foreground">{optimizedDuration}t optimal · {Object.keys(agentOutputs).length} agents active</span>
-            }
-          </div>
-        </div>
-
-        {/* Contract type comparison — Rise/Fall vs Over/Under */}
-        <div>
-          <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-2 font-medium">Best Trade by Category</div>
-          <div className="grid grid-cols-2 gap-3">
-            <ContractPill label={bestRF.label} winPct={bestRF.winPct} ev={rfEv}   isWinner={isWinner("rf")} color={catColors.rf} />
-            <ContractPill label={ouLabel}      winPct={ouWinPct}      ev={ouEv}   isWinner={isWinner("ou")} color={catColors.ou} />
-          </div>
-        </div>
-
-        {/* Best trade execution block */}
-        <div className={`rounded-xl border p-4 space-y-3 ${shouldTrade ? "border-primary/25 bg-primary/5" : "border-border bg-secondary/20"}`}>
-          <div className="flex items-start justify-between">
-            <div>
-              <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-1">AI Best Trade</div>
-              <div className="text-xl font-mono font-bold">
-                {bestCt === "DIGITOVER" && bestBarrier != null ? `OVER ${bestBarrier}`
-                  : bestCt === "DIGITUNDER" && bestBarrier != null ? `UNDER ${bestBarrier}`
-                  : bestCt === "DIGITEVEN" ? "EVEN"
-                  : bestCt === "DIGITODD" ? "ODD"
-                  : bestCt === "CALL" ? "Rise" : bestCt === "PUT" ? "Fall" : bestCt}
-              </div>
-            </div>
-            <div className="text-right">
-              <div className="text-[9px] text-muted-foreground mb-0.5">Win Prob</div>
-              <div className={`text-2xl font-mono font-bold ${bestWinPct >= 60 ? "text-green-400" : bestWinPct >= 50 ? "text-amber-400" : "text-red-400"}`}>{bestWinPct}%</div>
-            </div>
-          </div>
-
-          {/* EV + payout */}
-          <div className="grid grid-cols-2 gap-2">
-            <div className="text-center p-2 rounded-lg bg-secondary/40 border border-border">
-              <div className="text-[9px] text-muted-foreground">Expected Value</div>
-              <div className={`text-sm font-mono font-bold ${bestEv > 0 ? "text-green-400" : "text-red-400"}`}>
-                {bestEv > 0 ? `+$${bestEv.toFixed(2)}` : `$${bestEv.toFixed(2)}`}
-              </div>
-            </div>
-            <div className="text-center p-2 rounded-lg bg-secondary/40 border border-border">
-              <div className="text-[9px] text-muted-foreground">Payout</div>
-              <div className="text-sm font-mono font-bold">{bestPayoutMult.toFixed(2)}x</div>
-            </div>
-          </div>
-
-          {/* Editable stake + ticks */}
-          <div className="grid grid-cols-2 gap-2">
-            <div className="space-y-1">
-              <label className="text-[9px] text-muted-foreground uppercase tracking-wider">Stake ($)</label>
-              <input
-                type="number"
-                value={stake}
-                min="0.35"
-                step="0.5"
-                onChange={(e) => setStake(e.target.value)}
-                onClick={(e) => e.stopPropagation()}
-                className="w-full px-2.5 py-1.5 rounded-lg bg-secondary/50 border border-border text-sm font-mono font-bold text-center focus:outline-none focus:ring-1 focus:ring-primary/40"
-              />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[9px] text-muted-foreground uppercase tracking-wider">Ticks</label>
-              <input
-                type="number"
-                value={ticks}
-                min="1"
-                max="15"
-                step="1"
-                onChange={(e) => setTicks(Math.max(1, Math.min(15, Number(e.target.value))))}
-                onClick={(e) => e.stopPropagation()}
-                className="w-full px-2.5 py-1.5 rounded-lg bg-secondary/50 border border-border text-sm font-mono font-bold text-center focus:outline-none focus:ring-1 focus:ring-primary/40"
-              />
-            </div>
-          </div>
-
-          {/* Execute button */}
-          <button
-            onClick={() => openTradeDialog(bestCt, directionMap[bestCt] ?? "up", bestBarrier, ticks)}
-            disabled={!shouldTrade}
-            className={`w-full py-2.5 rounded-lg font-mono font-bold text-sm transition-all ${
-              shouldTrade
-                ? "bg-primary text-primary-foreground hover:bg-primary/90 active:scale-[0.98]"
-                : "bg-secondary/40 text-muted-foreground cursor-not-allowed"
-            }`}
-          >
-            {shouldTrade
-              ? `▶ Execute ${bestCt === "CALL" ? "Rise" : bestCt === "PUT" ? "Fall" : bestCt === "DIGITOVER" ? `OVER ${bestBarrier ?? ""}` : bestCt === "DIGITUNDER" ? `UNDER ${bestBarrier ?? ""}` : bestCt === "DIGITEVEN" ? "Even" : "Odd"} · ${ticks}t · $${Number(stake).toFixed(2)}`
-              : `⏸ ${rejectReasons[0] ?? "Waiting for better conditions…"}`}
-          </button>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 // ── AI Trade Panel ────────────────────────────────────────────────────────────
 // Unified recommendation panel synced to all 3 contract types + agent intelligence
 
@@ -358,7 +80,11 @@ function DigitBar({ digit, count, pct, hot, cold, barrier, contractType }: {
 }
 
 // ── Rise/Fall trend analysis panel ────────────────────────────────────────────
-function RiseFallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (type: string, dir: "up" | "down") => void }) {
+function RiseFallPanel({ trendStats, agentData, onTrade }: {
+  trendStats: any;
+  agentData?: { probUp: number; probDown: number; weightedScore: number; shouldTrade: boolean; recommendedDuration: number };
+  onTrade: (type: string, dir: "up" | "down", barrier?: number, duration?: number) => void;
+}) {
   if (!trendStats) return null;
   const {
     direction, strength, winProb, streak, streakDir, momentum, samples,
@@ -369,14 +95,28 @@ function RiseFallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (typ
     bias = "neutral",
   } = trendStats;
 
-  const risingPct  = winProb?.rise ?? 50;
-  const fallingPct = winProb?.fall ?? 50;
+  // Blend 9-agent direction probabilities (65%) with statistical win prob (35%)
+  const agentProbUp = agentData?.probUp ?? null;
+  const agentProbDown = agentData?.probDown ?? null;
+  const risingPct = agentProbUp !== null
+    ? Math.round(agentProbUp * 100 * 0.65 + (winProb?.rise ?? 50) * 0.35)
+    : winProb?.rise ?? 50;
+  const fallingPct = agentProbDown !== null
+    ? Math.round(agentProbDown * 100 * 0.65 + (winProb?.fall ?? 50) * 0.35)
+    : winProb?.fall ?? 50;
 
-  const isRiseRecommended = recommendRise;
-  const isFallRecommended = recommendFall;
+  // Agent-driven recommendation overrides statistical signals when available
+  const isRiseRecommended = agentData
+    ? (agentData.probUp > 0.52 && agentData.shouldTrade && agentData.probUp >= agentData.probDown)
+    : recommendRise;
+  const isFallRecommended = agentData
+    ? (agentData.probDown > 0.52 && agentData.shouldTrade && agentData.probDown > agentData.probUp)
+    : recommendFall;
   const isHotStreak = hotStreak >= 3;
   const rsiOverbought = rsi > 70;
   const rsiOversold   = rsi < 30;
+  const agentDuration = agentData?.recommendedDuration ?? 5;
+  const wscore = agentData?.weightedScore ?? 0;
 
   return (
     <Card className="bg-card">
@@ -390,15 +130,20 @@ function RiseFallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (typ
               RSI {rsi} {rsiOverbought ? "OB" : "OS"}
             </span>
           )}
-          <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
+          {agentData && (
+            <span className={`ml-auto text-[9px] px-1.5 py-0.5 rounded-full border font-mono ${wscore >= 70 ? "bg-green-500/10 border-green-500/30 text-green-400" : wscore >= 50 ? "bg-amber-500/10 border-amber-500/30 text-amber-400" : "bg-zinc-800 border-zinc-700 text-zinc-400"}`}>
+              9-Agents {wscore.toFixed(0)}/100
+            </span>
+          )}
+          <span className={`${agentData ? "" : "ml-auto"} w-2 h-2 rounded-full bg-green-500 animate-pulse`} title="Live" />
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
 
-        {/* Main action buttons — styled like Even/Odd panel */}
+        {/* Main action buttons */}
         <div className="grid grid-cols-2 gap-2">
           <button
-            onClick={() => onTrade("CALL", "up")}
+            onClick={() => onTrade("CALL", "up", undefined, agentDuration)}
             className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
               isRiseRecommended ? "border-green-500/60 bg-green-500/10" : "border-border bg-secondary/30 hover:border-green-500/30"
             }`}
@@ -406,11 +151,11 @@ function RiseFallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (typ
             <ArrowUp className={`w-6 h-6 mb-1.5 ${isRiseRecommended ? "text-green-400" : "text-muted-foreground"}`} />
             <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Rise</div>
             <div className={`text-2xl font-mono font-bold mt-1 ${isRiseRecommended ? "text-green-400" : "text-foreground"}`}>{risingPct.toFixed(0)}%</div>
-            <div className="text-[9px] text-muted-foreground">win probability</div>
-            {isRiseRecommended && <Badge className="mt-1.5 text-[9px] bg-green-500/20 text-green-400 border-green-500/30">AI FAVOURS</Badge>}
+            <div className="text-[9px] text-muted-foreground">{agentProbUp !== null ? "9-agent win prob" : "win probability"}</div>
+            {isRiseRecommended && <Badge className="mt-1.5 text-[9px] bg-green-500/20 text-green-400 border-green-500/30">AI FAVOURS · {agentDuration}t</Badge>}
           </button>
           <button
-            onClick={() => onTrade("PUT", "down")}
+            onClick={() => onTrade("PUT", "down", undefined, agentDuration)}
             className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
               isFallRecommended ? "border-red-500/60 bg-red-500/10" : "border-border bg-secondary/30 hover:border-red-500/30"
             }`}
@@ -418,10 +163,31 @@ function RiseFallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (typ
             <ArrowDown className={`w-6 h-6 mb-1.5 ${isFallRecommended ? "text-red-400" : "text-muted-foreground"}`} />
             <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Fall</div>
             <div className={`text-2xl font-mono font-bold mt-1 ${isFallRecommended ? "text-red-400" : "text-foreground"}`}>{fallingPct.toFixed(0)}%</div>
-            <div className="text-[9px] text-muted-foreground">win probability</div>
-            {isFallRecommended && <Badge className="mt-1.5 text-[9px] bg-red-500/20 text-red-400 border-red-500/30">AI FAVOURS</Badge>}
+            <div className="text-[9px] text-muted-foreground">{agentProbDown !== null ? "9-agent win prob" : "win probability"}</div>
+            {isFallRecommended && <Badge className="mt-1.5 text-[9px] bg-red-500/20 text-red-400 border-red-500/30">AI FAVOURS · {agentDuration}t</Badge>}
           </button>
         </div>
+
+        {/* 9-Agent consensus bar — shown when agent data is available */}
+        {agentData && (
+          <div className="p-2.5 rounded-lg bg-secondary/20 border border-border">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[9px] text-muted-foreground uppercase tracking-wider font-medium">9-Agent Consensus</span>
+              <div className="flex items-center gap-2">
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full border ${agentData.shouldTrade ? "bg-green-500/15 text-green-400 border-green-500/30" : "bg-amber-500/10 text-amber-400 border-amber-500/30"}`}>
+                  {agentData.shouldTrade ? "✓ TRADE" : "⏸ WAIT"}
+                </span>
+                <span className={`text-xs font-mono font-bold ${wscore >= 70 ? "text-green-400" : wscore >= 50 ? "text-amber-400" : "text-red-400"}`}>{wscore.toFixed(0)}/100</span>
+              </div>
+            </div>
+            <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
+              <div className="h-full rounded-full transition-all duration-700"
+                style={{ width: `${wscore}%`, background: wscore >= 70 ? "linear-gradient(90deg,#16a34a,#22c55e)" : wscore >= 50 ? "linear-gradient(90deg,#d97706,#f59e0b)" : "linear-gradient(90deg,#b91c1c,#ef4444)" }}
+              />
+            </div>
+            <div className="text-[8px] text-muted-foreground mt-1">Optimal duration: {agentDuration}t · click Rise or Fall to auto-fill stake &amp; ticks</div>
+          </div>
+        )}
 
         {/* Multi-window frequency table — matching EvenOdd style */}
         <div className="grid grid-cols-2 gap-1.5 text-center">
@@ -497,7 +263,11 @@ function RiseFallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (typ
 }
 
 // ── Even / Odd analysis panel ──────────────────────────────────────────────────
-function EvenOddPanel({ digitStats, onTrade }: { digitStats: any; onTrade: (type: string, dir: "up" | "down") => void }) {
+function EvenOddPanel({ digitStats, agentData, onTrade }: {
+  digitStats: any;
+  agentData?: { weightedScore: number; shouldTrade: boolean; recommendedDuration: number };
+  onTrade: (type: string, dir: "up" | "down", barrier?: number, duration?: number) => void;
+}) {
   if (!digitStats) return null;
 
   const eoStats = digitStats.evenOddStats;
@@ -523,7 +293,7 @@ function EvenOddPanel({ digitStats, onTrade }: { digitStats: any; onTrade: (type
   const edge          = eoStats?.edge ?? 0;
   const s100 = eoStats?.samples100 ?? digitStats.samples ?? 0;
 
-  // Markov chain data
+  // Markov chain data — primary win probability signal
   const markovEvenGivenEven  = eoStats?.markovEvenGivenEven ?? 0.5;
   const markovEvenGivenOdd   = eoStats?.markovEvenGivenOdd  ?? 0.5;
   const markovNextEvenProb   = eoStats?.markovNextEvenProb  ?? 0.5;
@@ -537,6 +307,13 @@ function EvenOddPanel({ digitStats, onTrade }: { digitStats: any; onTrade: (type
   const isStrongStreak = streak >= 4;
   const reversalSide = streakType === "even" ? "ODD" : "EVEN";
 
+  const agentDuration = agentData?.recommendedDuration ?? 5;
+  const wscore = agentData?.weightedScore ?? 0;
+
+  // Primary win probabilities driven by Markov chain (part of agent pipeline)
+  const evenWinPct = (markovNextEvenProb * 100);
+  const oddWinPct  = ((1 - markovNextEvenProb) * 100);
+
   return (
     <Card className="bg-card">
       <CardHeader className="pb-2">
@@ -549,7 +326,12 @@ function EvenOddPanel({ digitStats, onTrade }: { digitStats: any; onTrade: (type
               χ² p&lt;{chiPval}
             </span>
           )}
-          <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
+          {agentData && (
+            <span className={`ml-auto text-[9px] px-1.5 py-0.5 rounded-full border font-mono ${wscore >= 70 ? "bg-green-500/10 border-green-500/30 text-green-400" : wscore >= 50 ? "bg-amber-500/10 border-amber-500/30 text-amber-400" : "bg-zinc-800 border-zinc-700 text-zinc-400"}`}>
+              9-Agents {wscore.toFixed(0)}/100
+            </span>
+          )}
+          <span className={`${agentData ? "" : "ml-auto"} w-2 h-2 rounded-full bg-green-500 animate-pulse`} title="Live" />
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -557,30 +339,51 @@ function EvenOddPanel({ digitStats, onTrade }: { digitStats: any; onTrade: (type
         {/* Trade buttons */}
         <div className="grid grid-cols-2 gap-2">
           <button
-            onClick={() => onTrade("DIGITEVEN", "up")}
+            onClick={() => onTrade("DIGITEVEN", "up", undefined, agentDuration)}
             className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
               isEvenRecommended ? "border-cyan-500/60 bg-cyan-500/10" : "border-border bg-secondary/30 hover:border-cyan-500/30"
             }`}
           >
             <span className={`text-xs font-mono font-bold tracking-widest mb-1 ${isEvenRecommended ? "text-cyan-400" : "text-muted-foreground"}`}>0·2·4·6·8</span>
             <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">EVEN</div>
-            <div className={`text-2xl font-mono font-bold mt-1 ${isEvenRecommended ? "text-cyan-400" : "text-foreground"}`}>{evenPct20.toFixed(1)}%</div>
-            <div className="text-[9px] text-muted-foreground">last 20 ticks</div>
-            {isEvenRecommended && <Badge className="mt-1.5 text-[9px] bg-cyan-500/20 text-cyan-400 border-cyan-500/30">AI FAVOURS</Badge>}
+            <div className={`text-2xl font-mono font-bold mt-1 ${isEvenRecommended ? "text-cyan-400" : "text-foreground"}`}>{evenWinPct.toFixed(1)}%</div>
+            <div className="text-[9px] text-muted-foreground">Markov probability</div>
+            {isEvenRecommended && <Badge className="mt-1.5 text-[9px] bg-cyan-500/20 text-cyan-400 border-cyan-500/30">AI FAVOURS · {agentDuration}t</Badge>}
           </button>
           <button
-            onClick={() => onTrade("DIGITODD", "down")}
+            onClick={() => onTrade("DIGITODD", "down", undefined, agentDuration)}
             className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
               isOddRecommended ? "border-violet-500/60 bg-violet-500/10" : "border-border bg-secondary/30 hover:border-violet-500/30"
             }`}
           >
             <span className={`text-xs font-mono font-bold tracking-widest mb-1 ${isOddRecommended ? "text-violet-400" : "text-muted-foreground"}`}>1·3·5·7·9</span>
             <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">ODD</div>
-            <div className={`text-2xl font-mono font-bold mt-1 ${isOddRecommended ? "text-violet-400" : "text-foreground"}`}>{oddPct20.toFixed(1)}%</div>
-            <div className="text-[9px] text-muted-foreground">last 20 ticks</div>
-            {isOddRecommended && <Badge className="mt-1.5 text-[9px] bg-violet-500/20 text-violet-400 border-violet-500/30">AI FAVOURS</Badge>}
+            <div className={`text-2xl font-mono font-bold mt-1 ${isOddRecommended ? "text-violet-400" : "text-foreground"}`}>{oddWinPct.toFixed(1)}%</div>
+            <div className="text-[9px] text-muted-foreground">Markov probability</div>
+            {isOddRecommended && <Badge className="mt-1.5 text-[9px] bg-violet-500/20 text-violet-400 border-violet-500/30">AI FAVOURS · {agentDuration}t</Badge>}
           </button>
         </div>
+
+        {/* 9-Agent consensus bar */}
+        {agentData && (
+          <div className="p-2.5 rounded-lg bg-secondary/20 border border-border">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[9px] text-muted-foreground uppercase tracking-wider font-medium">9-Agent Consensus</span>
+              <div className="flex items-center gap-2">
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full border ${agentData.shouldTrade ? "bg-green-500/15 text-green-400 border-green-500/30" : "bg-amber-500/10 text-amber-400 border-amber-500/30"}`}>
+                  {agentData.shouldTrade ? "✓ TRADE" : "⏸ WAIT"}
+                </span>
+                <span className={`text-xs font-mono font-bold ${wscore >= 70 ? "text-green-400" : wscore >= 50 ? "text-amber-400" : "text-red-400"}`}>{wscore.toFixed(0)}/100</span>
+              </div>
+            </div>
+            <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
+              <div className="h-full rounded-full transition-all duration-700"
+                style={{ width: `${wscore}%`, background: wscore >= 70 ? "linear-gradient(90deg,#16a34a,#22c55e)" : wscore >= 50 ? "linear-gradient(90deg,#d97706,#f59e0b)" : "linear-gradient(90deg,#b91c1c,#ef4444)" }}
+              />
+            </div>
+            <div className="text-[8px] text-muted-foreground mt-1">Optimal duration: {agentDuration}t · click Even or Odd to auto-fill stake &amp; ticks</div>
+          </div>
+        )}
 
         {/* Multi-window frequency table — fixed labels (always 20 / 50 / 100) */}
         <div className="grid grid-cols-3 gap-1.5 text-center">
@@ -897,11 +700,37 @@ export default function MarketDetail() {
         </CardContent>
       </Card>
 
-      {/* Rise & Fall Analysis — clickable trade buttons */}
-      <RiseFallPanel trendStats={trendStats} onTrade={openTradeDialog} />
+      {/* Extract 9-agent outputs from coordinator recommendation */}
+      {(() => {
+        const agentOutputs = (rec as any)?.agentOutputs ?? {};
+        const dirAgent = agentOutputs?.direction?.data;
+        const masterAgent = agentOutputs?.masterDecision?.data;
+        const durationAgent = agentOutputs?.durationOptimizer?.data;
+        const agentRecommendedDuration = durationAgent?.duration ?? (rec as any)?.recommendedDuration ?? 5;
 
-      {/* Even & Odd Analysis — only for digit markets */}
-      {isDigitMarket && <EvenOddPanel digitStats={digitStats} onTrade={openTradeDialog} />}
+        const rfAgentData = dirAgent ? {
+          probUp: dirAgent.probUp ?? 0.5,
+          probDown: dirAgent.probDown ?? 0.5,
+          weightedScore: masterAgent?.weightedScore ?? 0,
+          shouldTrade: masterAgent?.shouldTrade ?? false,
+          recommendedDuration: agentRecommendedDuration,
+        } : undefined;
+
+        const eoAgentData = masterAgent ? {
+          weightedScore: masterAgent.weightedScore ?? 0,
+          shouldTrade: masterAgent.shouldTrade ?? false,
+          recommendedDuration: agentRecommendedDuration,
+        } : undefined;
+
+        return (
+          <>
+            {/* Rise & Fall Analysis — 9-agent driven win probabilities */}
+            <RiseFallPanel trendStats={trendStats} agentData={rfAgentData} onTrade={openTradeDialog} />
+            {/* Even & Odd Analysis — only for digit markets */}
+            {isDigitMarket && <EvenOddPanel digitStats={digitStats} agentData={eoAgentData} onTrade={openTradeDialog} />}
+          </>
+        );
+      })()}
 
       {/* Digit Analysis (OVER/UNDER) — only for digit markets */}
       {isDigitMarket && digitStats && (
@@ -1011,8 +840,6 @@ export default function MarketDetail() {
         </Card>
       )}
 
-      {/* AI Smart Pick — live 9-agent breakdown */}
-      <AgentIntelligencePanel agentOutputs={(rec as any)?.agentOutputs} recommendation={recommendation} openTradeDialog={openTradeDialog} />
 
 
       {/* Trade dialog */}

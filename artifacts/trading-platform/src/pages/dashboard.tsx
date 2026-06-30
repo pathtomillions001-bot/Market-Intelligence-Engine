@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   useGetTopMarket,
@@ -27,6 +27,12 @@ interface JournalStats {
   currentStreak: number;
 }
 
+interface PendingResult {
+  won: boolean;
+  profit: number;
+  createdAt: string;
+}
+
 function formatCooldown(secs: number): string {
   const m = Math.floor(secs / 60);
   const s = secs % 60;
@@ -34,13 +40,13 @@ function formatCooldown(secs: number): string {
   return `${s}s`;
 }
 
-// ── Top AI Signals card — replaces generic AI text insights ─────────────────────
-function TopSignalsCard() {
+// ── AI Opportunity Scanner — replaces the ranked signal list ─────────────────
+function AIOpportunityScanner() {
   const { data: allMarkets } = useQuery<any[]>({
     queryKey: ["markets-top-signals"],
     queryFn: () => fetch("/api/markets?limit=50").then(r => r.json()),
-    refetchInterval: 10000,
-    staleTime: 5000,
+    refetchInterval: 8000,
+    staleTime: 4000,
   });
 
   const CONTRACT_COLORS: Record<string, string> = {
@@ -54,7 +60,7 @@ function TopSignalsCard() {
     DIGITEVEN: "EVEN", DIGITODD: "ODD",
   };
 
-  const topMarkets = (allMarkets ?? []).slice(0, 7);
+  const topMarkets = (allMarkets ?? []).slice(0, 6);
 
   return (
     <Card className="bg-card">
@@ -62,7 +68,7 @@ function TopSignalsCard() {
         <div className="flex items-center justify-between">
           <CardTitle className="text-sm font-medium flex items-center gap-2">
             <Zap className="w-4 h-4 text-primary" />
-            Live AI Signal Rankings
+            AI Opportunity Scanner
             <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
           </CardTitle>
           <Link href="/markets">
@@ -72,56 +78,69 @@ function TopSignalsCard() {
           </Link>
         </div>
         <p className="text-[11px] text-muted-foreground mt-0.5">
-          Top markets ranked by AI quality score — updated every 10s
+          Top 6 markets by AI quality score — 9-agent ensemble · click to view &amp; trade
         </p>
       </CardHeader>
       <CardContent>
         {topMarkets.length === 0 ? (
-          <div className="text-sm text-muted-foreground py-2">Scanning markets…</div>
+          <div className="text-sm text-muted-foreground py-4 text-center">Scanning markets…</div>
         ) : (
-          <div className="space-y-2">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-2.5">
             {topMarkets.map((market: any, idx: number) => {
               const ct = market.recommendedContractType ?? "CALL";
               const color = CONTRACT_COLORS[ct] ?? "#00ffff";
               const label = CONTRACT_LABELS[ct] ?? ct;
               const score = market.confidenceScore ?? market.qualityScore ?? 0;
-              const hasSig = market.shouldTrade;
+              const winPct = market.winProbability ?? score;
+              const ev: number = market.expectedValue ?? 0;
+              const hasSig: boolean = !!market.shouldTrade;
+              const isTop = idx === 0;
+
               return (
                 <Link key={market.symbol} href={`/markets/${market.symbol}`}>
-                  <div className="flex items-center gap-3 p-2.5 rounded-lg border border-border hover:border-primary/30 hover:bg-primary/5 transition-all cursor-pointer group">
-                    {/* Rank */}
-                    <span className="text-[10px] font-mono text-muted-foreground w-4 text-center shrink-0">{idx + 1}</span>
-
-                    {/* Market name */}
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs font-semibold truncate group-hover:text-foreground">{market.displayName}</div>
-                      <div className="text-[9px] font-mono text-muted-foreground">{market.symbol} · {(market.category ?? "").replace(/_/g, " ")}</div>
-                    </div>
-
-                    {/* Contract badge */}
-                    <span
-                      className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border shrink-0"
-                      style={{ color, borderColor: `${color}50`, background: `${color}15` }}
-                    >
-                      {label}
-                    </span>
-
-                    {/* Signal dot */}
-                    {hasSig && (
-                      <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: color }} title="Active signal" />
+                  <div
+                    className={`relative p-3 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer h-full ${
+                      hasSig && score >= 70 ? "bg-card" : "bg-secondary/15 border-border"
+                    }`}
+                    style={hasSig && score >= 70 ? { borderColor: `${color}50`, background: `${color}06` } : {}}
+                  >
+                    {isTop && (
+                      <div className="absolute -top-2 left-3">
+                        <span className="text-[8px] font-bold px-1.5 py-0.5 rounded-full bg-primary text-primary-foreground">TOP</span>
+                      </div>
                     )}
 
-                    {/* Score bar */}
-                    <div className="flex flex-col items-end gap-0.5 w-12 shrink-0">
-                      <span className={`text-[10px] font-mono font-bold ${score >= 70 ? "text-green-400" : score >= 50 ? "text-amber-400" : "text-muted-foreground"}`}>
-                        {score.toFixed(0)}%
+                    {/* Contract type + signal */}
+                    <div className="flex items-center justify-between mb-2">
+                      <span
+                        className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border"
+                        style={{ color, borderColor: `${color}50`, background: `${color}15` }}
+                      >
+                        {label}
                       </span>
-                      <div className="w-full h-1 bg-secondary rounded-full overflow-hidden">
-                        <div
-                          className="h-full rounded-full"
-                          style={{ width: `${Math.min(100, score)}%`, background: score >= 70 ? "#10b981" : score >= 50 ? "#f59e0b" : "#71717a" }}
-                        />
-                      </div>
+                      {hasSig && <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: color }} />}
+                    </div>
+
+                    {/* Market name */}
+                    <div className="text-[11px] font-semibold leading-tight truncate">{market.displayName}</div>
+                    <div className="text-[8px] font-mono text-muted-foreground mb-2">{market.symbol}</div>
+
+                    {/* Win probability — big number */}
+                    <div className={`text-xl font-mono font-bold leading-none ${score >= 70 ? "text-green-400" : score >= 50 ? "text-amber-400" : "text-muted-foreground"}`}>
+                      {winPct.toFixed(0)}%
+                    </div>
+                    <div className="text-[8px] text-muted-foreground mb-1.5">win prob</div>
+
+                    {/* Expected value */}
+                    <div className={`text-[9px] font-mono ${ev > 0 ? "text-green-500/70" : "text-zinc-600"}`}>
+                      EV {ev > 0 ? "+" : ""}{(ev * 100).toFixed(1)}%
+                    </div>
+
+                    {/* Score bar */}
+                    <div className="mt-2 h-0.5 w-full bg-black/20 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full"
+                        style={{ width: `${Math.min(100, score)}%`, background: score >= 70 ? "#10b981" : score >= 50 ? "#f59e0b" : "#71717a", transition: "width 0.4s ease" }}
+                      />
                     </div>
                   </div>
                 </Link>
@@ -144,26 +163,81 @@ export default function Dashboard() {
 
   const queryClient = useQueryClient();
 
-  // Journal stats — same source as the Trade Journal mini dashboard
+  // Journal stats — tighter polling so new trades appear quickly
   const { data: journalData } = useQuery({
     queryKey: ["derivJournal"],
     queryFn: () => fetch("/api/trades/deriv-journal").then(r => r.json()),
-    refetchInterval: 60000,
-    staleTime: 30000,
+    refetchInterval: 10000,
+    staleTime: 5000,
   });
   const stats: JournalStats | undefined = (journalData as any)?.stats;
 
-  // SSE: invalidate journal + daily-summary immediately whenever the journal manager refreshes
+  // Optimistic trade results — applied immediately when trade_completed SSE fires
+  const [pendingResults, setPendingResults] = useState<PendingResult[]>([]);
+
+  // SSE: journal_refreshed syncs journal; trade_completed applies immediate stat delta
   const sseRef = useRef<EventSource | null>(null);
   useEffect(() => {
     const es = new EventSource("/api/ai/events");
     sseRef.current = es;
+
+    es.addEventListener("trade_completed", (e: MessageEvent) => {
+      try {
+        const payload = JSON.parse(e.data);
+        const trade = payload?.trade;
+        if (trade) {
+          setPendingResults(prev => [...prev.slice(-9), {
+            won: !!trade.won,
+            profit: trade.profit ?? 0,
+            createdAt: trade.createdAt ?? new Date().toISOString(),
+          }]);
+          queryClient.invalidateQueries({ queryKey: ["getDailySummary"] });
+        }
+      } catch {}
+    });
+
     es.addEventListener("journal_refreshed", () => {
       queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
       queryClient.invalidateQueries({ queryKey: ["getDailySummary"] });
+      setPendingResults([]);
     });
+
     return () => { es.close(); sseRef.current = null; };
   }, [queryClient]);
+
+  // Merge server stats with optimistic pending results for <1s display latency
+  const displayStats = useMemo((): JournalStats | undefined => {
+    if (!stats) return undefined;
+    if (pendingResults.length === 0) return stats;
+
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const pendingToday = pendingResults.filter(t => new Date(t.createdAt) >= todayStart);
+
+    const addedWins = pendingResults.filter(t => t.won).length;
+    const addedLosses = pendingResults.length - addedWins;
+    const addedProfit = pendingResults.reduce((s, t) => s + t.profit, 0);
+    const addedTodayProfit = pendingToday.reduce((s, t) => s + t.profit, 0);
+
+    const newTotal = stats.totalTrades + pendingResults.length;
+    const newWins = stats.wonTrades + addedWins;
+
+    let newStreak = stats.currentStreak;
+    for (const t of pendingResults) {
+      if (t.won) newStreak = newStreak >= 0 ? newStreak + 1 : 1;
+      else newStreak = newStreak <= 0 ? newStreak - 1 : -1;
+    }
+
+    return {
+      ...stats,
+      totalTrades: newTotal,
+      wonTrades: newWins,
+      lostTrades: stats.lostTrades + addedLosses,
+      winRate: newTotal > 0 ? newWins / newTotal : 0,
+      totalProfit: Math.round((stats.totalProfit + addedProfit) * 100) / 100,
+      todayProfit: Math.round(((stats.todayProfit ?? 0) + addedTodayProfit) * 100) / 100,
+      currentStreak: newStreak,
+    };
+  }, [stats, pendingResults]);
 
   // Live countdown to next autonomous trade
   const [countdown, setCountdown] = useState<number | null>(null);
@@ -266,40 +340,40 @@ export default function Dashboard() {
         )}
       </AnimatePresence>
 
-      {/* Stat strip — mirrors the Trade Journal mini dashboard */}
+      {/* Stat strip — displayStats applies pending optimistic updates instantly */}
       <div className="space-y-2">
         <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Performance</span>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Card className="bg-card">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Win Rate</div>
-              <div className={`text-2xl font-mono font-bold ${(stats?.winRate ?? 0) >= 0.55 ? "text-green-500" : (stats?.winRate ?? 0) >= 0.45 ? "text-amber-500" : "text-red-500"}`}>
-                {stats ? `${(stats.winRate * 100).toFixed(1)}%` : "—"}
+              <div className={`text-2xl font-mono font-bold ${(displayStats?.winRate ?? 0) >= 0.55 ? "text-green-500" : (displayStats?.winRate ?? 0) >= 0.45 ? "text-amber-500" : "text-red-500"}`}>
+                {displayStats ? `${(displayStats.winRate * 100).toFixed(1)}%` : "—"}
               </div>
               <div className="text-xs text-muted-foreground mt-1">
-                {stats ? `${stats.wonTrades}W / ${stats.lostTrades}L` : "no trades yet"}
+                {displayStats ? `${displayStats.wonTrades}W / ${displayStats.lostTrades}L` : "no trades yet"}
               </div>
             </CardContent>
           </Card>
           <Card className="bg-card">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Total Profit</div>
-              <div className={`text-2xl font-mono font-bold ${(stats?.totalProfit ?? 0) >= 0 ? "text-green-500" : "text-red-500"}`}>
-                {stats ? `${stats.totalProfit >= 0 ? "+" : ""}${stats.totalProfit.toFixed(2)}` : "—"}
+              <div className={`text-2xl font-mono font-bold ${(displayStats?.totalProfit ?? 0) >= 0 ? "text-green-500" : "text-red-500"}`}>
+                {displayStats ? `${displayStats.totalProfit >= 0 ? "+" : ""}${displayStats.totalProfit.toFixed(2)}` : "—"}
               </div>
               <div className="text-xs text-muted-foreground mt-1">
-                today: {stats ? `${stats.todayProfit >= 0 ? "+" : ""}${stats.todayProfit.toFixed(2)}` : "—"}
+                today: {displayStats ? `${displayStats.todayProfit >= 0 ? "+" : ""}${displayStats.todayProfit.toFixed(2)}` : "—"}
               </div>
             </CardContent>
           </Card>
           <Card className="bg-card">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Streak</div>
-              <div className={`text-2xl font-mono font-bold ${(stats?.currentStreak ?? 0) >= 0 ? "text-green-500" : "text-red-500"}`}>
-                {stats ? `${stats.currentStreak > 0 ? "+" : ""}${stats.currentStreak}` : "—"}
+              <div className={`text-2xl font-mono font-bold ${(displayStats?.currentStreak ?? 0) >= 0 ? "text-green-500" : "text-red-500"}`}>
+                {displayStats ? `${displayStats.currentStreak > 0 ? "+" : ""}${displayStats.currentStreak}` : "—"}
               </div>
               <div className="text-xs text-muted-foreground mt-1">
-                {stats ? ((stats.currentStreak ?? 0) >= 0 ? "winning streak" : "losing streak") : "no data"}
+                {displayStats ? ((displayStats.currentStreak ?? 0) >= 0 ? "winning streak" : "losing streak") : "no data"}
               </div>
             </CardContent>
           </Card>
@@ -307,10 +381,10 @@ export default function Dashboard() {
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Total Trades</div>
               <div className="text-2xl font-mono font-bold">
-                {stats?.totalTrades ?? "—"}
+                {displayStats?.totalTrades ?? "—"}
               </div>
               <div className="text-xs text-muted-foreground mt-1">
-                {stats ? `${(stats.winRate * 100).toFixed(1)}% win rate` : "no trades yet"}
+                {displayStats ? `${(displayStats.winRate * 100).toFixed(1)}% win rate` : "no trades yet"}
               </div>
             </CardContent>
           </Card>
@@ -352,7 +426,7 @@ export default function Dashboard() {
         </Card>
 
         <div className="md:col-span-2">
-          <MarketOpportunityFlashCard currentStreak={stats?.currentStreak ?? 0} />
+          <MarketOpportunityFlashCard currentStreak={displayStats?.currentStreak ?? 0} />
         </div>
       </div>
 
@@ -419,7 +493,7 @@ export default function Dashboard() {
           </AnimatePresence>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {(engine?.agentStatuses ?? []).map((agent) => {
+            {(engine?.agentStatuses ?? []).map((agent: any) => {
               const conf = agent.confidence;
               const color = conf >= 70 ? "text-green-500" : conf >= 50 ? "text-amber-500" : "text-red-500";
               const bg = conf >= 70 ? "bg-green-500/10 border-green-500/20" : conf >= 50 ? "bg-amber-500/10 border-amber-500/20" : "bg-red-500/10 border-red-500/20";
@@ -441,8 +515,8 @@ export default function Dashboard() {
         </CardContent>
       </Card>
 
-      {/* Top AI Signals — live ranked opportunities replacing generic AI text insights */}
-      <TopSignalsCard />
+      {/* AI Opportunity Scanner — 2x3 market grid with win prob + EV per market */}
+      <AIOpportunityScanner />
     </motion.div>
   );
 }
