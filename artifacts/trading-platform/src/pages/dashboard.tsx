@@ -3,7 +3,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   useGetTopMarket,
   useGetAiEngineStatus,
-  useGetAiInsights,
   useGetAccount,
   useGetDailySummary,
   useExecuteTrade,
@@ -14,7 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
 import { Link } from "wouter";
-import { TrendingUp, Activity, Shield, AlertTriangle, Target, ChevronRight, Clock, RefreshCw, TimerOff } from "lucide-react";
+import { TrendingUp, Activity, AlertTriangle, Target, Clock, RefreshCw, TimerOff, Zap, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
 import { MarketOpportunityFlashCard } from "@/components/flash-card-3d";
 
@@ -35,11 +34,110 @@ function formatCooldown(secs: number): string {
   return `${s}s`;
 }
 
+// ── Top AI Signals card — replaces generic AI text insights ─────────────────────
+function TopSignalsCard() {
+  const { data: allMarkets } = useQuery<any[]>({
+    queryKey: ["markets-top-signals"],
+    queryFn: () => fetch("/api/markets?limit=50").then(r => r.json()),
+    refetchInterval: 10000,
+    staleTime: 5000,
+  });
+
+  const CONTRACT_COLORS: Record<string, string> = {
+    CALL: "#10b981", PUT: "#ef4444",
+    DIGITOVER: "#06b6d4", DIGITUNDER: "#f59e0b",
+    DIGITEVEN: "#8b5cf6", DIGITODD: "#ec4899",
+  };
+  const CONTRACT_LABELS: Record<string, string> = {
+    CALL: "RISE", PUT: "FALL",
+    DIGITOVER: "OVER", DIGITUNDER: "UNDER",
+    DIGITEVEN: "EVEN", DIGITODD: "ODD",
+  };
+
+  const topMarkets = (allMarkets ?? []).slice(0, 7);
+
+  return (
+    <Card className="bg-card">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-sm font-medium flex items-center gap-2">
+            <Zap className="w-4 h-4 text-primary" />
+            Live AI Signal Rankings
+            <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+          </CardTitle>
+          <Link href="/markets">
+            <span className="text-xs text-muted-foreground hover:text-foreground cursor-pointer flex items-center gap-1">
+              All markets <ArrowRight className="w-3 h-3" />
+            </span>
+          </Link>
+        </div>
+        <p className="text-[11px] text-muted-foreground mt-0.5">
+          Top markets ranked by AI quality score — updated every 10s
+        </p>
+      </CardHeader>
+      <CardContent>
+        {topMarkets.length === 0 ? (
+          <div className="text-sm text-muted-foreground py-2">Scanning markets…</div>
+        ) : (
+          <div className="space-y-2">
+            {topMarkets.map((market: any, idx: number) => {
+              const ct = market.recommendedContractType ?? "CALL";
+              const color = CONTRACT_COLORS[ct] ?? "#00ffff";
+              const label = CONTRACT_LABELS[ct] ?? ct;
+              const score = market.confidenceScore ?? market.qualityScore ?? 0;
+              const hasSig = market.shouldTrade;
+              return (
+                <Link key={market.symbol} href={`/markets/${market.symbol}`}>
+                  <div className="flex items-center gap-3 p-2.5 rounded-lg border border-border hover:border-primary/30 hover:bg-primary/5 transition-all cursor-pointer group">
+                    {/* Rank */}
+                    <span className="text-[10px] font-mono text-muted-foreground w-4 text-center shrink-0">{idx + 1}</span>
+
+                    {/* Market name */}
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-semibold truncate group-hover:text-foreground">{market.displayName}</div>
+                      <div className="text-[9px] font-mono text-muted-foreground">{market.symbol} · {(market.category ?? "").replace(/_/g, " ")}</div>
+                    </div>
+
+                    {/* Contract badge */}
+                    <span
+                      className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border shrink-0"
+                      style={{ color, borderColor: `${color}50`, background: `${color}15` }}
+                    >
+                      {label}
+                    </span>
+
+                    {/* Signal dot */}
+                    {hasSig && (
+                      <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: color }} title="Active signal" />
+                    )}
+
+                    {/* Score bar */}
+                    <div className="flex flex-col items-end gap-0.5 w-12 shrink-0">
+                      <span className={`text-[10px] font-mono font-bold ${score >= 70 ? "text-green-400" : score >= 50 ? "text-amber-400" : "text-muted-foreground"}`}>
+                        {score.toFixed(0)}%
+                      </span>
+                      <div className="w-full h-1 bg-secondary rounded-full overflow-hidden">
+                        <div
+                          className="h-full rounded-full"
+                          style={{ width: `${Math.min(100, score)}%`, background: score >= 70 ? "#10b981" : score >= 50 ? "#f59e0b" : "#71717a" }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </Link>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function Dashboard() {
   const { data: summary } = useGetDailySummary({ query: { refetchInterval: 5000 } } as { query: any });
   const { data: topMarket } = useGetTopMarket({ query: { refetchInterval: 8000 } } as { query: any });
   const { data: engine, refetch: refetchEngine } = useGetAiEngineStatus({ query: { refetchInterval: 3000 } } as { query: any });
-  const { data: insights } = useGetAiInsights({ query: { refetchInterval: 30000 } } as { query: any });
   const { data: account } = useGetAccount();
   const executeTrade = useExecuteTrade();
   const toggleEngine = useToggleAutonomousEngine();
@@ -343,45 +441,8 @@ export default function Dashboard() {
         </CardContent>
       </Card>
 
-      {/* AI Insights */}
-      {insights && insights.length > 0 && (
-        <Card className="bg-card">
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-medium flex items-center gap-2">
-                <Shield className="w-4 h-4 text-primary" /> AI Insights
-              </CardTitle>
-              <Link href="/analytics">
-                <span className="text-xs text-muted-foreground hover:text-foreground cursor-pointer flex items-center gap-1">
-                  View analytics <ChevronRight className="w-3 h-3" />
-                </span>
-              </Link>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              {insights.slice(0, 3).map((insight) => (
-                <div key={insight.id} className={`flex items-start gap-3 p-3 rounded-lg border ${
-                  insight.priority === "critical" ? "border-red-500/30 bg-red-500/5" :
-                  insight.priority === "high" ? "border-amber-500/30 bg-amber-500/5" :
-                  "border-border bg-secondary/20"
-                }`}>
-                  {insight.priority === "critical" || insight.priority === "high" ? (
-                    <AlertTriangle className={`w-3.5 h-3.5 mt-0.5 flex-shrink-0 ${insight.priority === "critical" ? "text-red-500" : "text-amber-500"}`} />
-                  ) : (
-                    <TrendingUp className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-primary" />
-                  )}
-                  <div>
-                    <div className="text-xs font-semibold">{insight.title}</div>
-                    <div className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{insight.description}</div>
-                  </div>
-                  <Badge variant="outline" className="ml-auto text-[10px] flex-shrink-0 capitalize">{insight.priority}</Badge>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      {/* Top AI Signals — live ranked opportunities replacing generic AI text insights */}
+      <TopSignalsCard />
     </motion.div>
   );
 }

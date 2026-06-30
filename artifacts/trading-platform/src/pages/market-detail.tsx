@@ -360,11 +360,23 @@ function DigitBar({ digit, count, pct, hot, cold, barrier, contractType }: {
 // ── Rise/Fall trend analysis panel ────────────────────────────────────────────
 function RiseFallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (type: string, dir: "up" | "down") => void }) {
   if (!trendStats) return null;
-  const { direction, strength, winProb, streak, streakDir, momentum, samples } = trendStats;
-  const isRising = direction === "up";
-  const isStrong = strength > 60;
-  const risingPct = winProb?.rise ?? 50;
+  const {
+    direction, strength, winProb, streak, streakDir, momentum, samples,
+    recommendRise = false, recommendFall = false,
+    recentRisePct = 50, recentFallPct = 50,
+    risePct = 50, fallPct = 50,
+    rsi = 50, hotStreak = 0, hotDirection = "none", streakInfo = "",
+    bias = "neutral",
+  } = trendStats;
+
+  const risingPct  = winProb?.rise ?? 50;
   const fallingPct = winProb?.fall ?? 50;
+
+  const isRiseRecommended = recommendRise;
+  const isFallRecommended = recommendFall;
+  const isHotStreak = hotStreak >= 3;
+  const rsiOverbought = rsi > 70;
+  const rsiOversold   = rsi < 30;
 
   return (
     <Card className="bg-card">
@@ -373,56 +385,111 @@ function RiseFallPanel({ trendStats, onTrade }: { trendStats: any; onTrade: (typ
           <TrendingUp className="w-4 h-4 text-indigo-400" />
           Rise &amp; Fall Analysis
           {samples > 0 && <span className="text-[10px] text-muted-foreground font-normal">({samples} ticks)</span>}
+          {(rsiOverbought || rsiOversold) && (
+            <span className={`text-[9px] px-1.5 py-0.5 rounded border font-bold ${rsiOverbought ? "bg-red-500/10 border-red-500/30 text-red-400" : "bg-green-500/10 border-green-500/30 text-green-400"}`}>
+              RSI {rsi} {rsiOverbought ? "OB" : "OS"}
+            </span>
+          )}
           <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        {/* Main direction indicators — uses CALL/PUT internally, labelled Rise/Fall */}
+
+        {/* Main action buttons — styled like Even/Odd panel */}
         <div className="grid grid-cols-2 gap-2">
           <button
             onClick={() => onTrade("CALL", "up")}
-            className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${isRising && isStrong ? "border-green-500/60 bg-green-500/10" : "border-border bg-secondary/30 hover:border-green-500/30"}`}
+            className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
+              isRiseRecommended ? "border-green-500/60 bg-green-500/10" : "border-border bg-secondary/30 hover:border-green-500/30"
+            }`}
           >
-            <ArrowUp className={`w-6 h-6 mb-1.5 ${isRising && isStrong ? "text-green-400" : "text-muted-foreground"}`} />
+            <ArrowUp className={`w-6 h-6 mb-1.5 ${isRiseRecommended ? "text-green-400" : "text-muted-foreground"}`} />
             <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Rise</div>
-            <div className={`text-2xl font-mono font-bold mt-1 ${isRising ? "text-green-400" : "text-foreground"}`}>{risingPct.toFixed(0)}%</div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">win probability</div>
-            {isRising && isStrong && <Badge className="mt-2 text-[9px] bg-green-500/20 text-green-400 border-green-500/30">AI Favours</Badge>}
+            <div className={`text-2xl font-mono font-bold mt-1 ${isRiseRecommended ? "text-green-400" : "text-foreground"}`}>{risingPct.toFixed(0)}%</div>
+            <div className="text-[9px] text-muted-foreground">win probability</div>
+            {isRiseRecommended && <Badge className="mt-1.5 text-[9px] bg-green-500/20 text-green-400 border-green-500/30">AI FAVOURS</Badge>}
           </button>
           <button
             onClick={() => onTrade("PUT", "down")}
-            className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${!isRising && isStrong ? "border-red-500/60 bg-red-500/10" : "border-border bg-secondary/30 hover:border-red-500/30"}`}
+            className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
+              isFallRecommended ? "border-red-500/60 bg-red-500/10" : "border-border bg-secondary/30 hover:border-red-500/30"
+            }`}
           >
-            <ArrowDown className={`w-6 h-6 mb-1.5 ${!isRising && isStrong ? "text-red-400" : "text-muted-foreground"}`} />
+            <ArrowDown className={`w-6 h-6 mb-1.5 ${isFallRecommended ? "text-red-400" : "text-muted-foreground"}`} />
             <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Fall</div>
-            <div className={`text-2xl font-mono font-bold mt-1 ${!isRising ? "text-red-400" : "text-foreground"}`}>{fallingPct.toFixed(0)}%</div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">win probability</div>
-            {!isRising && isStrong && <Badge className="mt-2 text-[9px] bg-red-500/20 text-red-400 border-red-500/30">AI Favours</Badge>}
+            <div className={`text-2xl font-mono font-bold mt-1 ${isFallRecommended ? "text-red-400" : "text-foreground"}`}>{fallingPct.toFixed(0)}%</div>
+            <div className="text-[9px] text-muted-foreground">win probability</div>
+            {isFallRecommended && <Badge className="mt-1.5 text-[9px] bg-red-500/20 text-red-400 border-red-500/30">AI FAVOURS</Badge>}
           </button>
         </div>
 
-        {/* Trend stats row */}
-        <div className="grid grid-cols-3 gap-2">
-          <div className="text-center p-2 rounded-lg bg-secondary/30">
-            <div className="text-[10px] text-muted-foreground">Strength</div>
-            <div className={`text-base font-mono font-bold ${strength > 60 ? "text-green-400" : strength > 40 ? "text-amber-400" : "text-red-400"}`}>{strength.toFixed(0)}%</div>
+        {/* Multi-window frequency table — matching EvenOdd style */}
+        <div className="grid grid-cols-2 gap-1.5 text-center">
+          {[
+            { label: "Last 20 ticks", rise: recentRisePct, fall: recentFallPct },
+            { label: "Last 100 ticks", rise: risePct,       fall: fallPct },
+          ].map(({ label, rise, fall }) => {
+            const dominantRise = rise > 53;
+            const dominantFall = fall > 53;
+            return (
+              <div key={label} className="p-2 rounded-lg bg-secondary/30 border border-border">
+                <div className="text-[9px] text-muted-foreground mb-1">{label}</div>
+                <div className={`text-xs font-mono font-bold ${dominantRise ? "text-green-400" : "text-muted-foreground"}`}>↑ Rise {rise.toFixed(0)}%</div>
+                <div className={`text-xs font-mono font-bold ${dominantFall ? "text-red-400" : "text-muted-foreground"}`}>↓ Fall {fall.toFixed(0)}%</div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* RSI + Momentum + Streak stats */}
+        <div className="grid grid-cols-3 gap-1.5">
+          <div className={`p-2 rounded-lg border text-center ${rsiOverbought ? "border-red-500/30 bg-red-500/5" : rsiOversold ? "border-green-500/30 bg-green-500/5" : "border-border bg-secondary/20"}`}>
+            <div className="text-[9px] text-muted-foreground mb-0.5">RSI (14)</div>
+            <div className={`text-sm font-mono font-bold ${rsiOverbought ? "text-red-400" : rsiOversold ? "text-green-400" : "text-muted-foreground"}`}>{rsi}</div>
+            <div className="text-[8px] text-muted-foreground mt-0.5">{rsiOverbought ? "overbought → fall" : rsiOversold ? "oversold → rise" : "neutral"}</div>
           </div>
-          <div className="text-center p-2 rounded-lg bg-secondary/30">
-            <div className="text-[10px] text-muted-foreground">Momentum</div>
-            <div className={`text-base font-mono font-bold ${momentum > 0 ? "text-green-400" : "text-red-400"}`}>{momentum > 0 ? "+" : ""}{(momentum * 100).toFixed(2)}</div>
+          <div className="p-2 rounded-lg border border-border bg-secondary/20 text-center">
+            <div className="text-[9px] text-muted-foreground mb-0.5">Momentum</div>
+            <div className={`text-sm font-mono font-bold ${momentum > 0 ? "text-green-400" : momentum < 0 ? "text-red-400" : "text-muted-foreground"}`}>
+              {momentum > 0 ? "+" : ""}{(momentum * 100).toFixed(2)}
+            </div>
+            <div className="text-[8px] text-muted-foreground mt-0.5">{momentum > 0.001 ? "bullish" : momentum < -0.001 ? "bearish" : "flat"}</div>
           </div>
-          <div className="text-center p-2 rounded-lg bg-secondary/30">
-            <div className="text-[10px] text-muted-foreground">Streak</div>
-            <div className={`text-base font-mono font-bold ${streakDir === "up" ? "text-green-400" : "text-red-400"}`}>{streak > 0 ? `${streak} ${streakDir === "up" ? "↑" : "↓"}` : "—"}</div>
+          <div className={`p-2 rounded-lg border text-center ${isHotStreak ? "border-amber-500/30 bg-amber-500/5" : "border-border bg-secondary/20"}`}>
+            <div className="text-[9px] text-muted-foreground mb-0.5">Hot Streak</div>
+            <div className={`text-sm font-mono font-bold ${hotDirection === "rise" ? "text-green-400" : hotDirection === "fall" ? "text-red-400" : "text-muted-foreground"}`}>
+              {hotStreak > 0 ? `${hotStreak}× ${hotDirection === "rise" ? "↑" : "↓"}` : "—"}
+            </div>
+            {isHotStreak && (
+              <div className="text-[8px] text-amber-400 mt-0.5">→ expect reversal</div>
+            )}
           </div>
         </div>
 
+        {/* Statistical edge bar */}
+        <div className="p-2 rounded-lg bg-secondary/20 border border-border">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[9px] text-muted-foreground uppercase tracking-wide">Signal Strength</span>
+            <span className={`text-[10px] font-mono font-bold ${strength > 60 ? "text-green-400" : strength > 40 ? "text-amber-400" : "text-muted-foreground"}`}>{strength.toFixed(0)}%</span>
+          </div>
+          <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${strength > 60 ? "bg-green-400" : strength > 40 ? "bg-amber-400" : "bg-secondary-foreground/20"}`}
+              style={{ width: `${Math.min(100, strength)}%` }}
+            />
+          </div>
+        </div>
+
+        {/* AI Signal summary */}
         <div className="p-2 rounded-lg bg-secondary/20 border border-border text-xs text-muted-foreground">
-          <span className="text-foreground font-medium">Signal: </span>
-          {isRising
-            ? `📈 Upward momentum detected (${strength.toFixed(0)}% strength) — Rise favoured`
-            : `📉 Downward momentum detected (${strength.toFixed(0)}% strength) — Fall favoured`}
-          {streak >= 3 && <span className="ml-2 text-amber-400">· {streak}-tick {streakDir === "up" ? "↑" : "↓"} streak</span>}
+          <span className="text-foreground font-medium">AI Signal: </span>
+          {isRiseRecommended
+            ? `📈 RISE recommended — ${rsiOversold ? `RSI oversold (${rsi})` : recentFallPct > 65 ? `mean-reversion after ${recentFallPct}% recent falls` : `${risePct}% long-run rise bias`}`
+            : isFallRecommended
+            ? `📉 FALL recommended — ${rsiOverbought ? `RSI overbought (${rsi})` : recentRisePct > 65 ? `mean-reversion after ${recentRisePct}% recent rises` : `${fallPct}% long-run fall bias`}`
+            : isHotStreak
+            ? `⚠ ${hotStreak}× ${hotDirection.toUpperCase()} streak — reversal possible but not confirmed`
+            : "⚖ Balanced — no clear edge. Wait for a stronger signal before trading Rise/Fall."}
         </div>
       </CardContent>
     </Card>

@@ -1,4 +1,5 @@
-import { useGetPerformanceAnalytics, useGetDrawdownAnalysis, useGetMarketBreakdown, useGetTradeStats, useGetAiInsights } from "@workspace/api-client-react";
+import { useGetPerformanceAnalytics, useGetDrawdownAnalysis, useGetMarketBreakdown } from "@workspace/api-client-react";
+import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { motion } from "framer-motion";
@@ -17,8 +18,15 @@ export default function Analytics() {
   const { data: performance } = useGetPerformanceAnalytics({ days: 30 }, { query: { refetchInterval: 30000 } } as { query: any });
   const { data: drawdown } = useGetDrawdownAnalysis({ query: { refetchInterval: 15000 } } as { query: any });
   const { data: marketBreakdown } = useGetMarketBreakdown({ query: { refetchInterval: 30000 } } as { query: any });
-  const { data: stats } = useGetTradeStats({ query: { refetchInterval: 15000 } } as { query: any });
-  const { data: insights } = useGetAiInsights({ query: { refetchInterval: 60000 } } as { query: any });
+
+  // Use the same data source as the Trade Journal for headline stats — ensures consistency
+  const { data: journalData } = useQuery({
+    queryKey: ["derivJournal-analytics"],
+    queryFn: () => fetch("/api/trades/deriv-journal").then(r => r.json()),
+    refetchInterval: 30000,
+    staleTime: 15000,
+  });
+  const stats = (journalData as any)?.stats ?? null;
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-6 max-w-7xl mx-auto space-y-5">
@@ -206,34 +214,28 @@ export default function Analytics() {
         </Card>
       </div>
 
-      {/* AI Insights */}
-      {insights && insights.length > 0 && (
+      {/* AI Confidence calibration detail — per-contract breakdown from performance data */}
+      {performance?.profitCurve && performance.profitCurve.some((d: any) => d.tradeCount > 0) && (
         <Card className="bg-card">
           <CardHeader className="pb-2">
             <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
-              <TrendingUp className="w-3.5 h-3.5 text-primary" /> AI-Generated Improvement Suggestions
+              <TrendingUp className="w-3.5 h-3.5 text-primary" /> Daily P&amp;L Breakdown
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {insights.map((insight) => (
-                <div key={insight.id} className={`p-3 rounded-lg border ${
-                  insight.priority === "critical" ? "border-red-500/30 bg-red-500/5"
-                  : insight.priority === "high" ? "border-amber-500/30 bg-amber-500/5"
-                  : "border-border bg-secondary/10"
-                }`}>
-                  <div className="flex items-start justify-between gap-2 mb-1.5">
-                    <div className="text-xs font-semibold">{insight.title}</div>
-                    <Badge variant="outline" className={`text-[9px] px-1.5 flex-shrink-0 capitalize ${
-                      insight.priority === "critical" ? "text-red-500 border-red-500/30"
-                      : insight.priority === "high" ? "text-amber-500 border-amber-500/30"
-                      : "text-muted-foreground border-border"
-                    }`}>{insight.priority}</Badge>
+            <div className="space-y-1 max-h-48 overflow-y-auto">
+              {performance.profitCurve.filter((d: any) => d.tradeCount > 0).slice(-14).map((day: any) => (
+                <div key={day.date} className="flex items-center gap-3 py-1.5 border-b border-border/50 last:border-0">
+                  <span className="text-[10px] font-mono text-muted-foreground w-20 shrink-0">{day.date}</span>
+                  <div className="flex-1 h-1.5 bg-secondary rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full ${day.dailyProfit >= 0 ? "bg-green-500" : "bg-red-500"}`}
+                      style={{ width: `${Math.min(100, Math.abs(day.dailyProfit) * 10)}%` }}
+                    />
                   </div>
-                  <p className="text-[11px] text-muted-foreground leading-relaxed">{insight.description}</p>
-                  {insight.relatedMarket && (
-                    <div className="mt-2 text-[10px] text-primary font-mono">{insight.relatedMarket}</div>
-                  )}
+                  <span className={`text-[10px] font-mono w-14 text-right shrink-0 ${day.dailyProfit >= 0 ? "text-green-400" : "text-red-400"}`}>
+                    {day.dailyProfit >= 0 ? "+" : ""}{day.dailyProfit.toFixed(2)}
+                  </span>
                 </div>
               ))}
             </div>
