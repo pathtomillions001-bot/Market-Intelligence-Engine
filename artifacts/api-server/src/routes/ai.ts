@@ -55,8 +55,16 @@ let globalRecovery: GlobalRecoveryState = {
 };
 
 // Groups: 0=Volatility 1s (1HZ*), 1=Volatility (R_*), 2=Jump (JD*), 3=Bull/Bear
-// All groups always scan in strict canonical order: V10→V25→V50→V75→V100 (no rotation).
 const GROUP_NAMES = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"];
+
+// ── Per-group scan cursor ─────────────────────────────────────────────────────
+// Each group advances its own cursor by 1 every loop iteration so markets are
+// visited in strict canonical order (V10→V25→V50→V75→V100) with NO repeats
+// until the entire group has been scanned once (then the cursor wraps to V10).
+// All 4 groups advance simultaneously (parallel), but each group never skips
+// or revisits a market within its own cycle.
+// Index: 0=Volatility 1s, 1=Volatility, 2=Jump Indices, 3=Bull/Bear
+const groupCursors = [0, 0, 0, 0];
 
 // New-style agent names matching the coordinator agents
 const AGENT_NAMES = [
@@ -349,93 +357,98 @@ async function runAutonomousLoop() {
     const ouTypes   = preferredContractTypes.filter(t => ["DIGITOVER", "DIGITUNDER"].includes(t));
     const eoTypes   = preferredContractTypes.filter(t => ["DIGITEVEN", "DIGITODD"].includes(t));
 
-    // ── Phase 1: All groups scan in parallel, but WITHIN each group markets
-    //    are scanned SEQUENTIALLY in order (V10→V25→V50→V75→V100) using a
-    //    rotating cursor so every market gets equal attention over time.
+    // ── Phase 1: All 4 groups scan in PARALLEL, but each group scans
+    //    ONLY ONE market per iteration — the one at its cursor position.
+    //
+    //    Canonical scan order per group (determined by DERIV_MARKETS array):
+    //      Volatility 1s : 1HZ10V → 1HZ25V → 1HZ50V → 1HZ75V → 1HZ100V → wrap
+    //      Volatility    : R_10   → R_25   → R_50   → R_75   → R_100   → wrap
+    //      Jump Indices  : JD10   → JD25   → JD50   → JD75   → JD100   → wrap
+    //      Bull/Bear     : RDBULL → RDBEAR → wrap
+    //
+    //    No market is revisited until every market in its group has been
+    //    scanned once. Cursor advances BEFORE awaiting so groups never
+    //    block each other. Only enabled contract families are run per market.
     broadcastSSE("scan_started", { groups: GROUP_NAMES.filter((_, i) => marketGroups[i].length > 0), ts: Date.now() });
 
     const groupWinners = (await Promise.allSettled(
       marketGroups.map(async (group, gi): Promise<(ScanResult & { groupName: string }) | null> => {
         if (group.length === 0) return null;
 
-        // Always scan in strict canonical order: V10→V25→V50→V75→V100
-        // (order is determined by DERIV_MARKETS definition, never rotated)
-        const orderedGroup = group;
+        // Clamp cursor in case group size changed (e.g. settings changed allowed markets)
+        if (groupCursors[gi] >= group.length) groupCursors[gi] = 0;
+        const cursorIdx = groupCursors[gi];
+        const m = group[cursorIdx];
+        // Advance cursor immediately so the next iteration picks the next market.
+        // Wraps back to 0 after the last market in the group — full cycle restarts.
+        groupCursors[gi] = (groupCursors[gi] + 1) % group.length;
 
-        const marketResults: ScanResult[] = [];
-        for (const m of orderedGroup) {
-          try {
-            const isBullBear = m.symbol === "RDBULL" || m.symbol === "RDBEAR";
+        try {
+          const isBullBear = m.symbol === "RDBULL" || m.symbol === "RDBEAR";
 
-            // Decide which families apply to this specific market
-            const families: Array<{ name: string; types: string[] }> = [];
-            if (dirTypes.length > 0)                               families.push({ name: "direction", types: dirTypes });
-            if (!isBullBear && m.digitEnabled && ouTypes.length > 0) families.push({ name: "overunder", types: ouTypes });
-            if (!isBullBear && m.digitEnabled && eoTypes.length > 0) families.push({ name: "evenodd",   types: eoTypes });
+          // Only run families whose contract types are enabled in settings.
+          // e.g. if user enabled only Over/Under → dirTypes & eoTypes are empty
+          //       → only "overunder" family is built; direction/evenodd are skipped.
+          const families: Array<{ name: string; types: string[] }> = [];
+          if (dirTypes.length > 0)                                  families.push({ name: "direction", types: dirTypes });
+          if (!isBullBear && m.digitEnabled && ouTypes.length > 0)  families.push({ name: "overunder", types: ouTypes });
+          if (!isBullBear && m.digitEnabled && eoTypes.length > 0)  families.push({ name: "evenodd",   types: eoTypes });
 
-            if (families.length === 0) continue;
+          if (families.length === 0) return null;
 
-            const baseCtx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
+          const baseCtx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
 
-            // Run each family coordinator in parallel — each gets a context focused
-            // on its contract types so the agents optimise for that family exclusively
-            const familyResults = (await Promise.allSettled(
-              families.map(async (fam) => {
-                const famCtx: ScanContext = {
-                  ...baseCtx,
-                  settings: { ...baseCtx.settings, preferredContractTypes: fam.types },
-                };
-                const output = await withTimeout(runCoordinator(famCtx), SCAN_TIMEOUT_MS, null as any);
-                if (!output) return null;
-                return { market: m, output, ctx: famCtx, family: fam.name } as ScanResult;
-              })
-            )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
+          // Run each enabled family coordinator in parallel.
+          // Each gets a context scoped to its own contract types only.
+          const familyResults = (await Promise.allSettled(
+            families.map(async (fam) => {
+              const famCtx: ScanContext = {
+                ...baseCtx,
+                settings: { ...baseCtx.settings, preferredContractTypes: fam.types },
+              };
+              const output = await withTimeout(runCoordinator(famCtx), SCAN_TIMEOUT_MS, null as any);
+              if (!output) return null;
+              return { market: m, output, ctx: famCtx, family: fam.name } as ScanResult;
+            })
+          )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 
-            if (familyResults.length === 0) continue;
+          if (familyResults.length === 0) return null;
 
-            // Pick the best family result for this market:
-            // prefer shouldTrade=true, then highest qualityScore
-            const tradeableFamilies = familyResults.filter(r => r.output.shouldTrade);
-            const bestForMarket = tradeableFamilies.length > 0
-              ? tradeableFamilies.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
-              : familyResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0];
-            marketResults.push(bestForMarket);
-          } catch { /* skip this market on error */ }
-        }
+          totalMarketsScanned++;
 
-        totalMarketsScanned += marketResults.length;
+          // Among this market's enabled families, prefer shouldTrade=true,
+          // then highest qualityScore.
+          const tradeableFamilies = familyResults.filter(r => r.output.shouldTrade);
+          const groupBest = tradeableFamilies.length > 0
+            ? tradeableFamilies.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
+            : familyResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0];
 
-        if (marketResults.length === 0) return null;
+          logger.info({
+            group: GROUP_NAMES[gi],
+            cursorIdx,
+            totalInGroup: group.length,
+            symbol: m.symbol,
+            family: groupBest.family,
+            quality: groupBest.output.qualityScore,
+            shouldTrade: groupBest.output.shouldTrade,
+          }, "Group cursor scan");
 
-        // Pick the best market in this group — prefer shouldTrade=true, then highest qualityScore
-        const tradeable = marketResults.filter(r => r.output.shouldTrade);
-        const groupBest = tradeable.length > 0
-          ? tradeable.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
-          : marketResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0];
+          broadcastSSE("group_scanned", {
+            group: GROUP_NAMES[gi],
+            cursorIdx,
+            totalInGroup: group.length,
+            scanned: 1,
+            bestSymbol: m.symbol,
+            bestDisplayName: m.displayName,
+            quality: groupBest.output.qualityScore,
+            shouldTrade: groupBest.output.shouldTrade,
+            contract: groupBest.output.recommendation?.product ?? null,
+            confidence: groupBest.output.confidenceScore,
+            family: groupBest.family,
+          });
 
-        logger.info({
-          group: GROUP_NAMES[gi],
-          scanned: marketResults.length,
-          bestSymbol: groupBest.market.symbol,
-          bestFamily: groupBest.family,
-          quality: groupBest.output.qualityScore,
-          shouldTrade: groupBest.output.shouldTrade,
-          tradeableCount: tradeable.length,
-        }, "Group scan complete");
-
-        broadcastSSE("group_scanned", {
-          group: GROUP_NAMES[gi],
-          scanned: marketResults.length,
-          bestSymbol: groupBest.market.symbol,
-          bestDisplayName: groupBest.market.displayName,
-          quality: groupBest.output.qualityScore,
-          shouldTrade: groupBest.output.shouldTrade,
-          contract: groupBest.output.recommendation?.product ?? null,
-          confidence: groupBest.output.confidenceScore,
-          family: groupBest.family,
-        });
-
-        return { ...groupBest, groupName: GROUP_NAMES[gi] };
+          return { ...groupBest, groupName: GROUP_NAMES[gi] };
+        } catch { return null; }
       })
     )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 
@@ -1045,7 +1058,8 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     // Reset recovery state when engine is manually (re)started
     globalRecovery = { isActive: false, unrecoveredAmount: 0, activeFamilies: [], recoveredFamilies: [] };
     setGlobalDigitRecovery(false, 0);
-    // Scanning always starts from V10 (canonical order enforced by DERIV_MARKETS definition)
+    // Reset group cursors → scanning restarts from V10 1s / V10 / JD10 / RDBULL
+    groupCursors.fill(0);
     if (settings.length > 0) await db.update(settingsTable).set({ autonomousEnabled: true });
     if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
     autonomousTimer = setTimeout(runAutonomousLoop, 2000);
