@@ -324,7 +324,7 @@ export function MarketOpportunityFlashCard({
         )}
 
         {/* Market info + win prob + execute */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           {/* Left: market name + contract badge */}
           <div className="flex-1 min-w-0">
             <div className="text-sm font-bold leading-tight truncate">{bestGroupMarket?.displayName ?? "Scanning…"}</div>
@@ -350,41 +350,44 @@ export function MarketOpportunityFlashCard({
             </div>
           </div>
 
-          {/* Center: win probability */}
+          {/* Center: win probability — shifted slightly left via reduced gap */}
           <WinProbBar value={winProb} />
 
-          {/* Right: execute button */}
+          {/* Right: execute button — rectangle shape */}
           <div className="shrink-0">
             <button
               onClick={handleExecute}
               disabled={!shouldTrade || isExecuting}
-              className="flex flex-col items-center justify-center w-16 h-16 rounded-xl border-2 font-bold font-mono text-[10px] transition-all active:scale-[0.95] disabled:opacity-40 disabled:cursor-not-allowed"
-              style={shouldTrade ? {
-                borderColor: recoveryActive ? recoveryColor : ctColor,
-                background: recoveryActive ? `${recoveryColor}20` : `${ctColor}20`,
-                color: recoveryActive ? recoveryColor : ctColor,
-                boxShadow: `0 0 20px ${recoveryActive ? recoveryColor : ctColor}30`,
-              } : {
-                borderColor: "rgba(255,255,255,0.1)",
-                color: "rgba(255,255,255,0.3)",
+              className="flex flex-row items-center justify-center gap-1.5 h-10 px-4 rounded-xl border-2 font-bold font-mono text-[10px] transition-all active:scale-[0.95] disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{
+                minWidth: "96px",
+                ...(shouldTrade ? {
+                  borderColor: recoveryActive ? recoveryColor : ctColor,
+                  background: recoveryActive ? `${recoveryColor}20` : `${ctColor}20`,
+                  color: recoveryActive ? recoveryColor : ctColor,
+                  boxShadow: `0 0 20px ${recoveryActive ? recoveryColor : ctColor}30`,
+                } : {
+                  borderColor: "rgba(255,255,255,0.1)",
+                  color: "rgba(255,255,255,0.3)",
+                }),
               }}
             >
               {isExecuting ? (
-                <span className="text-[8px] leading-tight text-center">EXEC…</span>
+                <span className="text-[9px] uppercase tracking-wide">EXEC…</span>
               ) : recoveryActive ? (
                 <>
-                  <span className="text-lg leading-none">🔄</span>
-                  <span className="text-[8px] mt-0.5 uppercase tracking-widest">Recover</span>
+                  <span className="text-sm leading-none">🔄</span>
+                  <span className="text-[9px] uppercase tracking-widest">Recover</span>
                 </>
               ) : shouldTrade ? (
                 <>
-                  <span className="text-lg leading-none">⚡</span>
-                  <span className="text-[8px] mt-0.5 uppercase tracking-widest">Execute</span>
+                  <span className="text-sm leading-none">⚡</span>
+                  <span className="text-[9px] uppercase tracking-widest">Execute</span>
                 </>
               ) : (
                 <>
-                  <span className="text-base leading-none">⏸</span>
-                  <span className="text-[8px] mt-0.5 uppercase tracking-widest">Wait</span>
+                  <span className="text-sm leading-none">⏸</span>
+                  <span className="text-[9px] uppercase tracking-widest">Wait</span>
                 </>
               )}
             </button>

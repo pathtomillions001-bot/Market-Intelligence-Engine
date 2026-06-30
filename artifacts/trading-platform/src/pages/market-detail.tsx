@@ -163,24 +163,10 @@ function RiseFallPanel({ trendStats, agentData, onTrade }: {
           </button>
         </div>
 
-        {/* 9-Agent consensus bar — shown when agent data is available */}
+        {/* AI recommendation hint */}
         {agentData && (
-          <div className="p-2.5 rounded-lg bg-secondary/20 border border-border">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[9px] text-muted-foreground uppercase tracking-wider font-medium">13-Agent Consensus</span>
-              <div className="flex items-center gap-2">
-                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full border ${agentData.shouldTrade ? "bg-green-500/15 text-green-400 border-green-500/30" : "bg-amber-500/10 text-amber-400 border-amber-500/30"}`}>
-                  {agentData.shouldTrade ? "✓ TRADE" : "⏸ WAIT"}
-                </span>
-                <span className={`text-xs font-mono font-bold ${wscore >= 70 ? "text-green-400" : wscore >= 50 ? "text-amber-400" : "text-red-400"}`}>{wscore.toFixed(0)}/100</span>
-              </div>
-            </div>
-            <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
-              <div className="h-full rounded-full transition-all duration-700"
-                style={{ width: `${wscore}%`, background: wscore >= 70 ? "linear-gradient(90deg,#16a34a,#22c55e)" : wscore >= 50 ? "linear-gradient(90deg,#d97706,#f59e0b)" : "linear-gradient(90deg,#b91c1c,#ef4444)" }}
-              />
-            </div>
-            <div className="text-[8px] text-muted-foreground mt-1">Optimal duration: {agentDuration}t · click Rise or Fall to auto-fill stake &amp; ticks</div>
+          <div className="text-[8px] text-muted-foreground px-1">
+            Optimal duration: {agentDuration}t · click Rise or Fall to auto-fill stake &amp; ticks
           </div>
         )}
 
@@ -321,12 +307,7 @@ function EvenOddPanel({ digitStats, agentData, onTrade }: {
               χ² p&lt;{chiPval}
             </span>
           )}
-          {agentData && (
-            <span className={`ml-auto text-[9px] px-1.5 py-0.5 rounded-full border font-mono ${wscore >= 70 ? "bg-green-500/10 border-green-500/30 text-green-400" : wscore >= 50 ? "bg-amber-500/10 border-amber-500/30 text-amber-400" : "bg-zinc-800 border-zinc-700 text-zinc-400"}`}>
-              13-Agents {wscore.toFixed(0)}/100
-            </span>
-          )}
-          <span className={`${agentData ? "" : "ml-auto"} w-2 h-2 rounded-full bg-green-500 animate-pulse`} title="Live" />
+          <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -359,24 +340,10 @@ function EvenOddPanel({ digitStats, agentData, onTrade }: {
           </button>
         </div>
 
-        {/* 9-Agent consensus bar */}
+        {/* AI recommendation hint */}
         {agentData && (
-          <div className="p-2.5 rounded-lg bg-secondary/20 border border-border">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[9px] text-muted-foreground uppercase tracking-wider font-medium">13-Agent Consensus</span>
-              <div className="flex items-center gap-2">
-                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full border ${agentData.shouldTrade ? "bg-green-500/15 text-green-400 border-green-500/30" : "bg-amber-500/10 text-amber-400 border-amber-500/30"}`}>
-                  {agentData.shouldTrade ? "✓ TRADE" : "⏸ WAIT"}
-                </span>
-                <span className={`text-xs font-mono font-bold ${wscore >= 70 ? "text-green-400" : wscore >= 50 ? "text-amber-400" : "text-red-400"}`}>{wscore.toFixed(0)}/100</span>
-              </div>
-            </div>
-            <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
-              <div className="h-full rounded-full transition-all duration-700"
-                style={{ width: `${wscore}%`, background: wscore >= 70 ? "linear-gradient(90deg,#16a34a,#22c55e)" : wscore >= 50 ? "linear-gradient(90deg,#d97706,#f59e0b)" : "linear-gradient(90deg,#b91c1c,#ef4444)" }}
-              />
-            </div>
-            <div className="text-[8px] text-muted-foreground mt-1">Optimal duration: {agentDuration}t · click Even or Odd to auto-fill stake &amp; ticks</div>
+          <div className="text-[8px] text-muted-foreground px-1">
+            Optimal duration: {agentDuration}t · click Even or Odd to auto-fill stake &amp; ticks
           </div>
         )}
 

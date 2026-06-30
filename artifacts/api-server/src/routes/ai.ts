@@ -350,7 +350,22 @@ async function runAutonomousLoop() {
     const hasDigitTypes = preferredContractTypes.some(t => t.startsWith("DIGIT"));
     const hasDirectionTypes = preferredContractTypes.some(t => ["CALL", "PUT"].includes(t));
 
+    // Build set of symbols currently on per-symbol cooldown so they are excluded
+    // from the tournament scan entirely — the engine will find the next-best pair
+    // instead of looping on a blocked symbol.
+    const symCutoffPre = Date.now() - SAME_SYMBOL_COOLDOWN_MS;
+    const cooledDownSymbols = new Set<string>();
+    for (const [sym, dates] of recentTradesBySymbol) {
+      const recentCount = dates.filter(d => d.getTime() > symCutoffPre).length;
+      if (recentCount >= MAX_TRADES_SAME_SYMBOL) cooledDownSymbols.add(sym);
+    }
+    if (cooledDownSymbols.size > 0) {
+      logger.info({ cooledDown: [...cooledDownSymbols] }, "Autonomous: excluding symbols on per-pair cooldown from scan");
+    }
+
     const contractCompatibleMarkets = availableMarkets.filter(m => {
+      // Skip symbols that have hit the 2-trades-per-8-min cooldown
+      if (cooledDownSymbols.has(m.symbol)) return false;
       // Skip non-digit markets when only digit contract types are enabled
       if (hasDigitTypes && !hasDirectionTypes && !m.digitEnabled) return false;
       // Bull/Bear markets only support Rise/Fall — skip when no direction types
@@ -425,11 +440,13 @@ async function runAutonomousLoop() {
                     settings: {
                       ...baseCtx.settings,
                       preferredContractTypes: fam.types,
-                      // Even/odd-only mode: these contracts score lower from direction/barrier
-                      // agents that aren't tuned for them. Lower the confidence threshold so
-                      // a Markov-edge signal is still enough to trigger a trade.
-                      confidenceThreshold: (fam.name === "evenodd" && dirTypes.length === 0 && ouTypes.length === 0)
-                        ? Math.min(baseCtx.settings.confidenceThreshold, 48)
+                      // Even/odd contracts are inherently near-50/50 so the Markov-edge signal
+                      // never reaches the same confidence scores as direction or digit-barrier
+                      // agents. Always lower the threshold for this family regardless of what
+                      // other families are also active so Even/Odd gets a fair shot in the
+                      // tournament when multiple markets are enabled simultaneously.
+                      confidenceThreshold: fam.name === "evenodd"
+                        ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 48)
                         : baseCtx.settings.confidenceThreshold,
                     },
                     inRecovery: globalRecovery.isActive,
@@ -560,12 +577,15 @@ async function runAutonomousLoop() {
     }
 
     // ── Guard: per-symbol cooldown (max 2 trades per pair per 8 min) ─────────
+    // Note: symbols already on cooldown are filtered out of the scan above so
+    // the tournament winner should never be on cooldown. This guard is a safety
+    // net for the rare edge case where the cooldown was reached mid-scan.
     const symHistory = recentTradesBySymbol.get(bestMarket.symbol) ?? [];
     const symCutoff = Date.now() - SAME_SYMBOL_COOLDOWN_MS;
     const symRecentCount = symHistory.filter(d => d.getTime() > symCutoff).length;
     if (symRecentCount >= MAX_TRADES_SAME_SYMBOL) {
       logger.info({ symbol: bestMarket.symbol, recentCount: symRecentCount },
-        "Autonomous: symbol cooldown reached — skipping to next opportunity");
+        "Autonomous: symbol cooldown guard triggered mid-scan — rescanning for next-best pair");
       scheduleNext(false, 500);
       return;
     }
@@ -1194,7 +1214,7 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     engineRunning = true; autonomousMode = "autonomous"; stopReasons = []; nextScanIn = loopIntervalSec;
     exploitSymbol = null; exploitCount = 0;
     // Reset recovery state when engine is manually (re)started
-    globalRecovery = { isActive: false, unrecoveredAmount: 0, activeFamilies: [], recoveredFamilies: [] };
+    globalRecovery = { isActive: false, unrecoveredAmount: 0, activeFamilies: [], recoveredFamilies: [], recoveryLossCount: 0 };
     setGlobalDigitRecovery(false, 0);
     // Reset group cursors → scanning restarts from V10 1s / V10 / JD10 / RDBULL
     groupCursors.fill(0);
