@@ -376,15 +376,10 @@ export function MarketOpportunityFlashCard({
                   <span className="text-lg leading-none">🔄</span>
                   <span className="text-[8px] mt-0.5 uppercase tracking-widest">Recover</span>
                 </>
-              ) : aiSaysTrade ? (
+              ) : shouldTrade ? (
                 <>
                   <span className="text-lg leading-none">⚡</span>
                   <span className="text-[8px] mt-0.5 uppercase tracking-widest">Execute</span>
-                </>
-              ) : hasGroupRec ? (
-                <>
-                  <span className="text-lg leading-none">▶</span>
-                  <span className="text-[8px] mt-0.5 uppercase tracking-widest">Manual</span>
                 </>
               ) : (
                 <>

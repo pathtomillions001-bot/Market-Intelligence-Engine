@@ -46,12 +46,14 @@ interface GlobalRecoveryState {
   unrecoveredAmount: number;    // total USD still to recover
   activeFamilies: string[];     // which families are being tracked
   recoveredFamilies: string[];  // which families have recovered
+  recoveryLossCount: number;    // consecutive losses DURING recovery (for progressive stake)
 }
 let globalRecovery: GlobalRecoveryState = {
   isActive: false,
   unrecoveredAmount: 0,
   activeFamilies: [],
   recoveredFamilies: [],
+  recoveryLossCount: 0,
 };
 
 // ── Family rotation hint ───────────────────────────────────────────────────────
@@ -59,6 +61,19 @@ let globalRecovery: GlobalRecoveryState = {
 // Rise/Fall and Even/Odd get executed in rotation alongside Over/Under, rather
 // than Over/Under always winning the quality tournament.
 let scheduledFamilyHint: string | null = null;
+
+// ── Per-symbol trade cooldown ──────────────────────────────────────────────────
+// Prevents more than MAX_TRADES_SAME_SYMBOL executions on the same synthetic pair
+// within SAME_SYMBOL_COOLDOWN_MS. After the limit is reached the engine skips that
+// symbol and picks the next-best opportunity.
+const recentTradesBySymbol = new Map<string, Date[]>();
+const MAX_TRADES_SAME_SYMBOL = 2;
+const SAME_SYMBOL_COOLDOWN_MS = 8 * 60 * 1000; // 8 minutes
+
+// ── Last completed trade timestamp ───────────────────────────────────────────
+// Prevents the engine from immediately firing a second scan while a trade is
+// still being journalled in Deriv. Set immediately after the trade settles.
+let lastTradeCompletedAt: Date | null = null;
 
 // Groups: 0=Volatility 1s (1HZ*), 1=Volatility (R_*), 2=Jump (JD*), 3=Bull/Bear
 const GROUP_NAMES = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"];
@@ -407,7 +422,16 @@ async function runAutonomousLoop() {
                 families.map(async (fam) => {
                   const famCtx: ScanContext = {
                     ...baseCtx,
-                    settings: { ...baseCtx.settings, preferredContractTypes: fam.types },
+                    settings: {
+                      ...baseCtx.settings,
+                      preferredContractTypes: fam.types,
+                      // Even/odd-only mode: these contracts score lower from direction/barrier
+                      // agents that aren't tuned for them. Lower the confidence threshold so
+                      // a Markov-edge signal is still enough to trigger a trade.
+                      confidenceThreshold: (fam.name === "evenodd" && dirTypes.length === 0 && ouTypes.length === 0)
+                        ? Math.min(baseCtx.settings.confidenceThreshold, 48)
+                        : baseCtx.settings.confidenceThreshold,
+                    },
                     inRecovery: globalRecovery.isActive,
                   };
                   const output = await withTimeout(runCoordinator(famCtx), SCAN_TIMEOUT_MS, null as any);
@@ -525,6 +549,27 @@ async function runAutonomousLoop() {
       return;
     }
 
+    // ── Guard: require minimum time since last trade settled ─────────────────
+    // Ensures the Deriv journal has time to record the closed trade before we start
+    // the next scan. This prevents the engine from opening a second trade while the
+    // first is still being journalled on Deriv's side.
+    if (lastTradeCompletedAt && (Date.now() - lastTradeCompletedAt.getTime()) < 12_000) {
+      logger.info({ msAgo: Date.now() - lastTradeCompletedAt.getTime() }, "Autonomous: journal settle delay — waiting 3s");
+      scheduleNext(false, 3000);
+      return;
+    }
+
+    // ── Guard: per-symbol cooldown (max 2 trades per pair per 8 min) ─────────
+    const symHistory = recentTradesBySymbol.get(bestMarket.symbol) ?? [];
+    const symCutoff = Date.now() - SAME_SYMBOL_COOLDOWN_MS;
+    const symRecentCount = symHistory.filter(d => d.getTime() > symCutoff).length;
+    if (symRecentCount >= MAX_TRADES_SAME_SYMBOL) {
+      logger.info({ symbol: bestMarket.symbol, recentCount: symRecentCount },
+        "Autonomous: symbol cooldown reached — skipping to next opportunity");
+      scheduleNext(false, 500);
+      return;
+    }
+
     // Build legacy analysis for backward-compat fields
     const analysis = buildLegacyAnalysis(output);
 
@@ -583,31 +628,45 @@ async function runAutonomousLoop() {
       : rawDuration;
 
     // ── Recovery stake override ───────────────────────────────────────────────
-    // Over/Under (DIGITOVER/DIGITUNDER): digit-agent switches to Tier 2 barriers
-    //   (OVER 4 / UNDER 5 instead of OVER 2 / UNDER 8) — no stake boost needed.
+    // Over/Under (DIGITOVER/DIGITUNDER): digit-agent switches to OVER 4 / UNDER 5.
+    //   Additionally apply a progressive stake multiplier for consecutive recovery losses
+    //   (so the engine recovers faster when multiple recovery trades have failed).
     // Direction (CALL/PUT) + Even/Odd (DIGITEVEN/DIGITODD): boost stake so one
     //   win fully covers the unrecovered loss.
     let stake = rec.stake;
     const isOverUnder = effectiveContractType === "DIGITOVER" || effectiveContractType === "DIGITUNDER";
-    if (globalRecovery.isActive && !isOverUnder && globalRecovery.unrecoveredAmount > 0) {
+    if (globalRecovery.isActive && globalRecovery.unrecoveredAmount > 0) {
       const pm = rec.payoutMultiplier;
-      const profitPerUnitStaked = pm - 1;  // net profit per dollar staked if win
-      if (profitPerUnitStaked > 0) {
-        // Stake needed so that one win covers unrecovered loss + 10% buffer
-        const recoveryStake = (globalRecovery.unrecoveredAmount / profitPerUnitStaked) * 1.1;
-        // Never go below the normal recommended stake; never exceed max allowed
-        stake = Math.min(
-          Math.max(stake, Math.ceil(recoveryStake * 100) / 100),
-          tradingSettings.maxTradeStake,
-        );
+      const profitPerUnitStaked = pm - 1;
+      // Progressive multiplier: each consecutive recovery loss adds 15% to the base stake,
+      // capped at 2× to stay within reasonable risk bounds.
+      const progressiveMult = Math.min(1 + (globalRecovery.recoveryLossCount * 0.15), 2.0);
+
+      if (isOverUnder) {
+        // OU recovery: barrier already switched to OVER 4/UNDER 5 by digit-agent.
+        // Apply progressive stake only when there have been consecutive recovery losses.
+        if (globalRecovery.recoveryLossCount > 0 && profitPerUnitStaked > 0) {
+          const baseRecovery = Math.ceil((globalRecovery.unrecoveredAmount / profitPerUnitStaked) * 100) / 100;
+          stake = Math.min(Math.max(stake, baseRecovery * progressiveMult), tradingSettings.maxTradeStake);
+        }
+      } else if (profitPerUnitStaked > 0) {
+        // Direction/EvenOdd: stake sized to recover the full unrecovered amount in one win
+        const baseRecovery = Math.ceil((globalRecovery.unrecoveredAmount / profitPerUnitStaked) * 1.1 * 100) / 100;
+        stake = Math.min(Math.max(stake, baseRecovery * progressiveMult), tradingSettings.maxTradeStake);
       }
+      // Ensure stake has at most 2 decimal places (Deriv requirement)
+      stake = Math.round(stake * 100) / 100;
+
       logger.info({
         symbol: bestMarket.symbol,
         family: bestResult.family,
         unrecoveredAmount: globalRecovery.unrecoveredAmount,
+        recoveryLossCount: globalRecovery.recoveryLossCount,
+        progressiveMult,
         normalStake: rec.stake,
         recoveryStake: stake,
-      }, "Recovery mode: stake boosted to cover unrecovered loss");
+        mode: isOverUnder ? "OVER 4 / UNDER 5 + progressive stake" : "boosted stake",
+      }, "Recovery mode: stake adjusted");
     }
 
     // Estimated payout for paper trades (live payout comes from Deriv result)
@@ -736,6 +795,16 @@ async function runAutonomousLoop() {
       }).where(eq(tradesTable.id, openTrade.id));
     }
 
+    // ── Record trade in per-symbol cooldown map ──────────────────────────────
+    const symNow = new Date();
+    const symLog = recentTradesBySymbol.get(bestMarket.symbol) ?? [];
+    symLog.push(symNow);
+    // Prune old entries outside the cooldown window
+    recentTradesBySymbol.set(bestMarket.symbol, symLog.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS));
+
+    // ── Mark last-trade timestamp so journal-settle guard works correctly ─────
+    lastTradeCompletedAt = symNow;
+
     // Track consecutive losses — a win resets it to 0; cooldown expiry also resets it
     if (!won) sessionLossCount++;
     else sessionLossCount = 0;
@@ -743,19 +812,21 @@ async function runAutonomousLoop() {
     // ── Global cross-market recovery state update ────────────────────────────
     if (won) {
       if (globalRecovery.isActive) {
-        // Subtract the actual profit from the unrecovered amount
-        globalRecovery.unrecoveredAmount = Math.max(0, globalRecovery.unrecoveredAmount - profit);
+        // A win during recovery reduces the unrecovered amount
+        globalRecovery.unrecoveredAmount = Math.max(0, globalRecovery.unrecoveredAmount - Math.abs(profit));
         if (globalRecovery.unrecoveredAmount <= 0) {
-          // Loss fully recovered — switch back to normal trading
+          // Loss fully recovered — switch back to normal trading (OVER 2 / UNDER 7)
           globalRecovery.isActive = false;
           globalRecovery.unrecoveredAmount = 0;
           globalRecovery.activeFamilies = [];
           globalRecovery.recoveredFamilies = [];
+          globalRecovery.recoveryLossCount = 0;
           setGlobalDigitRecovery(false, 0);
-          logger.info({ symbol: bestMarket.symbol, family: bestResult.family, profit }, "Recovery complete — switching back to normal mode (OVER 2 / UNDER 8)");
+          logger.info({ symbol: bestMarket.symbol, family: bestResult.family, profit }, "Recovery complete — back to normal mode (OVER 2 / UNDER 7)");
           broadcastSSE("recovery_complete", { symbol: bestMarket.symbol, ts: Date.now() });
         } else {
-          // Partial recovery — update running total
+          // Partial recovery — a win reduced the gap, reset the consecutive-recovery-loss counter
+          globalRecovery.recoveryLossCount = 0;
           setGlobalDigitRecovery(true, globalRecovery.unrecoveredAmount);
           broadcastSSE("recovery_progress", {
             symbol: bestMarket.symbol,
@@ -765,16 +836,22 @@ async function runAutonomousLoop() {
         }
       }
     } else {
-      // Trade lost — activate recovery mode for all enabled families
+      // Trade lost — activate/extend recovery mode
       const lostAmount = Math.abs(profit);
+      // If already in recovery and this is another recovery loss, increment the counter
+      // so the next trade uses a progressively higher stake
+      if (globalRecovery.isActive) {
+        globalRecovery.recoveryLossCount++;
+      } else {
+        globalRecovery.recoveryLossCount = 0;
+      }
       globalRecovery.isActive = true;
       globalRecovery.unrecoveredAmount += lostAmount;
-      // Track which families are now in recovery
+      // Track which families are now in recovery (all currently enabled families)
       const lostFamily = bestResult.family;
       if (!globalRecovery.activeFamilies.includes(lostFamily)) {
         globalRecovery.activeFamilies.push(lostFamily);
       }
-      // Activate recovery on all currently enabled families (cross-market)
       if (dirTypes.length > 0 && !globalRecovery.activeFamilies.includes("direction")) {
         globalRecovery.activeFamilies.push("direction");
       }
@@ -830,8 +907,8 @@ async function runAutonomousLoop() {
     isLoopRunning = false;
   }
 
-  // After a live trade completes, wait at least 5s before next scan so balances
-  // and journal settle — no new trade can start while isLoopRunning=true
+  // After a live trade completes, wait before next scan so Deriv can journal the
+  // closed trade. The lastTradeCompletedAt guard inside the loop also enforces this.
   scheduleNext(true);
 }
 
@@ -839,8 +916,9 @@ function scheduleNext(tradeExecuted = false, overrideDelayMs?: number) {
   if (!engineRunning) return;
   // Clear any pending timer before scheduling a new one (prevents double-fires)
   if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
-  // 5s after a trade (to let Deriv account settle), 500ms when rescanning for opportunity, 3s otherwise
-  const delayMs = overrideDelayMs ?? (tradeExecuted ? 5000 : 3000);
+  // 15s after a trade (gives Deriv journal time to record the closed trade),
+  // 500ms when rescanning for opportunity, 3s between normal scans
+  const delayMs = overrideDelayMs ?? (tradeExecuted ? 15_000 : 3000);
   nextScanIn = Math.ceil(delayMs / 1000);
   loopIntervalSec = nextScanIn;
   autonomousTimer = setTimeout(runAutonomousLoop, delayMs);

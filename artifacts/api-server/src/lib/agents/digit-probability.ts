@@ -181,7 +181,7 @@ function winProbForBarrier(
 
 const NORMAL_BARRIERS: Record<"DIGITOVER" | "DIGITUNDER", number> = {
   DIGITOVER:  2,
-  DIGITUNDER: 8,
+  DIGITUNDER: 7,
 };
 
 const RECOVERY_BARRIERS: Record<"DIGITOVER" | "DIGITUNDER", number> = {
