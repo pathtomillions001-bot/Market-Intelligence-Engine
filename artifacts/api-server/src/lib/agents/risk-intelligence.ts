@@ -149,8 +149,15 @@ function computeRecommendedStake(ctx: ScanContext, kf: number, _winP: number): n
   const riskMult = settings.riskProfile === "conservative" ? 0.4
     : settings.riskProfile === "aggressive" ? 1.2 : 0.7;
 
-  // Take the minimum of Kelly and the settings-based limit
-  const kellyBased = balance * kf;
   const settingsBased = balance * maxRisk * riskMult;
-  return Math.max(0.35, Math.min(kellyBased, settingsBased, settings.maxTradeStake));
+  const kellyBased    = balance * kf;
+
+  // When Kelly fraction is positive, cap by it; when zero/negative (near-breakeven
+  // or negative-EV by Kelly measure), always honour the user's own risk settings —
+  // Kelly says "don't bet" but the user has explicitly set their risk tolerance.
+  const stake = kf > 0.001
+    ? Math.min(kellyBased, settingsBased)
+    : settingsBased;
+
+  return Math.max(0.35, Math.min(stake, settings.maxTradeStake));
 }

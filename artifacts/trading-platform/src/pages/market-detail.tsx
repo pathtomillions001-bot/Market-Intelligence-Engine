@@ -132,7 +132,7 @@ function RiseFallPanel({ trendStats, agentData, onTrade }: {
           )}
           {agentData && (
             <span className={`ml-auto text-[9px] px-1.5 py-0.5 rounded-full border font-mono ${wscore >= 70 ? "bg-green-500/10 border-green-500/30 text-green-400" : wscore >= 50 ? "bg-amber-500/10 border-amber-500/30 text-amber-400" : "bg-zinc-800 border-zinc-700 text-zinc-400"}`}>
-              9-Agents {wscore.toFixed(0)}/100
+              13-Agents {wscore.toFixed(0)}/100
             </span>
           )}
           <span className={`${agentData ? "" : "ml-auto"} w-2 h-2 rounded-full bg-green-500 animate-pulse`} title="Live" />
@@ -172,7 +172,7 @@ function RiseFallPanel({ trendStats, agentData, onTrade }: {
         {agentData && (
           <div className="p-2.5 rounded-lg bg-secondary/20 border border-border">
             <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[9px] text-muted-foreground uppercase tracking-wider font-medium">9-Agent Consensus</span>
+              <span className="text-[9px] text-muted-foreground uppercase tracking-wider font-medium">13-Agent Consensus</span>
               <div className="flex items-center gap-2">
                 <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full border ${agentData.shouldTrade ? "bg-green-500/15 text-green-400 border-green-500/30" : "bg-amber-500/10 text-amber-400 border-amber-500/30"}`}>
                   {agentData.shouldTrade ? "✓ TRADE" : "⏸ WAIT"}
@@ -328,7 +328,7 @@ function EvenOddPanel({ digitStats, agentData, onTrade }: {
           )}
           {agentData && (
             <span className={`ml-auto text-[9px] px-1.5 py-0.5 rounded-full border font-mono ${wscore >= 70 ? "bg-green-500/10 border-green-500/30 text-green-400" : wscore >= 50 ? "bg-amber-500/10 border-amber-500/30 text-amber-400" : "bg-zinc-800 border-zinc-700 text-zinc-400"}`}>
-              9-Agents {wscore.toFixed(0)}/100
+              13-Agents {wscore.toFixed(0)}/100
             </span>
           )}
           <span className={`${agentData ? "" : "ml-auto"} w-2 h-2 rounded-full bg-green-500 animate-pulse`} title="Live" />
@@ -368,7 +368,7 @@ function EvenOddPanel({ digitStats, agentData, onTrade }: {
         {agentData && (
           <div className="p-2.5 rounded-lg bg-secondary/20 border border-border">
             <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[9px] text-muted-foreground uppercase tracking-wider font-medium">9-Agent Consensus</span>
+              <span className="text-[9px] text-muted-foreground uppercase tracking-wider font-medium">13-Agent Consensus</span>
               <div className="flex items-center gap-2">
                 <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full border ${agentData.shouldTrade ? "bg-green-500/15 text-green-400 border-green-500/30" : "bg-amber-500/10 text-amber-400 border-amber-500/30"}`}>
                   {agentData.shouldTrade ? "✓ TRADE" : "⏸ WAIT"}

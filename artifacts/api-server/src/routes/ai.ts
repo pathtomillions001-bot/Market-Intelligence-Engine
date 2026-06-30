@@ -379,96 +379,93 @@ async function runAutonomousLoop() {
       marketGroups.map(async (group, gi): Promise<(ScanResult & { groupName: string }) | null> => {
         if (group.length === 0) return null;
 
-        // Clamp cursor in case group size changed (e.g. settings changed allowed markets)
-        if (groupCursors[gi] >= group.length) groupCursors[gi] = 0;
-        const cursorIdx = groupCursors[gi];
-        const m = group[cursorIdx];
-        // Advance cursor immediately so the next iteration picks the next market.
-        // Wraps back to 0 after the last market in the group — full cycle restarts.
-        groupCursors[gi] = (groupCursors[gi] + 1) % group.length;
+        // Scan ALL markets in this group in parallel — pick the best opportunity
+        // across the whole group rather than using a single cursor position.
+        type MarketResult = ScanResult & { allFamilyResults: ScanResult[] };
+        const allMarketResults = (await Promise.allSettled(
+          group.map(async (m): Promise<MarketResult | null> => {
+            try {
+              const isBullBear = m.symbol === "RDBULL" || m.symbol === "RDBEAR";
 
-        try {
-          const isBullBear = m.symbol === "RDBULL" || m.symbol === "RDBEAR";
+              // Only run families whose contract types are enabled in settings.
+              const families: Array<{ name: string; types: string[] }> = [];
+              if (dirTypes.length > 0)                                  families.push({ name: "direction", types: dirTypes });
+              if (!isBullBear && m.digitEnabled && ouTypes.length > 0)  families.push({ name: "overunder", types: ouTypes });
+              if (!isBullBear && m.digitEnabled && eoTypes.length > 0)  families.push({ name: "evenodd",   types: eoTypes });
 
-          // Only run families whose contract types are enabled in settings.
-          // e.g. if user enabled only Over/Under → dirTypes & eoTypes are empty
-          //       → only "overunder" family is built; direction/evenodd are skipped.
-          const families: Array<{ name: string; types: string[] }> = [];
-          if (dirTypes.length > 0)                                  families.push({ name: "direction", types: dirTypes });
-          if (!isBullBear && m.digitEnabled && ouTypes.length > 0)  families.push({ name: "overunder", types: ouTypes });
-          if (!isBullBear && m.digitEnabled && eoTypes.length > 0)  families.push({ name: "evenodd",   types: eoTypes });
+              if (families.length === 0) return null;
 
-          if (families.length === 0) return null;
+              const baseCtx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
 
-          const baseCtx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
+              const familyResults = (await Promise.allSettled(
+                families.map(async (fam) => {
+                  const famCtx: ScanContext = {
+                    ...baseCtx,
+                    settings: { ...baseCtx.settings, preferredContractTypes: fam.types },
+                  };
+                  const output = await withTimeout(runCoordinator(famCtx), SCAN_TIMEOUT_MS, null as any);
+                  if (!output) return null;
+                  return { market: m, output, ctx: famCtx, family: fam.name } as ScanResult;
+                })
+              )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 
-          // Run each enabled family coordinator in parallel.
-          // Each gets a context scoped to its own contract types only.
-          const familyResults = (await Promise.allSettled(
-            families.map(async (fam) => {
-              const famCtx: ScanContext = {
-                ...baseCtx,
-                settings: { ...baseCtx.settings, preferredContractTypes: fam.types },
-              };
-              const output = await withTimeout(runCoordinator(famCtx), SCAN_TIMEOUT_MS, null as any);
-              if (!output) return null;
-              return { market: m, output, ctx: famCtx, family: fam.name } as ScanResult;
-            })
-          )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
+              if (familyResults.length === 0) return null;
 
-          if (familyResults.length === 0) return null;
+              totalMarketsScanned++;
 
-          totalMarketsScanned++;
+              const tradeableFamilies = familyResults.filter(r => r.output.shouldTrade);
+              const marketBest = tradeableFamilies.length > 0
+                ? tradeableFamilies.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
+                : familyResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0];
 
-          // Among this market's enabled families, prefer shouldTrade=true,
-          // then highest qualityScore.
-          const tradeableFamilies = familyResults.filter(r => r.output.shouldTrade);
-          const groupBest = tradeableFamilies.length > 0
-            ? tradeableFamilies.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
-            : familyResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0];
+              return { ...marketBest, allFamilyResults: familyResults };
+            } catch { return null; }
+          })
+        )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 
-          logger.info({
-            group: GROUP_NAMES[gi],
-            cursorIdx,
-            totalInGroup: group.length,
-            symbol: m.symbol,
-            family: groupBest.family,
-            quality: groupBest.output.qualityScore,
-            shouldTrade: groupBest.output.shouldTrade,
-          }, "Group cursor scan");
+        if (allMarketResults.length === 0) return null;
 
-          // Build per-family summary for the UI — this lets the dashboard show
-          // ALL enabled families (RISE/FALL, OVER/UNDER, EVEN/ODD) at a glance,
-          // not just the tournament winner.
-          const allFamilySummaries = familyResults.map(r => ({
-            name: r.family,
-            contract: r.output.recommendation?.product ?? null,
-            shouldTrade: r.output.shouldTrade,
-            confidence: Math.round(r.output.confidenceScore),
-            quality: Math.round(r.output.qualityScore),
-            rejectReason: r.output.rejectReason ?? null,
-          }));
+        // Among all markets in this group, prefer tradeable then highest qualityScore.
+        const tradeableMarkets = allMarketResults.filter(r => r.output.shouldTrade);
+        const groupBest = tradeableMarkets.length > 0
+          ? tradeableMarkets.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
+          : allMarketResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0];
 
-          broadcastSSE("group_scanned", {
-            group: GROUP_NAMES[gi],
-            cursorIdx,
-            totalInGroup: group.length,
-            scanned: 1,
-            bestSymbol: m.symbol,
-            bestDisplayName: m.displayName,
-            quality: groupBest.output.qualityScore,
-            shouldTrade: groupBest.output.shouldTrade,
-            contract: groupBest.output.recommendation?.product ?? null,
-            confidence: groupBest.output.confidenceScore,
-            family: groupBest.family,
-            // All families scanned for this market — drives the per-family badges in the UI
-            families: allFamilySummaries,
-            // Best reject reason (for the skip-reason status bar)
-            rejectReason: groupBest.output.rejectReason ?? null,
-          });
+        logger.info({
+          group: GROUP_NAMES[gi],
+          marketsScanned: allMarketResults.length,
+          tradeableCount: tradeableMarkets.length,
+          bestSymbol: groupBest.market.symbol,
+          family: groupBest.family,
+          quality: groupBest.output.qualityScore,
+          shouldTrade: groupBest.output.shouldTrade,
+        }, "Group full scan complete");
 
-          return { ...groupBest, groupName: GROUP_NAMES[gi] };
-        } catch { return null; }
+        const allFamilySummaries = groupBest.allFamilyResults.map(r => ({
+          name: r.family,
+          contract: r.output.recommendation?.product ?? null,
+          shouldTrade: r.output.shouldTrade,
+          confidence: Math.round(r.output.confidenceScore),
+          quality: Math.round(r.output.qualityScore),
+          rejectReason: r.output.rejectReason ?? null,
+        }));
+
+        broadcastSSE("group_scanned", {
+          group: GROUP_NAMES[gi],
+          totalInGroup: group.length,
+          scanned: allMarketResults.length,
+          bestSymbol: groupBest.market.symbol,
+          bestDisplayName: groupBest.market.displayName,
+          quality: groupBest.output.qualityScore,
+          shouldTrade: groupBest.output.shouldTrade,
+          contract: groupBest.output.recommendation?.product ?? null,
+          confidence: groupBest.output.confidenceScore,
+          family: groupBest.family,
+          families: allFamilySummaries,
+          rejectReason: groupBest.output.rejectReason ?? null,
+        });
+
+        return { ...groupBest, groupName: GROUP_NAMES[gi] };
       })
     )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 

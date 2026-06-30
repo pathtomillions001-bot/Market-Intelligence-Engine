@@ -121,10 +121,11 @@ export function runConfidenceFusionAgent(
   const agentWeightedScore = Math.round(weightedSum / TOTAL_WEIGHT);
 
   // ── 5. Per-market adaptive threshold ─────────────────────────────────────────
-  // Threshold adapts to the amount of history we have (learning agent confidence)
+  // Cap base threshold at 50 (matching master-decision) so near-breakeven contracts
+  // (EVEN/ODD, RISE/FALL at neutral markets) can still fire.
   const historyAdjust = (input.learningAgentScore - 50) * 0.1; // ±5 adjustment
-  const baseThreshold = ctx.settings.minConfidenceThreshold ?? 60;
-  const effectiveThreshold = Math.max(50, Math.min(80, baseThreshold + historyAdjust));
+  const baseThreshold = Math.min(ctx.settings.minConfidenceThreshold ?? 50, 50);
+  const effectiveThreshold = Math.max(44, Math.min(68, baseThreshold + historyAdjust));
 
   // ── 6. Enhancement signals ────────────────────────────────────────────────────
   if (input.patternDiscoveryScore > 70) enhancers.push("Pattern discovery: recognized profitable pattern");

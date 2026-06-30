@@ -85,10 +85,20 @@ function scoreDuration(
       else if (duration >= 10) { score -= 12; reasoning.push("Mean-reverting penalises long duration"); }
     }
   } else {
-    // Digit contracts: Hurst has less impact, slight preference for 5t
-    if (duration === 5) { score += 8; reasoning.push("Standard 5t optimal for digit contracts"); }
-    else if (duration === 3) { score += 4; }
-    else if (duration > 10) { score -= 8; reasoning.push("Very long digit contracts increase variance"); }
+    // Digit contracts: Hurst has limited impact on the final digit, but volatility does.
+    // Avoid a static bias — let vol/regime drive the choice between 3t and 5t.
+    // High vol → prefer 3t (less time exposure); low vol → prefer 5t (digit distribution stabilises)
+    if (pf.vol20 > 0.006) {
+      if (duration === 3) { score += 6; reasoning.push(`High vol: 3t reduces digit exposure`); }
+      else { score -= 2; }
+    } else if (pf.vol20 < 0.002) {
+      if (duration === 5) { score += 6; reasoning.push(`Low vol: 5t allows digit distribution to settle`); }
+    }
+    // Small neutral preference for 5 in truly ambiguous conditions
+    if (pf.vol20 >= 0.002 && pf.vol20 <= 0.006) {
+      if (duration === 5) { score += 2; }
+      else if (duration === 3) { score += 1; }
+    }
   }
 
   // ── Factor 3: Market Regime ─────────────────────────────────────────────

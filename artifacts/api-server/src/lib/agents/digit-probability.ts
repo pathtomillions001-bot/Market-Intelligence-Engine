@@ -11,6 +11,7 @@
 
 import type { AgentOutput, ProductType, ScanContext } from "./types";
 import { scoreToSignal } from "./types";
+import { isInDigitRecovery } from "./digit-agent";
 
 // ── Digit payout table (Deriv's actual payout schedule) ──────────────────────
 // OVER 0/UNDER 9 = lowest risk = lowest payout
@@ -172,7 +173,7 @@ function winProbForBarrier(
 
 // ── Barrier option builder ─────────────────────────────────────────────────────
 
-function buildBarrierOptions(analysis: ReturnType<typeof analyzeDigits>): BarrierOption[] {
+function buildBarrierOptions(analysis: ReturnType<typeof analyzeDigits>, inRecovery = false): BarrierOption[] {
   const options: BarrierOption[] = [];
 
   for (const [ct, payoutMap] of Object.entries(DIGIT_PAYOUTS)) {
@@ -191,9 +192,18 @@ function buildBarrierOptions(analysis: ReturnType<typeof analyzeDigits>): Barrie
       if (contractType === "DIGITOVER" && (barrier === 7 || barrier === 8)) continue;
       if (contractType === "DIGITUNDER" && (barrier === 1 || barrier === 2)) continue;
 
-      // Adjusted EV score: tier 1 barriers get bonus for positive edge
-      const tierMultiplier = tier === 1 ? (edge > 0 ? 10 : 1) : tier === 2 ? 2 : 0.5;
-      const adjustedEvScore = ev * tierMultiplier;
+      // Recovery mode: tier-2 barriers (OVER 4 / UNDER 5) win the ranking so the
+      // engine switches from the normal OVER 2/UNDER 8 to a higher-payout recovery
+      // barrier. Non-recovery: tier-1 barriers (OVER 2/UNDER 8) are boosted for edge.
+      let adjustedEvScore: number;
+      if (inRecovery) {
+        // In recovery: strongly prefer tier 2 (OVER 4/UNDER 5, ~1.50x payout)
+        adjustedEvScore = tier === 2 ? ev * 5 : tier === 1 ? ev * 1 : ev * 0.5;
+      } else {
+        // Normal: prefer tier 1 (OVER 2/UNDER 8) when they have positive edge
+        const tierMultiplier = tier === 1 ? (edge > 0 ? 10 : 1) : tier === 2 ? 2 : 0.5;
+        adjustedEvScore = ev * tierMultiplier;
+      }
 
       options.push({ contractType, barrier, winProbability: winP, payout, expectedValue: ev, edge, tier, adjustedEvScore });
     }
