@@ -433,6 +433,18 @@ async function runAutonomousLoop() {
             shouldTrade: groupBest.output.shouldTrade,
           }, "Group cursor scan");
 
+          // Build per-family summary for the UI — this lets the dashboard show
+          // ALL enabled families (RISE/FALL, OVER/UNDER, EVEN/ODD) at a glance,
+          // not just the tournament winner.
+          const allFamilySummaries = familyResults.map(r => ({
+            name: r.family,
+            contract: r.output.recommendation?.product ?? null,
+            shouldTrade: r.output.shouldTrade,
+            confidence: Math.round(r.output.confidenceScore),
+            quality: Math.round(r.output.qualityScore),
+            rejectReason: r.output.rejectReason ?? null,
+          }));
+
           broadcastSSE("group_scanned", {
             group: GROUP_NAMES[gi],
             cursorIdx,
@@ -445,6 +457,10 @@ async function runAutonomousLoop() {
             contract: groupBest.output.recommendation?.product ?? null,
             confidence: groupBest.output.confidenceScore,
             family: groupBest.family,
+            // All families scanned for this market — drives the per-family badges in the UI
+            families: allFamilySummaries,
+            // Best reject reason (for the skip-reason status bar)
+            rejectReason: groupBest.output.rejectReason ?? null,
           });
 
           return { ...groupBest, groupName: GROUP_NAMES[gi] };

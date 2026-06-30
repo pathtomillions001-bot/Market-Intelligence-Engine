@@ -33,6 +33,15 @@ interface PendingResult {
   createdAt: string;
 }
 
+interface FamilySummary {
+  name: string;       // "direction" | "overunder" | "evenodd"
+  contract: string | null;
+  shouldTrade: boolean;
+  confidence: number;
+  quality: number;
+  rejectReason: string | null;
+}
+
 interface GroupScanResult {
   group: string;
   scanned: number;
@@ -42,6 +51,11 @@ interface GroupScanResult {
   shouldTrade: boolean;
   contract: string | null;
   confidence: number;
+  family?: string;
+  families?: FamilySummary[];   // all enabled families for this market
+  rejectReason?: string | null;
+  cursorIdx?: number;
+  totalInGroup?: number;
   scanningAt?: number;
 }
 
@@ -174,11 +188,22 @@ const GROUP_COLORS: Record<string, string> = {
 const CONTRACT_SHORT: Record<string, string> = {
   CALL: "RISE", PUT: "FALL", DIGITOVER: "OVER", DIGITUNDER: "UNDER", DIGITEVEN: "EVEN", DIGITODD: "ODD",
 };
+const FAMILY_COLORS: Record<string, string> = {
+  direction: "#10b981",
+  overunder: "#06b6d4",
+  evenodd:   "#8b5cf6",
+};
+const CONTRACT_COLORS_MAP: Record<string, string> = {
+  CALL: "#10b981", PUT: "#ef4444",
+  DIGITOVER: "#06b6d4", DIGITUNDER: "#f59e0b",
+  DIGITEVEN: "#8b5cf6", DIGITODD: "#ec4899",
+};
 
-function ParallelGroupScanner({ groups, isScanning, winner }: {
+function ParallelGroupScanner({ groups, isScanning, winner, lastSkipReason }: {
   groups: Record<string, GroupScanResult | "scanning">;
   isScanning: boolean;
   winner: string | null;
+  lastSkipReason: string | null;
 }) {
   const GROUP_ORDER = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"];
   const hasAnyData = Object.keys(groups).length > 0;
@@ -187,14 +212,15 @@ function ParallelGroupScanner({ groups, isScanning, winner }: {
 
   return (
     <div className="rounded-lg border border-primary/15 bg-primary/3 p-3 space-y-2">
-      <div className="flex items-center gap-2 mb-2">
+      {/* Header */}
+      <div className="flex items-center gap-2 mb-1">
         <div className="flex gap-0.5">
           {[0,1,2].map(i => (
             <span key={i} className="w-1 h-1 rounded-full bg-primary animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
           ))}
         </div>
         <span className="text-[10px] font-mono text-primary/80 uppercase tracking-widest">
-          {isScanning ? "Parallel group tournament — all 4 groups racing" : "Last scan results"}
+          {isScanning ? "Scanning markets — rotating cursor across all groups" : "Last scan results"}
         </span>
         {winner && (
           <span className="ml-auto text-[9px] font-mono text-green-400 border border-green-500/30 px-1.5 py-0.5 rounded">
@@ -202,6 +228,8 @@ function ParallelGroupScanner({ groups, isScanning, winner }: {
           </span>
         )}
       </div>
+
+      {/* Per-group cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
         {GROUP_ORDER.map(groupName => {
           const result = groups[groupName];
@@ -243,18 +271,55 @@ function ParallelGroupScanner({ groups, isScanning, winner }: {
                   <div className="text-[8px] text-muted-foreground font-mono">Scanning…</div>
                 </div>
               ) : result && typeof result === "object" ? (
-                <div className="space-y-1">
-                  <div className="text-[10px] font-semibold leading-tight truncate">{result.bestDisplayName}</div>
-                  <div className="text-[8px] font-mono text-muted-foreground">{result.bestSymbol}</div>
+                <div className="space-y-1.5">
+                  {/* Market name + cursor position */}
+                  <div>
+                    <div className="text-[10px] font-semibold leading-tight truncate">{result.bestDisplayName}</div>
+                    <div className="flex items-center gap-1">
+                      <span className="text-[8px] font-mono text-muted-foreground">{result.bestSymbol}</span>
+                      {result.cursorIdx !== undefined && result.totalInGroup !== undefined && (
+                        <span className="text-[7px] font-mono text-zinc-600">[{result.cursorIdx + 1}/{result.totalInGroup}]</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Per-family badges — shows ALL enabled families, not just the winner */}
+                  {result.families && result.families.length > 0 ? (
+                    <div className="flex flex-wrap gap-1">
+                      {result.families.map(fam => {
+                        const ct = fam.contract ?? "";
+                        const ctColor = CONTRACT_COLORS_MAP[ct] ?? FAMILY_COLORS[fam.name] ?? "#71717a";
+                        const label = CONTRACT_SHORT[ct] ?? ct;
+                        return (
+                          <span
+                            key={fam.name}
+                            title={fam.rejectReason ?? (fam.shouldTrade ? "Ready to trade" : "Not ready")}
+                            className="text-[7px] font-mono px-1 py-0.5 rounded border leading-none"
+                            style={fam.shouldTrade
+                              ? { color: ctColor, borderColor: `${ctColor}60`, background: `${ctColor}18` }
+                              : { color: "#52525b", borderColor: "#3f3f46", background: "#18181b" }
+                            }
+                          >
+                            {label || fam.name}{fam.shouldTrade ? " ✓" : ""}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    /* Fallback: single contract badge (old server version) */
+                    result.contract && (
+                      <span className="text-[8px] font-mono" style={{ color: `${color}90` }}>
+                        {CONTRACT_SHORT[result.contract] ?? result.contract}
+                      </span>
+                    )
+                  )}
+
+                  {/* Confidence + quality bar */}
                   <div className="flex items-center justify-between">
                     <span className="text-sm font-mono font-bold" style={{ color: result.shouldTrade ? color : "#71717a" }}>
                       {result.confidence.toFixed(0)}%
                     </span>
-                    {result.contract && (
-                      <span className="text-[8px] font-mono" style={{ color: `${color}90` }}>
-                        {CONTRACT_SHORT[result.contract] ?? result.contract}
-                      </span>
-                    )}
+                    <span className="text-[7px] font-mono text-zinc-600">q{result.quality.toFixed(0)}</span>
                   </div>
                   <div className="h-0.5 w-full bg-black/20 rounded-full overflow-hidden">
                     <div className="h-full rounded-full transition-all duration-500"
@@ -268,6 +333,20 @@ function ParallelGroupScanner({ groups, isScanning, winner }: {
           );
         })}
       </div>
+
+      {/* ── Skip-reason status bar ─────────────────────────────────────────── */}
+      {!winner && lastSkipReason && (
+        <div className="mt-1 flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/5 px-2.5 py-1.5">
+          <span className="text-amber-400 text-[9px] font-mono mt-0.5 shrink-0">⚠ SKIP</span>
+          <span className="text-[9px] font-mono text-amber-300/80 leading-relaxed break-words">{lastSkipReason}</span>
+        </div>
+      )}
+      {winner && (
+        <div className="mt-1 flex items-center gap-2 rounded-md border border-green-500/20 bg-green-500/5 px-2.5 py-1.5">
+          <span className="text-green-400 text-[9px] font-mono shrink-0">✓ TRADE</span>
+          <span className="text-[9px] font-mono text-green-300/80">Executing trade on {winner} — all gates passed</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -297,6 +376,8 @@ export default function Dashboard() {
   const [groupScans, setGroupScans] = useState<Record<string, GroupScanResult | "scanning">>({});
   const [isScanningGroups, setIsScanningGroups] = useState(false);
   const [tournamentWinner, setTournamentWinner] = useState<string | null>(null);
+  // Last skip reason from scan_complete — shown in the status bar when no trade fires
+  const [lastSkipReason, setLastSkipReason] = useState<string | null>(null);
 
   // SSE: journal_refreshed syncs journal; trade_completed applies immediate stat delta
   const sseRef = useRef<EventSource | null>(null);
@@ -327,8 +408,14 @@ export default function Dashboard() {
       try {
         const payload = JSON.parse(e.data);
         setIsScanningGroups(false);
-        if (payload.shouldTrade && payload.symbol) setTournamentWinner(payload.symbol);
-        else setTournamentWinner(null);
+        if (payload.shouldTrade && payload.symbol) {
+          setTournamentWinner(payload.symbol);
+          setLastSkipReason(null);
+        } else {
+          setTournamentWinner(null);
+          // Show why this scan didn't result in a trade
+          if (payload.rejectReason) setLastSkipReason(payload.rejectReason);
+        }
       } catch {}
     });
 
@@ -664,6 +751,7 @@ export default function Dashboard() {
               groups={groupScans}
               isScanning={isScanningGroups}
               winner={tournamentWinner}
+              lastSkipReason={lastSkipReason}
             />
           )}
 
