@@ -700,12 +700,12 @@ export default function MarketDetail() {
         </CardContent>
       </Card>
 
-      {/* Extract 9-agent outputs from coordinator recommendation */}
+      {/* Extract 13-agent outputs from coordinator recommendation */}
       {(() => {
         const agentOutputs = (rec as any)?.agentOutputs ?? {};
-        const dirAgent = agentOutputs?.direction?.data;
-        const masterAgent = agentOutputs?.masterDecision?.data;
-        const durationAgent = agentOutputs?.durationOptimizer?.data;
+        const dirAgent = agentOutputs?.direction?.data ?? agentOutputs?.riseFallAgent?.data;
+        const masterAgent = agentOutputs?.masterDecision?.data ?? agentOutputs?.confidenceFusion?.data;
+        const durationAgent = agentOutputs?.durationOptimizer?.data ?? agentOutputs?.executionTiming?.data;
         const agentRecommendedDuration = durationAgent?.duration ?? (rec as any)?.recommendedDuration ?? 5;
 
         const rfAgentData = dirAgent ? {
@@ -722,12 +722,102 @@ export default function MarketDetail() {
           recommendedDuration: agentRecommendedDuration,
         } : undefined;
 
+        // All 13 agent keys with human-readable names
+        const AGENT_META: Array<{ key: string; label: string; icon: string }> = [
+          { key: "marketScanner",       label: "Market Scanner",      icon: "📡" },
+          { key: "tickIntelligence",    label: "Tick Intelligence",   icon: "🕐" },
+          { key: "digitProbability",    label: "Digit Probability",   icon: "🔢" },
+          { key: "riseFallAgent",       label: "Rise/Fall Model",     icon: "📈" },
+          { key: "marketRegime",        label: "Market Regime",       icon: "🌊" },
+          { key: "executionTiming",     label: "Execution Timing",    icon: "⏱" },
+          { key: "confidenceFusion",    label: "Confidence Fusion",   icon: "🧠" },
+          { key: "recoveryIntelligence",label: "Recovery Intel",      icon: "🛡" },
+          { key: "riskIntelligence",    label: "Risk Intelligence",   icon: "⚠" },
+          { key: "portfolioManager",    label: "Portfolio Manager",   icon: "💼" },
+          { key: "learningAgent",       label: "Learning Agent",      icon: "🎓" },
+          { key: "patternDiscovery",    label: "Pattern Discovery",   icon: "🔍" },
+          { key: "tradeExplainability", label: "Trade Explainability",icon: "💡" },
+        ];
+
+        const agentCards = AGENT_META.filter(a => agentOutputs[a.key]);
+
         return (
           <>
-            {/* Rise & Fall Analysis — 9-agent driven win probabilities */}
+            {/* Rise & Fall Analysis — 13-agent driven win probabilities */}
             <RiseFallPanel trendStats={trendStats} agentData={rfAgentData} onTrade={openTradeDialog} />
             {/* Even & Odd Analysis — only for digit markets */}
             {isDigitMarket && <EvenOddPanel digitStats={digitStats} agentData={eoAgentData} onTrade={openTradeDialog} />}
+
+            {/* 13-Agent AI Engine Breakdown */}
+            {agentCards.length > 0 && (
+              <Card className="bg-card">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <span className="text-primary">🤖</span>
+                    13-Agent AI Engine
+                    <span className="ml-auto text-[10px] font-mono text-muted-foreground">
+                      {agentCards.length}/13 active · {(rec as any)?.recommendedDuration ?? 5}t window · {(rec as any)?.tickCount ?? "—"} ticks
+                    </span>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    {AGENT_META.map(({ key, label, icon }) => {
+                      const agent = agentOutputs[key];
+                      if (!agent) return null;
+                      const score = agent.score ?? 0;
+                      const signal = agent.signal ?? "hold";
+                      const color = score >= 70 ? "#10b981" : score >= 50 ? "#f59e0b" : "#ef4444";
+                      const signalDot = signal === "buy" ? "bg-green-500" : signal === "sell" ? "bg-red-500" : "bg-zinc-500";
+                      return (
+                        <div key={key} className="flex items-start gap-2 p-2 rounded-lg bg-secondary/20 border border-border/50">
+                          <span className="text-base leading-none mt-0.5 shrink-0">{icon}</span>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1">
+                              <span className="text-[10px] font-medium text-foreground truncate">{label}</span>
+                              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${signalDot}`} />
+                            </div>
+                            <div className="flex items-center gap-1.5 mt-1">
+                              <div className="flex-1 h-1 bg-white/10 rounded-full overflow-hidden">
+                                <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(score, 100)}%`, background: color }} />
+                              </div>
+                              <span className="text-[9px] font-mono font-bold shrink-0" style={{ color }}>{score}</span>
+                            </div>
+                            {agent.reasoning && (
+                              <p className="text-[8px] text-muted-foreground mt-1 leading-tight line-clamp-2">{agent.reasoning}</p>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Trade recommendation summary */}
+                  {(rec as any)?.agents && (
+                    <div className="mt-3 p-2 rounded-lg bg-primary/5 border border-primary/20 flex items-center gap-3">
+                      <div className="text-xs font-mono">
+                        <span className="text-muted-foreground">Contract: </span>
+                        <span className="font-bold text-primary">{(rec as any)?.contractType ?? "—"}</span>
+                        {(rec as any)?.digitBarrier != null && <span className="ml-1 text-primary">{(rec as any).digitBarrier}</span>}
+                      </div>
+                      <div className="text-xs font-mono">
+                        <span className="text-muted-foreground">Ticks: </span>
+                        <span className="font-bold">{(rec as any)?.recommendedDuration ?? 5}t</span>
+                      </div>
+                      <div className="text-xs font-mono">
+                        <span className="text-muted-foreground">Stake: </span>
+                        <span className="font-bold">${(rec as any)?.stake?.toFixed(2) ?? "—"}</span>
+                      </div>
+                      <div className="text-xs font-mono ml-auto">
+                        <span className={`font-bold ${(rec as any)?.shouldTrade ? "text-green-400" : "text-zinc-500"}`}>
+                          {(rec as any)?.shouldTrade ? "✓ TRADE" : "⏸ WAIT"}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
           </>
         );
       })()}

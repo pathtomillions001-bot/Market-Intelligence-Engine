@@ -172,6 +172,22 @@ function winProbForBarrier(
 }
 
 // ── Barrier option builder ─────────────────────────────────────────────────────
+//
+// STRICT BARRIER POLICY (per user requirements):
+//   Normal mode  → ONLY OVER 2  and UNDER 8  (tier-1, safe/consistent)
+//   Recovery mode → ONLY OVER 4  and UNDER 5  (tier-2, higher payout to recover loss)
+//
+// All other barriers are excluded regardless of edge or EV score.
+
+const NORMAL_BARRIERS: Record<"DIGITOVER" | "DIGITUNDER", number> = {
+  DIGITOVER:  2,
+  DIGITUNDER: 8,
+};
+
+const RECOVERY_BARRIERS: Record<"DIGITOVER" | "DIGITUNDER", number> = {
+  DIGITOVER:  4,
+  DIGITUNDER: 5,
+};
 
 function buildBarrierOptions(analysis: ReturnType<typeof analyzeDigits>, inRecovery = false): BarrierOption[] {
   const options: BarrierOption[] = [];
@@ -181,29 +197,18 @@ function buildBarrierOptions(analysis: ReturnType<typeof analyzeDigits>, inRecov
 
     for (const [bStr, payout] of Object.entries(payoutMap)) {
       const barrier = Number(bStr);
+
+      // STRICT: only allow the one permitted barrier per mode
+      const allowedBarrier = inRecovery ? RECOVERY_BARRIERS[contractType] : NORMAL_BARRIERS[contractType];
+      if (barrier !== allowedBarrier) continue;
+
       const winP = winProbForBarrier(contractType, barrier, analysis);
       const ev = winP * (payout - 1) - (1 - winP);
       const edge = winP - (1 / payout);
       const tier = DIGIT_TIERS[contractType]?.[barrier] ?? 2;
 
-      // Tier 0 (OVER 0, UNDER 9): skip — house edge is extreme
-      if (tier === 0) continue;
-      // Hard-blocked barriers: OVER 7/8, UNDER 1/2 — too risky
-      if (contractType === "DIGITOVER" && (barrier === 7 || barrier === 8)) continue;
-      if (contractType === "DIGITUNDER" && (barrier === 1 || barrier === 2)) continue;
-
-      // Recovery mode: tier-2 barriers (OVER 4 / UNDER 5) win the ranking so the
-      // engine switches from the normal OVER 2/UNDER 8 to a higher-payout recovery
-      // barrier. Non-recovery: tier-1 barriers (OVER 2/UNDER 8) are boosted for edge.
-      let adjustedEvScore: number;
-      if (inRecovery) {
-        // In recovery: strongly prefer tier 2 (OVER 4/UNDER 5, ~1.50x payout)
-        adjustedEvScore = tier === 2 ? ev * 5 : tier === 1 ? ev * 1 : ev * 0.5;
-      } else {
-        // Normal: prefer tier 1 (OVER 2/UNDER 8) when they have positive edge
-        const tierMultiplier = tier === 1 ? (edge > 0 ? 10 : 1) : tier === 2 ? 2 : 0.5;
-        adjustedEvScore = ev * tierMultiplier;
-      }
+      // In recovery use the higher edge score to signal urgency to the coordinator
+      const adjustedEvScore = inRecovery ? ev * 5 : edge > 0 ? ev * 10 : ev;
 
       options.push({ contractType, barrier, winProbability: winP, payout, expectedValue: ev, edge, tier, adjustedEvScore });
     }
@@ -308,7 +313,7 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
   }
 
   const analysis = analyzeDigits(digits);
-  const barrierOptions = buildBarrierOptions(analysis);
+  const barrierOptions = buildBarrierOptions(analysis, ctx.inRecovery ?? false);
   const evenAnalysis = analyzeEvenOdd(digits);
 
   // Sort by adjustedEvScore

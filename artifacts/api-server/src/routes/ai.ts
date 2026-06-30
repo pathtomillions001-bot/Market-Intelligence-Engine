@@ -54,6 +54,12 @@ let globalRecovery: GlobalRecoveryState = {
   recoveredFamilies: [],
 };
 
+// ── Family rotation hint ───────────────────────────────────────────────────────
+// Tracks which contract family should be preferred in the NEXT scan so that
+// Rise/Fall and Even/Odd get executed in rotation alongside Over/Under, rather
+// than Over/Under always winning the quality tournament.
+let scheduledFamilyHint: string | null = null;
+
 // Groups: 0=Volatility 1s (1HZ*), 1=Volatility (R_*), 2=Jump (JD*), 3=Bull/Bear
 const GROUP_NAMES = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"];
 
@@ -402,6 +408,7 @@ async function runAutonomousLoop() {
                   const famCtx: ScanContext = {
                     ...baseCtx,
                     settings: { ...baseCtx.settings, preferredContractTypes: fam.types },
+                    inRecovery: globalRecovery.isActive,
                   };
                   const output = await withTimeout(runCoordinator(famCtx), SCAN_TIMEOUT_MS, null as any);
                   if (!output) return null;
@@ -470,10 +477,25 @@ async function runAutonomousLoop() {
     )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
 
     // ── Phase 2: Tournament — pick the overall winner ────────────────────────
-    // Among tradeable group winners, pick the highest qualityScore.
+    // Among tradeable group winners, apply family rotation so Rise/Fall and
+    // Even/Odd get executed in turn alongside Over/Under rather than always
+    // losing the quality tournament to higher-scoring digit barriers.
     const tradeableWinners = groupWinners.filter(w => w.output.shouldTrade);
-    const bestResult: (ScanResult & { groupName: string }) | null = tradeableWinners.length > 0
-      ? tradeableWinners.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
+
+    // Determine which families actually have tradeable results this scan
+    const enabledFamiliesThisScan = new Set(tradeableWinners.map(w => w.family));
+    const multipleFamily = enabledFamiliesThisScan.size > 1;
+
+    // When multiple families are active, narrow the pool to the scheduled family
+    // so each family gets executed roughly in turn.
+    let tournamentPool = tradeableWinners;
+    if (multipleFamily && scheduledFamilyHint && enabledFamiliesThisScan.has(scheduledFamilyHint)) {
+      const hinted = tradeableWinners.filter(w => w.family === scheduledFamilyHint);
+      if (hinted.length > 0) tournamentPool = hinted;
+    }
+
+    const bestResult: (ScanResult & { groupName: string }) | null = tournamentPool.length > 0
+      ? tournamentPool.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
       : null;
 
     if (bestResult) {
@@ -535,11 +557,30 @@ async function runAutonomousLoop() {
       return;
     }
 
+    // ── Advance family rotation hint for the NEXT scan ───────────────────────
+    {
+      const allEnabledFamilies = [
+        ...(dirTypes.length > 0 ? ["direction"] : []),
+        ...(ouTypes.length > 0 ? ["overunder"] : []),
+        ...(eoTypes.length > 0 ? ["evenodd"] : []),
+      ];
+      if (allEnabledFamilies.length > 1) {
+        const currentIdx = allEnabledFamilies.indexOf(bestResult.family);
+        scheduledFamilyHint = allEnabledFamilies[(currentIdx + 1) % allEnabledFamilies.length];
+      } else {
+        scheduledFamilyHint = null;
+      }
+    }
+
     // ── Trade execution ──────────────────────────────────────────────────────
     const rec = output.recommendation;
     const effectiveContractType = rec.product;
     const effectiveBarrier = rec.barrier;
-    const duration = rec.duration;
+    // Enforce minimum 5 ticks for DIGITEVEN/DIGITODD — Deriv rejects < 5t for these types
+    const rawDuration = rec.duration ?? 5;
+    const duration = (effectiveContractType === "DIGITEVEN" || effectiveContractType === "DIGITODD")
+      ? Math.max(5, rawDuration)
+      : rawDuration;
 
     // ── Recovery stake override ───────────────────────────────────────────────
     // Over/Under (DIGITOVER/DIGITUNDER): digit-agent switches to Tier 2 barriers
@@ -642,10 +683,12 @@ async function runAutonomousLoop() {
       });
 
       try {
+        // Deriv requires stake with max 2 decimal places
+        const liveStake = Math.round(stake * 100) / 100;
         const liveResult = await executeLiveTrade(token, {
           symbol: bestMarket.symbol,
           contractType: effectiveContractType,
-          stake,
+          stake: liveStake,
           duration,
           durationUnit: "t",
           currency: account?.currency ?? "USD",

@@ -201,7 +201,7 @@ export function runEVCalculatorAgent(
     allEV.push(...evForDirectionProducts(dirResult, payouts, stake, preferred));
   }
 
-  if (preferred.some((t) => t.startsWith("DIGIT")) && barrierOptions.length > 0) {
+  if (preferred.some((t) => t === "DIGITOVER" || t === "DIGITUNDER") && barrierOptions.length > 0) {
     allEV.push(...evForDigitProducts(barrierOptions, stake));
   }
 
@@ -263,10 +263,12 @@ export function runEVCalculatorAgent(
   };
 }
 
-/** Compute initial stake based on Kelly criterion and risk settings */
+/** Compute initial stake based on risk settings. Guards against NaN/zero maxRiskPerTrade. */
 export function computeStake(ctx: ScanContext): number {
   const { balance, settings } = ctx;
-  const maxRisk = settings.maxRiskPerTrade / 100;
+  const riskPct = Number(settings.maxRiskPerTrade);
+  const effectiveRiskPct = (!isFinite(riskPct) || riskPct <= 0) ? 1 : riskPct;
+  const maxRisk = effectiveRiskPct / 100;
   const riskMult = settings.riskProfile === "conservative" ? 0.4
     : settings.riskProfile === "aggressive" ? 1.2 : 0.7;
   const rawStake = balance * maxRisk * riskMult;

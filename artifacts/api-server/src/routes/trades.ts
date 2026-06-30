@@ -308,11 +308,13 @@ router.post("/", async (req, res): Promise<void> => {
     }).returning();
 
     try {
-      logger.info({ symbol, contractType, stake, barrier }, "Executing live manual trade on Deriv");
+      // Deriv requires stake with max 2 decimal places
+      const liveStake = Math.round(stake * 100) / 100;
+      logger.info({ symbol, contractType, stake: liveStake, barrier }, "Executing live manual trade on Deriv");
       const liveResult = await executeLiveTrade(token!, {
         symbol,
         contractType,
-        stake,
+        stake: liveStake,
         duration: tradeDuration,
         durationUnit: durationUnit ?? "t",
         currency,

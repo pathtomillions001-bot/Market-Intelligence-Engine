@@ -103,6 +103,7 @@ export interface ScanContext {
   daily: DailyStats;
   token: string | null;
   currency: string;
+  inRecovery?: boolean;  // global cross-market recovery mode active
 }
 
 // ── Full coordinator output ───────────────────────────────────────────────────

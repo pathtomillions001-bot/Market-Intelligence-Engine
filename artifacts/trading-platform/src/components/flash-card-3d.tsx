@@ -168,10 +168,16 @@ export function MarketOpportunityFlashCard({
     : (contractType.includes("DIGIT") && rec?.digitBarrier != null ? rec.digitBarrier : undefined);
 
   // Execute is active:
-  // - Normal mode: AI says shouldTrade=true AND recommended type matches selected group
+  // - Normal mode: there is a recommendation for the selected group (user can always execute;
+  //   AI shouldTrade flag is shown visually but no longer gates the button so the user can
+  //   override the AI's "wait" signal with a manual trade when they see a good opportunity)
   // - Recovery mode: we have a recovery option with positive EV
-  const isGroupMatch = (selectedGroup.types as readonly string[]).includes(rec?.contractType ?? "");
-  const normalShouldTrade = !!(rec?.shouldTrade && isGroupMatch);
+  const isGroupMatch = (selectedGroup.types as readonly string[]).includes(
+    rec?.contractType ?? bestGroupMarket?.recommendedContractType ?? ""
+  );
+  const hasGroupRec = isGroupMatch && !!rec;
+  const aiSaysTrade = !!(rec?.shouldTrade && isGroupMatch);
+  const normalShouldTrade = hasGroupRec;
   const recoveryShouldTrade = !!(recoveryActive && bestRecoveryOption && (bestRecoveryOption.expectedValue ?? 0) > 0);
   const shouldTrade = recoveryActive ? recoveryShouldTrade : normalShouldTrade;
 
@@ -365,10 +371,20 @@ export function MarketOpportunityFlashCard({
             >
               {isExecuting ? (
                 <span className="text-[8px] leading-tight text-center">EXEC…</span>
-              ) : shouldTrade ? (
+              ) : recoveryActive ? (
                 <>
-                  <span className="text-lg leading-none">{recoveryActive ? "🔄" : "⚡"}</span>
-                  <span className="text-[8px] mt-0.5 uppercase tracking-widest">{recoveryActive ? "Recover" : "Execute"}</span>
+                  <span className="text-lg leading-none">🔄</span>
+                  <span className="text-[8px] mt-0.5 uppercase tracking-widest">Recover</span>
+                </>
+              ) : aiSaysTrade ? (
+                <>
+                  <span className="text-lg leading-none">⚡</span>
+                  <span className="text-[8px] mt-0.5 uppercase tracking-widest">Execute</span>
+                </>
+              ) : hasGroupRec ? (
+                <>
+                  <span className="text-lg leading-none">▶</span>
+                  <span className="text-[8px] mt-0.5 uppercase tracking-widest">Manual</span>
                 </>
               ) : (
                 <>

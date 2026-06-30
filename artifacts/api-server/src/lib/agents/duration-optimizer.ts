@@ -178,9 +178,11 @@ export function selectOptimalDuration(
   contractType: string,
 ): OptimalDuration {
   // Digit contracts: only consider 3t or 5t — longer durations add exposure
-  // without improving the digit distribution odds (outcome depends on final tick only)
+  // without improving the digit distribution odds (outcome depends on final tick only).
+  // DIGITEVEN and DIGITODD require minimum 5 ticks on Deriv — never use 3t for them.
   const isDigit = contractType.startsWith("DIGIT");
-  const candidates = isDigit ? DIGIT_CANDIDATE_DURATIONS : CANDIDATE_DURATIONS;
+  const isEvenOdd = contractType === "DIGITEVEN" || contractType === "DIGITODD";
+  const candidates = !isDigit ? CANDIDATE_DURATIONS : isEvenOdd ? [5] : DIGIT_CANDIDATE_DURATIONS;
 
   const allScores: DurationScore[] = candidates.map((d) =>
     scoreDuration(d, features, regime, contractType, ctx.symbol)
