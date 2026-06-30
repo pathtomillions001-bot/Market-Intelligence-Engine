@@ -4,6 +4,7 @@ import { settingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { UpdateSettingsBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
+import { broadcastSSE } from "../lib/sse";
 
 const router = Router();
 
@@ -97,6 +98,12 @@ router.put("/", async (req, res): Promise<void> => {
       .returning();
 
     logger.info({ id: updated.id }, "Settings saved successfully");
+    // Notify all connected dashboard clients so they immediately refresh
+    // market data, engine status, and contract-type displays without a page reload.
+    broadcastSSE("settings_updated", {
+      preferredContractTypes: updated.preferredContractTypes.split(",").filter(Boolean),
+      ts: Date.now(),
+    });
     res.json(formatSettings(updated));
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useExecuteTrade } from "@workspace/api-client-react";
+import { useExecuteTrade, useGetSettings } from "@workspace/api-client-react";
 import { toast } from "sonner";
 import { Zap, TrendingUp, TrendingDown, ChevronDown, ChevronUp, AlertTriangle } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -76,14 +76,31 @@ export function MarketOpportunityFlashCard({
 
   const executeTrade = useExecuteTrade();
 
+  // Read user's enabled contract families from settings
+  const { data: settings } = useGetSettings();
+  const preferredTypes: string[] = (settings as any)?.preferredContractTypes ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
+  // Only show tabs for enabled groups; fall back to all groups if nothing is active
+  const enabledGroups = CONTRACT_GROUPS.filter(g =>
+    (g.types as readonly string[]).some(t => preferredTypes.includes(t))
+  );
+  const visibleGroups = enabledGroups.length > 0 ? enabledGroups : [...CONTRACT_GROUPS];
+
+  // Auto-reset selectedGroupIdx when enabled groups change (e.g. user disables Rise/Fall)
+  const clampedIdx = Math.min(selectedGroupIdx, visibleGroups.length - 1);
+  useEffect(() => {
+    if (selectedGroupIdx !== clampedIdx) setSelectedGroupIdx(clampedIdx);
+  }, [clampedIdx, selectedGroupIdx]);
+
   // Recovery mode: activated when losing streak is ≥ 2 consecutive losses and user hasn't dismissed it
   const isLosingStreak = currentStreak <= -2;
   const recoveryActive = isLosingStreak && !recoveryDismissed;
 
-  const selectedGroup = recoveryActive
-    ? CONTRACT_GROUPS[1] // Override to Over/Under — where recovery (tier-2) barriers live
-    : CONTRACT_GROUPS[selectedGroupIdx];
-  const effectiveGroupIdx = recoveryActive ? 1 : selectedGroupIdx;
+  // In recovery, default to Over/Under if it's enabled; otherwise use first visible group
+  const recoveryGroup = visibleGroups.find(g => g.short === "O/U") ?? visibleGroups[0];
+  const selectedGroup = recoveryActive ? recoveryGroup : visibleGroups[clampedIdx];
+  const effectiveGroupIdx = recoveryActive
+    ? CONTRACT_GROUPS.findIndex(g => g.short === recoveryGroup.short)
+    : CONTRACT_GROUPS.findIndex(g => g.short === selectedGroup.short);
 
   // All markets ranked by quality score from background scanner
   const { data: allMarkets } = useQuery<any[]>({
@@ -253,19 +270,19 @@ export function MarketOpportunityFlashCard({
             {recoveryActive ? `Recovery Mode — ${Math.abs(currentStreak)} Loss Streak` : "Quick Strike"}
           </span>
 
-          {/* Contract group tab selector — hidden in recovery mode */}
-          {!recoveryActive && (
+          {/* Contract group tab selector — only shows enabled families; hidden in recovery mode */}
+          {!recoveryActive && visibleGroups.length > 0 && (
             <div className="ml-auto flex items-center bg-black/40 rounded-lg p-0.5 gap-0.5">
-              {CONTRACT_GROUPS.map((g, i) => (
+              {visibleGroups.map((g, i) => (
                 <button
                   key={g.short}
                   onClick={() => { setSelectedGroupIdx(i); setShowMarkets(false); }}
                   className={`text-[8px] font-mono font-bold px-2 py-1 rounded transition-all ${
-                    i === selectedGroupIdx
+                    i === clampedIdx
                       ? "text-primary border border-primary/50"
                       : "text-muted-foreground hover:text-foreground"
                   }`}
-                  style={i === selectedGroupIdx ? { background: `${contractColor(g.types[0])}20` } : {}}
+                  style={i === clampedIdx ? { background: `${contractColor(g.types[0])}20` } : {}}
                 >
                   {g.short}
                 </button>

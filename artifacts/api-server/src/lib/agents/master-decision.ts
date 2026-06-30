@@ -200,16 +200,25 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
       reasoning: `${product}${bestEV.barrier !== undefined ? ` barrier=${bestEV.barrier}` : ""}: EV=${(bestEV.expectedValue * 100).toFixed(1)}% per $1 stake, P(win)=${(bestEV.winProbability * 100).toFixed(1)}%, payout ${bestEV.payoutMultiplier}x. Duration: ${tradeDuration}t.`,
     };
   } else {
-    // Fallback when no EV found — use direction signal but mark as no-trade
+    // Fallback when no EV found — respect preferredContractTypes; NEVER use CALL/PUT
+    // if the user has disabled direction types.
     const dirAgent = agents["direction"];
     const probUpLocal = dirAgent?.data?.["probUp"] as number ?? 0.5;
-    const product: ProductType = probUpLocal >= 0.5 ? "CALL" : "PUT";
+    const preferred = ctx.settings.preferredContractTypes;
+    const wantDir = preferred.some((t) => ["CALL", "PUT", "RISE", "FALL"].includes(t));
+    const wantOU  = preferred.some((t) => t === "DIGITOVER" || t === "DIGITUNDER");
+    const wantEO  = preferred.some((t) => t === "DIGITEVEN" || t === "DIGITODD");
+    const product: ProductType = wantDir
+      ? (probUpLocal >= 0.5 ? "CALL" : "PUT")
+      : wantOU  ? "DIGITOVER"
+      : wantEO  ? "DIGITEVEN"
+      : (probUpLocal >= 0.5 ? "CALL" : "PUT");   // absolute last resort
     recommendation = {
       product,
       winProbability: Math.round(probUpLocal * 100),
-      payoutMultiplier: 1.91,
+      payoutMultiplier: wantDir ? 1.91 : 1.95,
       expectedValue: 0,
-      breakevenWinRate: 52.4,
+      breakevenWinRate: wantDir ? 52.4 : 51.3,
       duration: tradeDuration,
       stake: riskDecision.recommendedStake,
       reasoning: "No positive-EV opportunity — recommend waiting.",

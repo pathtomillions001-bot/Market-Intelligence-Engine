@@ -242,7 +242,7 @@ function ParallelGroupScanner({ groups, isScanning, winner }: {
                   </div>
                   <div className="text-[8px] text-muted-foreground font-mono">Scanning…</div>
                 </div>
-              ) : result && result !== "scanning" ? (
+              ) : result && typeof result === "object" ? (
                 <div className="space-y-1">
                   <div className="text-[10px] font-semibold leading-tight truncate">{result.bestDisplayName}</div>
                   <div className="text-[8px] font-mono text-muted-foreground">{result.bestSymbol}</div>
@@ -354,6 +354,21 @@ export default function Dashboard() {
       queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
       queryClient.invalidateQueries({ queryKey: ["getDailySummary"] });
       setPendingResults([]);
+    });
+
+    // When the user saves Settings, immediately refetch all market + engine data
+    // so the dashboard reflects the new contract types without needing a page reload.
+    es.addEventListener("settings_updated", () => {
+      // Invalidate every query that depends on settings / preferredContractTypes
+      queryClient.invalidateQueries({ queryKey: ["markets-top-signals"] });
+      queryClient.invalidateQueries({ queryKey: ["markets", "ranked-all"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/markets/top"] });
+      queryClient.invalidateQueries({ queryKey: ["getAiEngineStatus"] });
+      queryClient.invalidateQueries({ queryKey: ["getSettings"] });
+      // Reset group scanner display — it shows stale labels from old settings
+      setGroupScans({});
+      setIsScanningGroups(false);
+      setTournamentWinner(null);
     });
 
     return () => { es.close(); sseRef.current = null; };

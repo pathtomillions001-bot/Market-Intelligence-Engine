@@ -21,6 +21,8 @@ interface CachedOutput {
 
 const analysisCache = new Map<string, CachedOutput>();
 let isScanning = false;
+// Track last known preferred types — clear cache when user changes settings
+let lastPreferredKey = "";
 
 // ── Settings builders ─────────────────────────────────────────────────────────
 
@@ -99,6 +101,14 @@ async function analyzeAllMarkets() {
     const tradingSettings = buildTradingSettings(settings, preferred);
     const daily = await getDailyStats();
     const now = new Date();
+
+    // If preferred contract types changed (user updated settings), clear the cache
+    // so all markets are re-evaluated with the new types immediately.
+    const prefKey = [...preferred].sort().join(",");
+    if (prefKey !== lastPreferredKey) {
+      analysisCache.clear();
+      lastPreferredKey = prefKey;
+    }
 
     // Only re-analyze markets stale (> 15s old)
     const staleMarkets = DERIV_MARKETS.filter((m) => {

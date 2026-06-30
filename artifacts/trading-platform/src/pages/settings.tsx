@@ -148,8 +148,17 @@ export default function Settings() {
   const handleSave = () => {
     updateSettings.mutate({ data: { ...form } as any }, {
       onSuccess: (saved: any) => {
+        // Update settings cache directly so the toggles reflect immediately
+        queryClient.setQueryData(["getSettings"], saved);
         queryClient.setQueryData(["settings"], saved);
-        toast.success("Settings saved successfully");
+        // Invalidate all data that depends on settings (contract types, market rankings, etc.)
+        // The server will also broadcast SSE "settings_updated" to all open tabs/dashboard
+        queryClient.invalidateQueries({ queryKey: ["getSettings"] });
+        queryClient.invalidateQueries({ queryKey: ["markets-top-signals"] });
+        queryClient.invalidateQueries({ queryKey: ["markets", "ranked-all"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/markets/top"] });
+        queryClient.invalidateQueries({ queryKey: ["getAiEngineStatus"] });
+        toast.success("Settings saved — engine and market data updated");
       },
       onError: (err: any) => {
         const msg = err?.data?.error || err?.message || "Failed to save settings";

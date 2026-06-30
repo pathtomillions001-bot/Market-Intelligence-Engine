@@ -119,9 +119,15 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
 
   // ── Stage 2.5: Duration optimization ─────────────────────────────────────
   // Select the optimal tick duration for the most likely contract type.
-  const candidateProduct = wantDigit && hasDigitEdge
+  // candidateProduct respects preferredContractTypes — never uses CALL/PUT when
+  // the user has disabled direction types.
+  const candidateProduct = wantDigit
     ? (digitResult?.bestOption?.contractType ?? "DIGITOVER")
-    : (wantDirection ? (dirResult.direction === "up" ? "CALL" : "PUT") : "CALL");
+    : wantDirection
+      ? (dirResult.direction === "up" ? "CALL" : "PUT")
+      : wantEvenOdd
+        ? "DIGITEVEN"
+        : "DIGITOVER";   // safe default — will be gate-rejected anyway
 
   const durationOpt = selectOptimalDuration(ctx, features, regime, candidateProduct);
   const optimizedDuration = durationOpt.duration;
@@ -131,10 +137,14 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   const payoutStake = computeStake(ctx);
 
   // ── Stage 3: EV calculation (needs direction + digit + optimal duration) ──
+  // Include a contract family in EV fetch ONLY when the user has it enabled.
+  // Critically: wantDigit no longer requires hasDigitEdge — always evaluate
+  // DIGITOVER/DIGITUNDER EV when the user has enabled Over/Under, so the master
+  // decision can pick a digit trade even in low-edge conditions.
   let livePayouts: Record<string, number> | null = null;
   const contractTypesToFetch = [
     ...(wantDirection ? ["CALL", "PUT"] : []),
-    ...(wantDigit && hasDigitEdge ? ["DIGITOVER", "DIGITUNDER"] : []),
+    ...(wantDigit ? ["DIGITOVER", "DIGITUNDER"] : []),
     ...(wantEvenOdd ? ["DIGITEVEN", "DIGITODD"] : []),
   ];
   if (contractTypesToFetch.length > 0 && ctx.token && !ctx.settings.paperTradeMode) {
@@ -169,8 +179,14 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   );
   const bestEV = evAgent.bestEVResult;
 
-  // Determine best contract type for timing + performance lookup
-  const effectiveContractType = bestEV?.product ?? (dirResult.direction === "up" ? "CALL" : "PUT");
+  // Determine best contract type for timing + performance lookup.
+  // Never fall back to CALL/PUT when direction types are disabled.
+  const effectiveContractType = bestEV?.product ?? (
+    wantDirection ? (dirResult.direction === "up" ? "CALL" : "PUT")
+      : wantDigit ? "DIGITOVER"
+      : wantEvenOdd ? "DIGITEVEN"
+      : "DIGITOVER"
+  );
   const effectiveBarrier = bestEV?.barrier;
 
   // ── Stage 4: Risk + Timing + Performance (parallel) ──────────────────────
