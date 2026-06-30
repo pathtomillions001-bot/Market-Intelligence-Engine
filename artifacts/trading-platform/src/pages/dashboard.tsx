@@ -254,7 +254,7 @@ export default function Dashboard() {
         </Card>
 
         <div className="md:col-span-2">
-          <MarketOpportunityFlashCard />
+          <MarketOpportunityFlashCard currentStreak={stats?.currentStreak ?? 0} />
         </div>
       </div>
 

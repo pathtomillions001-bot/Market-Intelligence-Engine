@@ -249,37 +249,52 @@ export function analyzeEvenOdd(digits: number[]): EvenOddStats {
   let recommendEven = false;
   let recommendOdd = false;
 
-  // Signal 1: Streak reversal — after 4+ consecutive same parity, bet opposite
+  // Signal 1: Streak reversal — after 3+ consecutive same parity, bet opposite
   const streakReversalSignal: "even" | "odd" | "neutral" =
     currentStreak >= 5
       ? (currentStreakType === "even" ? "odd" : "even")   // strong reversal
-      : currentStreak >= 4
+      : currentStreak >= 3
         ? (currentStreakType === "even" ? "odd" : "even") // moderate reversal
         : "neutral";
 
-  // Signal 2: Markov transition bias (clear probability skew)
-  const markovBias: "even" | "odd" | "neutral" = markovSignal;
+  // Signal 2: Markov transition bias (lowered threshold for earlier signal)
+  const markovBias: "even" | "odd" | "neutral" =
+    markovEvenProb > 0.52 ? "even" : markovEvenProb < 0.48 ? "odd" : "neutral";
 
   // Signal 3: Chi-square confirmed long-run bias (100+ ticks)
   const chiSignal: "even" | "odd" | "neutral" = chiSquareSignificant
     ? (evenPct > 50 ? "even" : "odd")
     : "neutral";
 
-  // Signal 4: Recent 20-tick pattern — avoid chasing frequent side
-  // If recent 20 ticks heavily favor one side, the other is likely due
+  // Signal 4: Recent 20-tick pattern — lowered threshold to 60%
+  // If recent 20 ticks favor one side, the other is likely due
   const recentReversalSignal: "even" | "odd" | "neutral" =
-    recentEvenPct > 65 ? "odd" :    // even over-represented → bet odd
-    recentOddPct  > 65 ? "even" :   // odd over-represented → bet even
+    recentEvenPct > 60 ? "odd" :    // even over-represented → bet odd
+    recentOddPct  > 60 ? "even" :   // odd over-represented → bet even
     "neutral";
 
-  // Aggregate: need at least 2 signals pointing the same way
-  const allSignals = [streakReversalSignal, markovBias, chiSignal, recentReversalSignal];
+  // Signal 5: Recent 50-tick pattern
+  const mid50Signal: "even" | "odd" | "neutral" =
+    recent50EvenPct > 57 ? "odd" :
+    recent50OddPct  > 57 ? "even" :
+    "neutral";
+
+  // Aggregate: need at least 1 strong signal OR 2 agreeing signals
+  const allSignals = [streakReversalSignal, markovBias, chiSignal, recentReversalSignal, mid50Signal];
   const evenVotes = allSignals.filter((s) => s === "even").length;
   const oddVotes  = allSignals.filter((s) => s === "odd").length;
 
-  if (evenVotes >= 2 && evenVotes > oddVotes) {
+  // Single very strong signals (streak ≥5 or markov strongly skewed) can fire alone
+  const strongEven = currentStreak >= 5 && currentStreakType === "odd"
+    || markovEvenProb > 0.58
+    || (recentEvenPct > 65 && mid50Signal === "odd");
+  const strongOdd  = currentStreak >= 5 && currentStreakType === "even"
+    || markovEvenProb < 0.42
+    || (recentOddPct > 65 && mid50Signal === "even");
+
+  if ((evenVotes >= 2 || strongEven) && evenVotes >= oddVotes) {
     bias = "even"; recommendEven = true;
-  } else if (oddVotes >= 2 && oddVotes > evenVotes) {
+  } else if ((oddVotes >= 2 || strongOdd) && oddVotes >= evenVotes) {
     bias = "odd"; recommendOdd = true;
   }
 

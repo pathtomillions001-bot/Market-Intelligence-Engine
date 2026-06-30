@@ -167,7 +167,7 @@ const FEATURES = [
 
 export default function LandingPage({ onEnter }: { onEnter: () => void }) {
   const handleDeriv = () => {
-    window.location.href = "https://oauth.deriv.com/oauth2/authorize?app_id=1089&l=EN&brand=deriv";
+    onEnter();
   };
 
   return (
