@@ -323,22 +323,52 @@ async function runAutonomousLoop() {
     const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
     tradesExecutedToday = closedToday.length;
 
-    // Derive consecutive losses from the live journal (DB) — this is the ground truth.
-    // The engine ONLY triggers a stop when the journal actually reflects the threshold.
-    // sessionLossCount is kept in sync with this value each iteration so the UI display
-    // always matches what the journal shows (no phantom "ghost" counts from past sessions).
-    const sortedByTime = [...closedToday].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    let journalConsecutiveLosses = 0;
-    for (const t of sortedByTime) { if (t.status === "lost") journalConsecutiveLosses++; else break; }
-    // Mirror in-memory counter to journal — so status endpoint always matches journal reality
+    // ── Ground-truth consecutive-loss and daily P&L ──────────────────────────
+    // When a Deriv token is connected, the Deriv profit_table (journalManager) is
+    // ALWAYS the authoritative source of consecutive losses and daily P&L.
+    // The local DB can have stale "lost" records from timed-out contract checks
+    // that Deriv actually settled as wins — those cause false cooldown triggers.
+    // We only fall back to local DB when no Deriv data is available (paper mode).
+    const derivTxns = token ? journalManager.getCached() : [];
+    const todayMidnightSec = today.getTime() / 1000; // Deriv uses Unix seconds
+    const derivTodayTxns = derivTxns.filter(
+      (t: any) => Number(t.sell_time ?? t.purchase_time ?? 0) >= todayMidnightSec,
+    );
+
+    let journalConsecutiveLosses: number;
+    let resolvedDailyProfit: number;
+
+    if (derivTodayTxns.length > 0) {
+      // Deriv profit_table is returned DESC (most recent first) — iterate to count
+      // consecutive losses at the head of the list.  A winning trade breaks the streak.
+      let consecLosses = 0;
+      for (const t of derivTodayTxns) {
+        if (Number(t.profit ?? 0) < 0) consecLosses++;
+        else break;
+      }
+      journalConsecutiveLosses = consecLosses;
+      resolvedDailyProfit = derivTodayTxns.reduce(
+        (s: number, t: any) => s + Number(t.profit ?? 0), 0,
+      );
+    } else {
+      // No Deriv journal data yet (paper mode or token not connected) — use local DB
+      const sortedByTime = [...closedToday].sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      );
+      journalConsecutiveLosses = 0;
+      for (const t of sortedByTime) { if (t.status === "lost") journalConsecutiveLosses++; else break; }
+      resolvedDailyProfit = closedToday.reduce((s, t) => s + Number(t.profit ?? 0), 0);
+    }
+
+    // Mirror in-memory counter so the status endpoint always matches ground truth
     sessionLossCount = journalConsecutiveLosses;
 
     const daily = buildDailyStats(closedToday, journalConsecutiveLosses);
-    const todayProfit = daily.profit;
+    // Override daily.profit with the resolved value (Deriv journal when available)
+    daily.profit = resolvedDailyProfit;
+    const todayProfit = resolvedDailyProfit;
 
-    // Hard stop conditions: ONLY triggered by journal-verified P&L and loss streak.
-    // Both daily.profit and daily.consecutiveLosses come from the actual trade records —
-    // never from in-memory counters that could drift due to errors or restarts.
+    // Hard stops — only triggered by Deriv-verified P&L and loss streak.
     if (todayProfit <= -tradingSettings.dailyLossLimit) { stopEngine(`Daily loss limit $${tradingSettings.dailyLossLimit} reached`); return; }
     if (todayProfit >= tradingSettings.dailyTarget) { stopEngine(`Daily target $${tradingSettings.dailyTarget} reached!`); return; }
     if (daily.consecutiveLosses >= tradingSettings.consecutiveLossLimit) {
