@@ -13,7 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
 import { Link } from "wouter";
-import { TrendingUp, Activity, AlertTriangle, Target, Clock, RefreshCw, TimerOff, Zap, ArrowRight } from "lucide-react";
+import { TrendingUp, Activity, AlertTriangle, Target, Clock, RefreshCw, TimerOff, Zap, ArrowRight, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
 import { MarketOpportunityFlashCard } from "@/components/flash-card-3d";
 
@@ -558,6 +558,56 @@ export default function Dashboard() {
           )}
         </div>
       </header>
+
+      {/* Recovery status card — shown when recovery mode is active */}
+      <AnimatePresence>
+        {(() => {
+          const rec = (engine as any)?.recoveryMode;
+          if (!rec?.isActive) return null;
+          const ouStep: number = rec.overunderStep ?? 0;
+          const dirStep: number = rec.directionStep ?? 0;
+          const families: string[] = rec.activeFamilies ?? [];
+          const familyLabels: Record<string, string> = { overunder: "Over/Under", direction: "Rise/Fall", evenodd: "Even/Odd" };
+          return (
+            <motion.div
+              key="recovery-card"
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              className="flex items-start gap-4 p-4 rounded-xl bg-orange-500/8 border border-orange-500/30"
+            >
+              <ShieldAlert className="w-4 h-4 text-orange-400 flex-shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm font-medium text-orange-300">Recovery Mode Active</span>
+                  {families.map(f => (
+                    <Badge key={f} variant="outline" className="text-[10px] border-orange-500/40 text-orange-400 py-0 h-4">
+                      {familyLabels[f] ?? f}
+                    </Badge>
+                  ))}
+                </div>
+                <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-xs text-muted-foreground font-mono">
+                  <span>
+                    Still to recover: <span className="text-orange-300 font-semibold">${rec.unrecoveredAmount.toFixed(2)}</span>
+                  </span>
+                  {families.includes("overunder") && (
+                    <span>OVER/UNDER step: <span className="text-orange-300">{ouStep + 1}</span></span>
+                  )}
+                  {families.includes("direction") && (
+                    <span>Rise/Fall step: <span className="text-orange-300">{dirStep + 1}</span></span>
+                  )}
+                  {families.includes("evenodd") && (
+                    <span>Even/Odd: <span className="text-orange-300">flat ×</span></span>
+                  )}
+                </div>
+                <div className="mt-1 text-[10px] text-orange-500/60 font-mono uppercase tracking-wider">
+                  {families.includes("overunder") ? "OVER 4 / UNDER 5 barriers" : "normal barriers"} · stake compounded until losses covered
+                </div>
+              </div>
+            </motion.div>
+          );
+        })()}
+      </AnimatePresence>
 
       {/* Cooldown banner — shown when engine is in cooldown after consecutive losses */}
       <AnimatePresence>
