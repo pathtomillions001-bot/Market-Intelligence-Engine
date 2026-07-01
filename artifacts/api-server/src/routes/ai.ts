@@ -684,44 +684,25 @@ async function runAutonomousLoop() {
       : rawDuration;
 
     // ── Recovery stake override ───────────────────────────────────────────────
-    // ALL contract families use a simple 1.14× geometric multiplier per consecutive
-    // recovery loss. This prevents runaway stake explosion that occurs when trying
-    // to recover the entire accumulated loss in one trade.
-    //
-    // EVEN/ODD & RISE/FALL (payout ~1.95×, profit ~0.95×):
-    //   1.14 × stake × 0.95 ≈ 1.08 × original stake → covers the loss with a buffer.
-    //   1.14^n keeps stakes tightly controlled even over many consecutive losses.
-    //
-    // OVER/UNDER (OVER 4 / UNDER 5 in recovery, payout ~2.15×, profit ~1.15×):
-    //   The better barrier already provides elevated payout — same 1.14× scaling applies.
-    //   No attempt to recover the full accumulated amount in a single trade.
-    //
-    // recoveryLossCount = 0 on the first recovery trade → 1.14^1 = +14% stake.
-    // recoveryLossCount = 1 on the second consecutive recovery loss → 1.14^2 = +30%.
-    // Cap at 4× base stake (Deriv max stake also applies).
+    // During recovery the stake is a flat 1.15× the normal stake — no compounding.
+    // The higher payout from OVER 4 / UNDER 5 (≈1.63×) combined with the slight
+    // stake bump means each recovery WIN chips away at the unrecovered amount until
+    // it reaches zero, at which point the engine returns to OVER 2 / UNDER 7.
+    // Recovery LOSSES simply add to the unrecovered total; stake stays at 1.15× normal.
     let stake = rec.stake;
     if (globalRecovery.isActive) {
-      const n = globalRecovery.recoveryLossCount; // consecutive losses DURING recovery
-      // recoveryLossCount is 0 for the first recovery trade, so exponent = n+1 → 1.14×.
-      // Each subsequent recovery loss adds another 1.14× factor.
-      const scaleMult = Math.pow(1.14, n + 1);
-      // Hard cap: never exceed 4× the normal stake to limit downside
-      const cappedMult = Math.min(scaleMult, 4.0);
-      const recoveryStake = Math.round(rec.stake * cappedMult * 100) / 100;
+      const recoveryStake = Math.round(rec.stake * 1.15 * 100) / 100;
       stake = Math.min(Math.max(stake, recoveryStake), tradingSettings.maxTradeStake);
-      // Ensure stake has at most 2 decimal places (Deriv requirement)
       stake = Math.round(stake * 100) / 100;
-
       logger.info({
         symbol: bestMarket.symbol,
         family: bestResult.family,
         unrecoveredAmount: globalRecovery.unrecoveredAmount,
-        recoveryLossCount: n,
-        scaleMult: cappedMult.toFixed(3),
         normalStake: rec.stake,
         recoveryStake: stake,
         contractType: effectiveContractType,
-      }, "Recovery mode: 1.14× geometric stake applied");
+        barrier: effectiveBarrier,
+      }, "Recovery mode: 1.15× stake, OVER 4 / UNDER 5 barriers active");
     }
 
     // Estimated payout for paper trades (live payout comes from Deriv result)
@@ -882,24 +863,43 @@ async function runAutonomousLoop() {
     // ── Global cross-market recovery state update ────────────────────────────
     if (won) {
       if (globalRecovery.isActive) {
-        // ANY win during recovery immediately ends recovery and returns to normal mode.
-        // We do NOT wait for the full dollar amount to be recovered — one recovery win
-        // is the user's signal to return to OVER 2 / UNDER 7 normal barriers.
-        // (The 1.14× boosted stake + higher payout already compensates for the loss in one trade.)
-        globalRecovery.isActive = false;
-        globalRecovery.unrecoveredAmount = 0;
-        globalRecovery.activeFamilies = [];
-        globalRecovery.recoveredFamilies = [];
-        globalRecovery.recoveryLossCount = 0;
-        setGlobalDigitRecovery(false, 0);
-        logger.info({ symbol: bestMarket.symbol, family: bestResult.family, profit }, "Recovery win — returning to normal mode (OVER 2 / UNDER 7)");
-        broadcastSSE("recovery_complete", { symbol: bestMarket.symbol, ts: Date.now(), profit });
+        // Recovery WIN: subtract this trade's profit from the unrecovered total.
+        // Recovery only ends when the cumulative profit from recovery trades fully
+        // covers the total losses accumulated since recovery began.
+        // e.g. lost $10 → recovery trade (OVER 4, 1.15× stake, payout 1.63×):
+        //   profit ≈ $7.26 → still $2.74 unrecovered → keep recovery mode
+        //   next recovery win ≈ $7.26 → $2.74 - $7.26 < 0 → recovery complete
+        globalRecovery.unrecoveredAmount = Math.max(0, globalRecovery.unrecoveredAmount - Math.abs(profit));
+
+        if (globalRecovery.unrecoveredAmount <= 0) {
+          // All losses recovered — return to OVER 2 / UNDER 7, normal stake
+          globalRecovery.isActive = false;
+          globalRecovery.unrecoveredAmount = 0;
+          globalRecovery.activeFamilies = [];
+          globalRecovery.recoveredFamilies = [];
+          globalRecovery.recoveryLossCount = 0;
+          setGlobalDigitRecovery(false, 0);
+          logger.info({ symbol: bestMarket.symbol, family: bestResult.family, profit },
+            "Recovery complete — losses fully recovered, returning to OVER 2 / UNDER 7");
+          broadcastSSE("recovery_complete", { symbol: bestMarket.symbol, ts: Date.now(), profit });
+        } else {
+          // Partial recovery — still owe, stay in OVER 4 / UNDER 5
+          setGlobalDigitRecovery(true, globalRecovery.unrecoveredAmount);
+          logger.info({
+            symbol: bestMarket.symbol,
+            profit,
+            remainingUnrecovered: globalRecovery.unrecoveredAmount,
+          }, "Recovery partial — continuing OVER 4 / UNDER 5 until losses covered");
+          broadcastSSE("recovery_progress", {
+            symbol: bestMarket.symbol,
+            profit,
+            remainingAmount: globalRecovery.unrecoveredAmount,
+          });
+        }
       }
     } else {
-      // Trade lost — activate/extend recovery mode
+      // Trade lost — activate recovery or add to existing unrecovered total
       const lostAmount = Math.abs(profit);
-      // If already in recovery and this is another recovery loss, increment the counter
-      // so the next trade uses a progressively higher stake
       if (globalRecovery.isActive) {
         globalRecovery.recoveryLossCount++;
       } else {
@@ -907,7 +907,6 @@ async function runAutonomousLoop() {
       }
       globalRecovery.isActive = true;
       globalRecovery.unrecoveredAmount += lostAmount;
-      // Track which families are now in recovery (all currently enabled families)
       const lostFamily = bestResult.family;
       if (!globalRecovery.activeFamilies.includes(lostFamily)) {
         globalRecovery.activeFamilies.push(lostFamily);
@@ -921,21 +920,20 @@ async function runAutonomousLoop() {
       if (eoTypes.length > 0 && !globalRecovery.activeFamilies.includes("evenodd")) {
         globalRecovery.activeFamilies.push("evenodd");
       }
-      // Sync digit-agent global recovery (switches to OVER 4 / UNDER 5)
+      // Sync digit-agent global flag → switches digit-probability to OVER 4 / UNDER 5
       setGlobalDigitRecovery(true, globalRecovery.unrecoveredAmount);
       logger.info({
         symbol: bestMarket.symbol,
         family: lostFamily,
         lostAmount,
         totalUnrecovered: globalRecovery.unrecoveredAmount,
-        activeFamilies: globalRecovery.activeFamilies,
-      }, "Recovery mode ACTIVE — switching to recovery barriers/stakes");
+      }, "Recovery mode ACTIVE — OVER 4 / UNDER 5, 1.15× stake until losses recovered");
       broadcastSSE("recovery_active", {
         symbol: bestMarket.symbol,
         lostAmount,
         totalUnrecoveredAmount: globalRecovery.unrecoveredAmount,
         activeFamilies: globalRecovery.activeFamilies,
-        mode: { overunder: "OVER 4 / UNDER 5", direction: "boosted stake", evenodd: "boosted stake" },
+        mode: { overunder: "OVER 4 / UNDER 5", direction: "1.15× stake", evenodd: "1.15× stake" },
       });
     }
 
