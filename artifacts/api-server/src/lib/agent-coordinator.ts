@@ -59,6 +59,10 @@ import { makeFinalDecision } from "./agents/master-decision";
 // ── Utilities ─────────────────────────────────────────────────────────────────
 import { analyzeDigits, getContractProposal } from "./deriv";
 import { logger } from "./logger";
+import {
+  updateDigitRecovery as digitAgentUpdateRecovery,
+  setGlobalDigitRecovery as digitAgentSetGlobalRecovery,
+} from "./agents/digit-agent";
 
 // ── Re-exports for backward compatibility ─────────────────────────────────────
 export type { CoordinatorOutput } from "./agents/types";
@@ -76,7 +80,13 @@ export function recordTradeOutcome(
   learningRecordOutcome(symbol, contractType, barrier, won, profit, stake);
 }
 
-/** Compatibility shim: calls recovery-intelligence to update per-market state */
+/**
+ * Update recovery state after every DIGIT trade outcome.
+ * Calls BOTH:
+ *  1. recovery-intelligence.ts — per-market consecutive-loss mode tracking
+ *  2. digit-agent.ts — per-symbol unrecoveredLoss + global flag used by
+ *     digit-probability.ts's isInDigitRecovery() to switch OVER/UNDER barriers
+ */
 export function updateDigitRecovery(
   symbol: string,
   contractType: string,
@@ -84,17 +94,21 @@ export function updateDigitRecovery(
   profit: number,
   stake: number,
 ): void {
-  // Build a minimal ScanContext-like object just for the recovery key
   const minCtx = {
     symbol,
     settings: { riskProfile: "moderate" as const },
   } as any;
   recordTradeOutcomeRecovery(minCtx, won, profit);
+  digitAgentUpdateRecovery(symbol, contractType, won, profit, stake);
 }
 
-/** Compatibility shim: global recovery state is managed by RecoveryIntelligenceAgent */
-export function setGlobalDigitRecovery(_state: any): void {
-  // No-op: recovery-intelligence.ts manages per-symbol state internally
+/**
+ * Sync global digit-recovery flag into digit-agent.ts so that
+ * isInDigitRecovery() reflects the autonomous loop's recovery state.
+ * Previously a no-op — now correctly sets _globalDigitRecoveryActive.
+ */
+export function setGlobalDigitRecovery(active: boolean, amount: number): void {
+  digitAgentSetGlobalRecovery(active, amount);
 }
 
 /** Compatibility shim: checks recovery-intelligence state internally */

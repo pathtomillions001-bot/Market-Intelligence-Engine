@@ -791,44 +791,30 @@ async function runAutonomousLoop() {
         await syncLiveBalance(token);
       } catch (liveErr) {
         const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
-        logger.warn({ liveErrMsg: errMsg, symbol: bestMarket.symbol, contractType: effectiveContractType }, "Live autonomous trade failed");
-        // Mark the open record as lost so it doesn't linger in the journal
+        logger.warn({ liveErrMsg: errMsg, symbol: bestMarket.symbol, contractType: effectiveContractType }, "Live autonomous trade failed — outcome unknown, marking as error");
+        // Mark as "error" (NOT "lost") — Deriv may still settle this contract as a WIN.
+        // Marking as "lost" would create a false loss that corrupts consecutive-loss count
+        // and daily P&L, causing the engine to falsely trigger loss-streak / loss-limit stops
+        // even when the actual Deriv journal shows wins.
         await db.update(tradesTable)
-          .set({ status: "lost", profit: String(-stake), payout: "0", closedAt: new Date(),
+          .set({ status: "error", profit: "0", payout: "0", closedAt: new Date(),
                  agentReasoning: `${output.reasoning} [EXECUTION FAILED: ${errMsg}]` })
           .where(eq(tradesTable.id, openTrade.id));
         broadcastSSE("trade_completed", { id: openTrade.id, symbol: bestMarket.symbol, won: false,
-          profit: (-stake).toFixed(2), contract: effectiveContractType, error: errMsg });
+          profit: "0", contract: effectiveContractType, error: errMsg });
         journalManager.forceRefresh();
 
-        // ── IMPORTANT: update all recovery state even on error ────────────────
-        // The stake was spent even if waitForContractResult timed out (Deriv
-        // may still be running the contract). Record the loss so recovery mode
-        // activates correctly and prevents back-to-back trades on Deriv.
-        const lostOnError = stake;
-        if (globalRecovery.isActive) {
-          globalRecovery.recoveryLossCount++;
-        } else {
-          globalRecovery.recoveryLossCount = 0;
-        }
-        globalRecovery.isActive = true;
-        globalRecovery.unrecoveredAmount += lostOnError;
-        if (!globalRecovery.activeFamilies.includes(bestResult.family)) {
-          globalRecovery.activeFamilies.push(bestResult.family);
-        }
-        sessionLossCount++;
-        // Set lastTradeCompletedAt so the journal-settle guard fires on the NEXT loop
-        // iteration — prevents the engine from immediately opening another trade while
-        // Deriv may still be settling the timed-out contract.
+        // Do NOT touch sessionLossCount or globalRecovery here — the contract outcome
+        // is unknown (Deriv may have settled it as won). Adding a false loss count here
+        // is what caused consecutive-loss / daily-limit false-positives.
+        // Only record the cooldown timestamp so the engine waits before re-scanning
+        // (gives Deriv time to settle the contract before another trade is attempted).
         lastTradeCompletedAt = new Date();
-        // Record cooldown so the same symbol is not re-selected immediately
         const symNowErr = new Date();
         const symLogErr = recentTradesBySymbol.get(bestMarket.symbol) ?? [];
         symLogErr.push(symNowErr);
         recentTradesBySymbol.set(bestMarket.symbol, symLogErr.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS));
 
-        // Use the same 15s delay as a successful trade — gives Deriv time to settle
-        // the contract before the engine can open another one.
         scheduleNext(true);
         return;
       }
@@ -866,28 +852,18 @@ async function runAutonomousLoop() {
     // ── Global cross-market recovery state update ────────────────────────────
     if (won) {
       if (globalRecovery.isActive) {
-        // A win during recovery reduces the unrecovered amount
-        globalRecovery.unrecoveredAmount = Math.max(0, globalRecovery.unrecoveredAmount - Math.abs(profit));
-        if (globalRecovery.unrecoveredAmount <= 0) {
-          // Loss fully recovered — switch back to normal trading (OVER 2 / UNDER 7)
-          globalRecovery.isActive = false;
-          globalRecovery.unrecoveredAmount = 0;
-          globalRecovery.activeFamilies = [];
-          globalRecovery.recoveredFamilies = [];
-          globalRecovery.recoveryLossCount = 0;
-          setGlobalDigitRecovery(false, 0);
-          logger.info({ symbol: bestMarket.symbol, family: bestResult.family, profit }, "Recovery complete — back to normal mode (OVER 2 / UNDER 7)");
-          broadcastSSE("recovery_complete", { symbol: bestMarket.symbol, ts: Date.now() });
-        } else {
-          // Partial recovery — a win reduced the gap, reset the consecutive-recovery-loss counter
-          globalRecovery.recoveryLossCount = 0;
-          setGlobalDigitRecovery(true, globalRecovery.unrecoveredAmount);
-          broadcastSSE("recovery_progress", {
-            symbol: bestMarket.symbol,
-            profit,
-            remainingAmount: globalRecovery.unrecoveredAmount,
-          });
-        }
+        // ANY win during recovery immediately ends recovery and returns to normal mode.
+        // We do NOT wait for the full dollar amount to be recovered — one recovery win
+        // is the user's signal to return to OVER 2 / UNDER 7 normal barriers.
+        // (The 1.14× boosted stake + higher payout already compensates for the loss in one trade.)
+        globalRecovery.isActive = false;
+        globalRecovery.unrecoveredAmount = 0;
+        globalRecovery.activeFamilies = [];
+        globalRecovery.recoveredFamilies = [];
+        globalRecovery.recoveryLossCount = 0;
+        setGlobalDigitRecovery(false, 0);
+        logger.info({ symbol: bestMarket.symbol, family: bestResult.family, profit }, "Recovery win — returning to normal mode (OVER 2 / UNDER 7)");
+        broadcastSSE("recovery_complete", { symbol: bestMarket.symbol, ts: Date.now(), profit });
       }
     } else {
       // Trade lost — activate/extend recovery mode
