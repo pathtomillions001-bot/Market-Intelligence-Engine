@@ -697,7 +697,7 @@ async function runAutonomousLoop() {
     let stake = rec.stake;
     const recMultiplier = settings ? Number(settings.recoveryMultiplier ?? 1.2) : 1.2;
     const maxRecSteps = settings ? (settings.maxRecoverySteps ?? 3) : 3;
-    if (globalRecovery.isActive && (settings?.recoveryMode ?? false)) {
+    if (globalRecovery.isActive) {
       let stakeMultiplier: number;
       if (bestResult.family === "overunder") {
         // Compounds on each consecutive recovery loss, capped at maxRecoverySteps
@@ -881,9 +881,10 @@ async function runAutonomousLoop() {
     else sessionLossCount = 0;
 
     // ── Global cross-market recovery state update ────────────────────────────
-    const recoveryEnabled = settings?.recoveryMode ?? false;
+    // Recovery is always active — no settings toggle required. Any loss triggers
+    // recovery immediately. recoveryMultiplier + maxRecoverySteps govern the stakes.
     if (won) {
-      if (globalRecovery.isActive && recoveryEnabled) {
+      if (globalRecovery.isActive) {
         // Recovery WIN: subtract this trade's profit from the unrecovered total.
         // Gradual: if one win doesn't cover everything, stay in recovery until fully covered.
         globalRecovery.unrecoveredAmount = Math.max(0, globalRecovery.unrecoveredAmount - Math.abs(profit));
@@ -925,7 +926,7 @@ async function runAutonomousLoop() {
           });
         }
       }
-    } else if (recoveryEnabled) {
+    } else {
       // Trade lost — activate/continue recovery and increment per-family compounding counter
       const lostAmount = Math.abs(profit);
       const lostFamily = bestResult.family;
@@ -1310,10 +1311,8 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     exploitSymbol = null; exploitCount = 0;
 
     // ── Persistent recovery: re-enter if today's net P&L is still negative ────
-    // Read today's Deriv journal and compute the running deficit. If recoveryMode
-    // is enabled and unrecovered losses exist, the engine picks up where it left off
-    // instead of resetting to base stake with the wrong barriers.
-    const recoveryModeEnabled = settings.length > 0 ? (settings[0].recoveryMode ?? false) : false;
+    // Recovery is always on — any unrecovered deficit from today is picked up immediately
+    // so the engine doesn't restart at base stake with the wrong barriers.
     const derivTxnsAtStart = journalManager.getCached();
     const todayAtStart = new Date(); todayAtStart.setHours(0, 0, 0, 0);
     const todayMidSecAtStart = todayAtStart.getTime() / 1000;
@@ -1329,7 +1328,7 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
       else unrecoveredOnStart = 0; // a net-positive point resets the deficit
     }
 
-    if (recoveryModeEnabled && unrecoveredOnStart > 0) {
+    if (unrecoveredOnStart > 0) {
       // Estimate per-family recovery step from the recent consecutive loss count
       let consecLossesAtStart = 0;
       for (const t of derivTodayAtStart) {
