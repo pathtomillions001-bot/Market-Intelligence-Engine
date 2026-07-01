@@ -8,7 +8,7 @@ import { motion } from "framer-motion";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { Link, useLocation } from "wouter";
-import { CheckCircle, ExternalLink, ShieldCheck, Unlink, Wifi, LogIn, KeyRound } from "lucide-react";
+import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
 const DERIV_APP_ID = "1089";
@@ -115,84 +115,50 @@ export default function Connect() {
   }
 
   if (account) {
-    const isPending = (account as any).loginId?.startsWith?.("pending_");
-
     return (
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 md:p-8 max-w-2xl mx-auto space-y-6">
         <div>
-          <h1 className="text-2xl md:text-3xl font-bold tracking-tight">
-            {isPending ? "Token Saved" : "Account Connected"}
-          </h1>
-          <p className="text-muted-foreground mt-1 text-sm">
-            {isPending
-              ? "Your token has been saved. Verifying with Deriv in the background…"
-              : "Your Deriv account is linked and trading is live."}
-          </p>
+          <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Account Connected</h1>
+          <p className="text-muted-foreground mt-1 text-sm">Your Deriv account is linked and trading is live.</p>
         </div>
 
-        <Card className={`bg-card ${isPending ? "border-amber-500/30" : "border-green-500/30"}`}>
+        <Card className="bg-card border-green-500/30">
           <CardHeader>
-            <CardTitle className={`flex items-center gap-2 ${isPending ? "text-amber-400" : "text-green-500"}`}>
-              {isPending ? (
-                <>
-                  <div className="relative w-5 h-5">
-                    <div className="absolute inset-0 rounded-full border-2 border-amber-400/30 animate-ping" />
-                    <div className="absolute inset-0.5 rounded-full border-2 border-amber-400 border-t-transparent animate-spin" />
-                  </div>
-                  Verifying Token…
-                </>
-              ) : (
-                <><CheckCircle className="w-5 h-5" /> Connected to Deriv</>
-              )}
+            <CardTitle className="flex items-center gap-2 text-green-500">
+              <CheckCircle className="w-5 h-5" /> Connected to Deriv
             </CardTitle>
-            <CardDescription>
-              {isPending
-                ? "Deriv's API is busy right now. Your token is saved and will be verified automatically — this usually takes 15–60 seconds."
-                : "Trades are executing in real-time on your Deriv account."}
-            </CardDescription>
+            <CardDescription>Trades are executing in real-time on your Deriv account.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {!isPending && (
-              <div className="grid grid-cols-2 gap-3 bg-secondary/30 p-4 rounded-lg">
-                <div>
-                  <Label className="text-muted-foreground text-xs uppercase">Login ID</Label>
-                  <div className="font-mono text-base md:text-lg mt-1">{account.loginId}</div>
-                </div>
-                <div>
-                  <Label className="text-muted-foreground text-xs uppercase">Balance</Label>
-                  <div className="font-mono text-base md:text-lg mt-1 text-green-400">{account.currency} {account.balance.toFixed(2)}</div>
-                </div>
-                {account.email && (
-                  <div>
-                    <Label className="text-muted-foreground text-xs uppercase">Email</Label>
-                    <div className="text-sm mt-1 text-muted-foreground">{account.email}</div>
-                  </div>
-                )}
-                <div>
-                  <Label className="text-muted-foreground text-xs uppercase">Account Type</Label>
-                  <div className="text-sm mt-1">{account.isVirtual ? "Demo Account" : "Real Account"}</div>
-                </div>
+            <div className="grid grid-cols-2 gap-3 bg-secondary/30 p-4 rounded-lg">
+              <div>
+                <Label className="text-muted-foreground text-xs uppercase">Login ID</Label>
+                <div className="font-mono text-base md:text-lg mt-1">{account.loginId}</div>
               </div>
-            )}
+              <div>
+                <Label className="text-muted-foreground text-xs uppercase">Balance</Label>
+                <div className="font-mono text-base md:text-lg mt-1 text-green-400">{account.currency} {account.balance.toFixed(2)}</div>
+              </div>
+              {account.email && (
+                <div>
+                  <Label className="text-muted-foreground text-xs uppercase">Email</Label>
+                  <div className="text-sm mt-1 text-muted-foreground">{account.email}</div>
+                </div>
+              )}
+              <div>
+                <Label className="text-muted-foreground text-xs uppercase">Account Type</Label>
+                <div className="text-sm mt-1">{account.isVirtual ? "Demo Account" : "Real Account"}</div>
+              </div>
+            </div>
 
-            {isPending ? (
-              <div className="p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg flex items-start gap-3">
-                <div className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5">⏳</div>
-                <div className="text-sm text-amber-300 space-y-1">
-                  <p className="font-medium">Token saved — verification in progress</p>
-                  <p className="text-xs opacity-80">Once verified, your login ID and balance will appear here automatically. You can navigate away — this happens in the background.</p>
-                </div>
-              </div>
-            ) : (
-              <div className="p-3 bg-green-500/5 border border-green-500/20 rounded-lg flex items-center gap-3">
-                <Wifi className="w-4 h-4 text-green-500 flex-shrink-0" />
-                <div className="text-sm text-green-400">Live trading active — all trades reflect on your Deriv account in real-time.</div>
-              </div>
-            )}
+            <div className="p-3 bg-green-500/5 border border-green-500/20 rounded-lg flex items-center gap-3">
+              <Wifi className="w-4 h-4 text-green-500 flex-shrink-0" />
+              <div className="text-sm text-green-400">Live trading active — all trades reflect on your Deriv account in real-time.</div>
+            </div>
 
             <div className="flex flex-col sm:flex-row gap-3 pt-2">
               <Link href="/" className="flex-1">
-                <Button className="w-full">{isPending ? "Go to Dashboard" : "Go to Dashboard"}</Button>
+                <Button className="w-full">Go to Dashboard</Button>
               </Link>
               <Button
                 variant="outline"

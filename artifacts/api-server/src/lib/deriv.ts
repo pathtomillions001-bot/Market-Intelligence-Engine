@@ -481,6 +481,8 @@ class DerivTickManager extends EventEmitter {
   private lastPongTime = Date.now();
   private symbolRetryDelay = new Map<string, number>();
   private symbolRetryTimer = new Map<string, ReturnType<typeof setTimeout>>();
+  // Pending authorize callbacks — reuse existing WS to avoid extra connections
+  private pendingAuth: Array<{ resolve: (info: DerivAccountInfo) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
 
   start(symbols: string[]) {
     this.subscribedSymbols = symbols;
@@ -610,9 +612,38 @@ class DerivTickManager extends EventEmitter {
       this.lastPongTime = Date.now();
     }
 
+    // Resolve any pending authorize calls routed through this WS
+    if (msg.msg_type === "authorize" && msg.authorize) {
+      const info: DerivAccountInfo = {
+        loginid: msg.authorize.loginid,
+        currency: msg.authorize.currency,
+        balance: msg.authorize.balance,
+        is_virtual: msg.authorize.is_virtual,
+        email: msg.authorize.email,
+        fullname: msg.authorize.fullname,
+        country: msg.authorize.country,
+      };
+      for (const pending of this.pendingAuth) {
+        clearTimeout(pending.timer);
+        pending.resolve(info);
+      }
+      this.pendingAuth = [];
+    }
+
     if (msg.error) {
       const sym = msg.echo_req?.ticks ?? msg.echo_req?.symbol ?? "?";
       const isRateLimit = msg.error.code === "RateLimit";
+
+      // Reject any pending authorize call that failed
+      if (msg.echo_req?.authorize !== undefined && this.pendingAuth.length > 0) {
+        const err = new Error(msg.error.message ?? "Authorization failed");
+        for (const pending of this.pendingAuth) {
+          clearTimeout(pending.timer);
+          pending.reject(err);
+        }
+        this.pendingAuth = [];
+        return;
+      }
       logger.warn({ code: msg.error.code, message: msg.error.message, symbol: sym }, "TickManager: Deriv subscription error");
       // Re-subscribe to the failed market with backoff
       // Rate limit errors get a long backoff (60s → 120s → 240s → max 600s)
@@ -665,6 +696,22 @@ class DerivTickManager extends EventEmitter {
       logger.info({ delay: this.reconnectDelay }, "TickManager: reconnecting");
       this.connect();
     }, this.reconnectDelay);
+  }
+
+  /** Send authorize on the existing persistent WS — no new connection needed */
+  authorizeViaWs(token: string, timeoutMs = 12_000): Promise<DerivAccountInfo> {
+    return new Promise((resolve, reject) => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        reject(new Error("TickManager WS not open"));
+        return;
+      }
+      const timer = setTimeout(() => {
+        this.pendingAuth = this.pendingAuth.filter((p) => p.resolve !== resolve);
+        reject(new Error("Connection timeout"));
+      }, timeoutMs);
+      this.pendingAuth.push({ resolve, reject, timer });
+      this.ws.send(JSON.stringify({ authorize: token }));
+    });
   }
 
   getTicks(symbol: string, count = 100): number[] {
@@ -1086,6 +1133,15 @@ export async function getContractProposal(
 }
 
 export async function authorizeWithDeriv(token: string): Promise<DerivAccountInfo> {
+  // Prefer the TickManager's already-open WS to avoid opening a competing connection
+  try {
+    const info = await tickManager.authorizeViaWs(token);
+    cachedAccountInfo = info;
+    return info;
+  } catch {
+    // TickManager WS not ready — fall back to a dedicated connection
+  }
+
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(DERIV_WS_URL);
     const timeout = setTimeout(() => { ws.close(); reject(new Error("Connection timeout")); }, 15000);
