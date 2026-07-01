@@ -323,21 +323,27 @@ async function runAutonomousLoop() {
     const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
     tradesExecutedToday = closedToday.length;
 
-    // Use sessionLossCount as the authoritative consecutive-loss counter for agents.
-    // This is the same value displayed in the UI and matches the stopEngine threshold check
-    // below. The DB-derived count (from today's full trade history) is intentionally NOT
-    // used here — it includes losses from before the current engine session and would
-    // create a mismatch where the UI shows "2 losses" but agents see "5 losses".
-    const daily = buildDailyStats(closedToday, sessionLossCount);
+    // Derive consecutive losses from the live journal (DB) — this is the ground truth.
+    // The engine ONLY triggers a stop when the journal actually reflects the threshold.
+    // sessionLossCount is kept in sync with this value each iteration so the UI display
+    // always matches what the journal shows (no phantom "ghost" counts from past sessions).
+    const sortedByTime = [...closedToday].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    let journalConsecutiveLosses = 0;
+    for (const t of sortedByTime) { if (t.status === "lost") journalConsecutiveLosses++; else break; }
+    // Mirror in-memory counter to journal — so status endpoint always matches journal reality
+    sessionLossCount = journalConsecutiveLosses;
+
+    const daily = buildDailyStats(closedToday, journalConsecutiveLosses);
     const todayProfit = daily.profit;
 
-    // Hard stop conditions (also handled inside risk manager, but stop the loop early)
+    // Hard stop conditions: ONLY triggered by journal-verified P&L and loss streak.
+    // Both daily.profit and daily.consecutiveLosses come from the actual trade records —
+    // never from in-memory counters that could drift due to errors or restarts.
     if (todayProfit <= -tradingSettings.dailyLossLimit) { stopEngine(`Daily loss limit $${tradingSettings.dailyLossLimit} reached`); return; }
     if (todayProfit >= tradingSettings.dailyTarget) { stopEngine(`Daily target $${tradingSettings.dailyTarget} reached!`); return; }
-    // sessionLossCount persists across wins — a win does NOT reset it, only cooldown expiry does
-    if (sessionLossCount >= tradingSettings.consecutiveLossLimit) {
+    if (daily.consecutiveLosses >= tradingSettings.consecutiveLossLimit) {
       const cooldownMins = settings?.cooldownMinutes ?? 30;
-      stopEngine(`${sessionLossCount} session losses hit limit of ${tradingSettings.consecutiveLossLimit} — cooling down for ${cooldownMins}m`, cooldownMins);
+      stopEngine(`Journal shows ${daily.consecutiveLosses} consecutive losses — limit ${tradingSettings.consecutiveLossLimit} reached, cooling down ${cooldownMins}m`, cooldownMins);
       return;
     }
 
@@ -1223,6 +1229,7 @@ router.get("/engine/status", async (_req, res): Promise<void> => {
       isActive: globalRecovery.isActive,
       unrecoveredAmount: globalRecovery.unrecoveredAmount,
       activeFamilies: globalRecovery.activeFamilies,
+      recoveryLossCount: globalRecovery.recoveryLossCount,
     },
   });
 });
@@ -1282,6 +1289,7 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
       isActive: globalRecovery.isActive,
       unrecoveredAmount: globalRecovery.unrecoveredAmount,
       activeFamilies: globalRecovery.activeFamilies,
+      recoveryLossCount: globalRecovery.recoveryLossCount,
     },
   });
 });

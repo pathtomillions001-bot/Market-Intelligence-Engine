@@ -79,6 +79,16 @@ export function MarketOpportunityFlashCard({
   // Read user's enabled contract families from settings
   const { data: settings } = useGetSettings();
   const preferredTypes: string[] = (settings as any)?.preferredContractTypes ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
+  const maxTradeStake: number = (settings as any)?.maxTradeStake ?? 500;
+
+  // Engine status — needed for recovery multiplier preview
+  const { data: engineStatus } = useQuery<any>({
+    queryKey: ["engine-status-flash"],
+    queryFn: () => fetch("/api/ai/engine/status").then(r => r.json()),
+    refetchInterval: 3000,
+  });
+  const recoveryMode = engineStatus?.recoveryMode ?? { isActive: false, recoveryLossCount: 0 };
+  const recoveryLossCount: number = recoveryMode.recoveryLossCount ?? 0;
   // Only show tabs for enabled groups; fall back to all groups if nothing is active
   const enabledGroups = CONTRACT_GROUPS.filter(g =>
     (g.types as readonly string[]).some(t => preferredTypes.includes(t))
@@ -396,26 +406,63 @@ export function MarketOpportunityFlashCard({
 
         {/* Stats row: EV | Ticks | Stake */}
         <div className="grid grid-cols-3 gap-1.5">
-          {[
-            {
-              label: "EV",
-              value: recoveryActive && bestRecoveryOption
-                ? (bestRecoveryOption.expectedValue > 0 ? `+${(bestRecoveryOption.expectedValue * 100).toFixed(1)}%` : `${(bestRecoveryOption.expectedValue * 100).toFixed(1)}%`)
-                : rec ? (rec.expectedValue > 0 ? `+$${rec.expectedValue.toFixed(2)}` : `$${rec.expectedValue?.toFixed(2) ?? "—"}`) : "—"
-            },
-            { label: "Ticks", value: rec ? `${rec.recommendedDuration ?? 5}t` : "—" },
-            {
-              label: "Stake",
-              value: recoveryActive && bestRecoveryOption
-                ? `$${(rec?.stake ?? 1).toFixed(2)}`
-                : rec ? `$${rec.stake?.toFixed(2) ?? "—"}` : "—"
-            },
-          ].map(({ label, value }) => (
-            <div key={label} className="text-center p-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06]">
-              <div className="text-[8px] text-muted-foreground uppercase tracking-wide">{label}</div>
-              <div className="text-[11px] font-mono font-bold mt-0.5">{value}</div>
-            </div>
-          ))}
+        {(() => {
+          // Compute the effective stake the engine will actually use.
+          // When global recovery is active, the server applies 1.14^(n+1) to the base stake.
+          // We mirror that calculation here so the user sees the real stake before executing.
+          const baseStake = rec?.stake ?? 1;
+          const isGlobalRecovery = recoveryMode.isActive && !recoveryActive; // not in card-level recovery
+          const scaleMult = isGlobalRecovery
+            ? Math.min(Math.pow(1.14, recoveryLossCount + 1), 4.0)
+            : 1.0;
+          const effectiveStake = isGlobalRecovery
+            ? Math.min(Math.round(baseStake * scaleMult * 100) / 100, maxTradeStake)
+            : baseStake;
+          const multLabel = isGlobalRecovery && scaleMult > 1.005
+            ? `×${scaleMult.toFixed(2)}`
+            : null;
+
+          const evValue = recoveryActive && bestRecoveryOption
+            ? (bestRecoveryOption.expectedValue > 0 ? `+${(bestRecoveryOption.expectedValue * 100).toFixed(1)}%` : `${(bestRecoveryOption.expectedValue * 100).toFixed(1)}%`)
+            : rec ? (rec.expectedValue > 0 ? `+$${rec.expectedValue.toFixed(2)}` : `$${rec.expectedValue?.toFixed(2) ?? "—"}`) : "—";
+          const ticksValue = rec ? `${rec.recommendedDuration ?? 5}t` : "—";
+          const stakeDisplay = rec
+            ? recoveryActive && bestRecoveryOption
+              ? `$${(rec?.stake ?? 1).toFixed(2)}`
+              : `$${effectiveStake.toFixed(2)}`
+            : "—";
+
+          return (
+            <>
+              {[
+                { label: "EV", value: evValue },
+                { label: "Ticks", value: ticksValue },
+              ].map(({ label, value }) => (
+                <div key={label} className="text-center p-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06]">
+                  <div className="text-[8px] text-muted-foreground uppercase tracking-wide">{label}</div>
+                  <div className="text-[11px] font-mono font-bold mt-0.5">{value}</div>
+                </div>
+              ))}
+              {/* Stake cell — shows recovery multiplier badge when engine is in recovery */}
+              <div className={`text-center p-1.5 rounded-lg border ${isGlobalRecovery ? "border-amber-500/30 bg-amber-500/[0.06]" : "bg-white/[0.04] border-white/[0.06]"}`}>
+                <div className="text-[8px] text-muted-foreground uppercase tracking-wide">Stake</div>
+                <div className="flex items-center justify-center gap-1 mt-0.5">
+                  <span className={`text-[11px] font-mono font-bold ${isGlobalRecovery ? "text-amber-400" : ""}`}>
+                    {stakeDisplay}
+                  </span>
+                  {multLabel && (
+                    <span className="text-[8px] font-mono px-1 py-0.5 rounded" style={{ background: "rgba(245,158,11,0.2)", color: "#f59e0b" }}>
+                      {multLabel}
+                    </span>
+                  )}
+                </div>
+                {isGlobalRecovery && (
+                  <div className="text-[7px] font-mono mt-0.5" style={{ color: "rgba(245,158,11,0.6)" }}>recovery</div>
+                )}
+              </div>
+            </>
+          );
+        })()}
         </div>
 
         {/* Footer: count + expand */}
