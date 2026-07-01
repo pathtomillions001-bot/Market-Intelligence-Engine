@@ -479,6 +479,8 @@ class DerivTickManager extends EventEmitter {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
   private lastPongTime = Date.now();
+  private symbolRetryDelay = new Map<string, number>();
+  private symbolRetryTimer = new Map<string, ReturnType<typeof setTimeout>>();
 
   start(symbols: string[]) {
     this.subscribedSymbols = symbols;
@@ -554,13 +556,17 @@ class DerivTickManager extends EventEmitter {
 
   private subscribeAll() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    // Stagger subscriptions 120ms apart to avoid Deriv rate-limiting
+    // Clear per-symbol retry state on a fresh subscribe-all
+    this.symbolRetryDelay.clear();
+    for (const [, timer] of this.symbolRetryTimer) clearTimeout(timer);
+    this.symbolRetryTimer.clear();
+    // Stagger subscriptions 500ms apart to stay within Deriv rate limits
     this.subscribedSymbols.forEach((symbol, i) => {
       setTimeout(() => {
         if (this.ws?.readyState === WebSocket.OPEN) {
           this.ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
         }
-      }, i * 120);
+      }, i * 500);
     });
     logger.info({ count: this.subscribedSymbols.length }, "TickManager: subscribing to all markets (staggered)");
   }
@@ -571,6 +577,11 @@ class DerivTickManager extends EventEmitter {
       const price = Number(quote);
       const market = getMarketInfo(symbol);
       if (!market) return;
+
+      // Subscription is healthy — reset any retry backoff for this symbol
+      if (this.symbolRetryDelay.has(symbol)) {
+        this.symbolRetryDelay.delete(symbol);
+      }
 
       const lastDigit = market.digitEnabled ? extractLastDigit(price, market.pipSize) : -1;
 
@@ -601,15 +612,34 @@ class DerivTickManager extends EventEmitter {
 
     if (msg.error) {
       const sym = msg.echo_req?.ticks ?? msg.echo_req?.symbol ?? "?";
+      const isRateLimit = msg.error.code === "RateLimit";
       logger.warn({ code: msg.error.code, message: msg.error.message, symbol: sym }, "TickManager: Deriv subscription error");
-      // Re-subscribe to the failed market after a short delay
+      // Re-subscribe to the failed market with backoff
+      // Rate limit errors get a long backoff (60s → 120s → 240s → max 600s)
+      // Other errors get a short retry (5s)
       if (sym !== "?" && this.subscribedSymbols.includes(sym)) {
-        setTimeout(() => {
+        // Cancel any existing retry timer for this symbol
+        const existingTimer = this.symbolRetryTimer.get(sym);
+        if (existingTimer) clearTimeout(existingTimer);
+
+        let delay: number;
+        if (isRateLimit) {
+          const current = this.symbolRetryDelay.get(sym) ?? 60_000;
+          delay = Math.min(current * 2, 600_000);
+          this.symbolRetryDelay.set(sym, delay);
+        } else {
+          delay = 5_000;
+          this.symbolRetryDelay.delete(sym);
+        }
+
+        const timer = setTimeout(() => {
+          this.symbolRetryTimer.delete(sym);
           if (this.ws?.readyState === WebSocket.OPEN) {
-            logger.info({ symbol: sym }, "TickManager: re-subscribing after error");
+            logger.info({ symbol: sym, delayMs: delay }, "TickManager: re-subscribing after error");
             this.ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
           }
-        }, 5000);
+        }, delay);
+        this.symbolRetryTimer.set(sym, timer);
       }
     }
   }
@@ -962,6 +992,11 @@ export const journalManager = new DerivJournalManager();
 let cachedToken: string | null = null;
 let cachedAccountInfo: DerivAccountInfo | null = null;
 
+// Balance cache — avoid opening a new WebSocket on every account-fetch poll
+let cachedBalance: number | null = null;
+let cachedBalanceAt = 0;
+const BALANCE_CACHE_TTL_MS = 60_000; // refresh at most once per minute
+
 export function setDerivToken(token: string) {
   cachedToken = token;
   journalManager.setToken(token);
@@ -969,10 +1004,15 @@ export function setDerivToken(token: string) {
 export function clearDerivToken() {
   cachedToken = null;
   cachedAccountInfo = null;
+  cachedBalance = null;
+  cachedBalanceAt = 0;
   journalManager.clearToken();
 }
 export function getCachedAccountInfo() { return cachedAccountInfo; }
 export function getCachedToken() { return cachedToken; }
+export function invalidateBalanceCache() {
+  cachedBalanceAt = 0;
+}
 
 export async function getContractProposal(
   token: string | null,
@@ -1077,6 +1117,12 @@ export async function authorizeWithDeriv(token: string): Promise<DerivAccountInf
 }
 
 export async function getLiveBalance(token: string): Promise<number | null> {
+  // Return cached balance if it's still fresh — avoids hammering Deriv authorize rate limit
+  const now = Date.now();
+  if (cachedBalance !== null && now - cachedBalanceAt < BALANCE_CACHE_TTL_MS) {
+    return cachedBalance;
+  }
+
   return new Promise((resolve) => {
     try {
       const ws = new WebSocket(DERIV_WS_URL);
@@ -1085,7 +1131,14 @@ export async function getLiveBalance(token: string): Promise<number | null> {
       ws.on("message", (data) => {
         try {
           const msg = JSON.parse(data.toString());
-          if (msg.msg_type === "authorize" && msg.authorize) { clearTimeout(timeout); ws.close(); resolve(Number(msg.authorize.balance)); }
+          if (msg.msg_type === "authorize" && msg.authorize) {
+            clearTimeout(timeout);
+            ws.close();
+            const balance = Number(msg.authorize.balance);
+            cachedBalance = balance;
+            cachedBalanceAt = Date.now();
+            resolve(balance);
+          }
           if (msg.error) { clearTimeout(timeout); ws.close(); resolve(null); }
         } catch { /* ignore */ }
       });
