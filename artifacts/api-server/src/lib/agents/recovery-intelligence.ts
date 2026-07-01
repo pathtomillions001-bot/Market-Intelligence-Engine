@@ -59,15 +59,18 @@ export function recordTradeOutcomeRecovery(
   let cooldownUntil = prev.cooldownUntil;
   let recommendedStakeMultiplier = 1.0;
 
-  // Cool-down: 3+ consecutive losses → mandatory pause
-  if (consecutiveLosses >= 3) {
+  // Cool-down: uses the user-configured consecutiveLossLimit from settings.
+  // Hardcoded "3" was wrong — it was triggering engine pause before the user's
+  // configured limit (e.g. 5) was reached. Now the thresholds scale with the setting.
+  const limit = ctx.settings.consecutiveLossLimit;
+  if (consecutiveLosses >= limit) {
     mode = "cooldown";
     cooldownUntil = Date.now() + 60_000; // 60s pause
     recommendedStakeMultiplier = 0.0; // no trading
-  } else if (consecutiveLosses >= 2) {
+  } else if (consecutiveLosses >= Math.ceil(limit * 0.6)) {
     mode = "recovery";
     recommendedStakeMultiplier = 0.6; // reduce stake
-  } else if (consecutiveLosses === 1) {
+  } else if (consecutiveLosses >= Math.ceil(limit * 0.2)) {
     mode = "conservative";
     recommendedStakeMultiplier = 0.8;
   } else if (consecutiveWins >= 3) {

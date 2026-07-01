@@ -664,7 +664,6 @@ async function runAutonomousLoop() {
     // recoveryLossCount = 1 on the second consecutive recovery loss → 1.14^2 = +30%.
     // Cap at 4× base stake (Deriv max stake also applies).
     let stake = rec.stake;
-    const isOverUnder = effectiveContractType === "DIGITOVER" || effectiveContractType === "DIGITUNDER";
     if (globalRecovery.isActive) {
       const n = globalRecovery.recoveryLossCount; // consecutive losses DURING recovery
       // recoveryLossCount is 0 for the first recovery trade, so exponent = n+1 → 1.14×.
