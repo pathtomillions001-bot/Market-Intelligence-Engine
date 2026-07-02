@@ -28,6 +28,10 @@ let cooldownUntil: Date | null = null;
 let cooldownResumeTimer: ReturnType<typeof setTimeout> | null = null;
 // Consecutive loss counter — increments on each loss; resets to 0 on any win; full reset on cooldown expiry
 let sessionLossCount = 0;
+// Tracks when the last cooldown ended (auto or manual). Consecutive-loss counting only
+// considers journal entries AFTER this timestamp so the engine never re-triggers cooldown
+// from the same streak that already served a cooldown.
+let cooldownEndedAt: Date | null = null;
 
 let exploitSymbol: string | null = null;
 let exploitCount = 0;
@@ -262,6 +266,10 @@ function stopEngine(reason: string, cooldownMinutes?: number) {
     cooldownResumeTimer = setTimeout(() => {
       cooldownUntil = null;
       cooldownResumeTimer = null;
+      // Mark when this cooldown ended so the next consecutive-loss evaluation only
+      // counts trades placed AFTER the cooldown — prevents immediate re-trigger from
+      // the same streak that already triggered this cooldown.
+      cooldownEndedAt = new Date();
       // Reset session loss counter on cooldown expiry — the ONLY reset point
       sessionLossCount = 0;
       // Auto-resume engine
@@ -347,8 +355,15 @@ async function runAutonomousLoop() {
     if (derivTodayTxns.length > 0) {
       // Deriv profit_table is returned DESC (most recent first) — iterate to count
       // consecutive losses at the head of the list.  A winning trade breaks the streak.
+      // IMPORTANT: only count losses that occurred AFTER the most recent cooldown ended
+      // so that a cooldown cannot be immediately re-triggered by the same streak that
+      // already served it (per spec: "Do NOT inspect previous loss streaks").
+      const cooldownEndedSec = cooldownEndedAt ? cooldownEndedAt.getTime() / 1000 : 0;
       let consecLosses = 0;
       for (const t of derivTodayTxns) {
+        const txnTime = Number(t.sell_time ?? t.purchase_time ?? 0);
+        // Stop counting when we reach a trade that predates the last cooldown end
+        if (cooldownEndedSec > 0 && txnTime <= cooldownEndedSec) break;
         if (Number(t.profit ?? 0) < 0) consecLosses++;
         else break;
       }
@@ -357,12 +372,19 @@ async function runAutonomousLoop() {
         (s: number, t: any) => s + Number(t.profit ?? 0), 0,
       );
     } else {
-      // No Deriv journal data yet (paper mode or token not connected) — use local DB
+      // No Deriv journal data yet (paper mode or token not connected) — use local DB.
+      // Apply the same cooldown-boundary filter: only count losses after cooldownEndedAt.
+      const cooldownEndedMs = cooldownEndedAt ? cooldownEndedAt.getTime() : 0;
       const sortedByTime = [...closedToday].sort(
         (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
       );
       journalConsecutiveLosses = 0;
-      for (const t of sortedByTime) { if (t.status === "lost") journalConsecutiveLosses++; else break; }
+      for (const t of sortedByTime) {
+        // Stop at any trade that predates the last cooldown end (already accounted for)
+        if (cooldownEndedMs > 0 && new Date(t.createdAt).getTime() <= cooldownEndedMs) break;
+        if (t.status === "lost") journalConsecutiveLosses++;
+        else break;
+      }
       resolvedDailyProfit = closedToday.reduce((s, t) => s + Number(t.profit ?? 0), 0);
     }
 
@@ -487,9 +509,9 @@ async function runAutonomousLoop() {
                       // agents. Always lower the threshold for this family regardless of what
                       // other families are also active so Even/Odd gets a fair shot in the
                       // tournament when multiple markets are enabled simultaneously.
-                      confidenceThreshold: fam.name === "evenodd"
+                      minConfidenceThreshold: fam.name === "evenodd"
                         ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 48)
-                        : baseCtx.settings.confidenceThreshold,
+                        : baseCtx.settings.minConfidenceThreshold,
                     },
                     inRecovery: globalRecovery.isActive,
                   };
@@ -577,8 +599,14 @@ async function runAutonomousLoop() {
       if (hinted.length > 0) tournamentPool = hinted;
     }
 
+    // During recovery with multiple families: spec requires picking the trade with the
+    // highest AI confidence score (not quality score) so the most reliable signal wins.
     const bestResult: (ScanResult & { groupName: string }) | null = tournamentPool.length > 0
-      ? tournamentPool.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
+      ? tournamentPool.sort((a, b) =>
+          globalRecovery.isActive
+            ? b.output.confidenceScore - a.output.confidenceScore
+            : b.output.qualityScore - a.output.qualityScore
+        )[0]
       : null;
 
     if (bestResult) {
@@ -691,8 +719,10 @@ async function runAutonomousLoop() {
 
     // ── Recovery stake override ───────────────────────────────────────────────
     // OVER/UNDER: stake = baseStake × (recoveryMultiplier ^ recoveryStep) — compounds
-    //   with each consecutive recovery loss; barriers switch to OVER 4 / UNDER 5.
-    // Rise/Fall / Even/Odd: stake = baseStake × recoveryMultiplier (flat, no compounding).
+    //   with each consecutive recovery loss (capped at maxRecoverySteps); barriers
+    //   switch to OVER 4 / UNDER 5 until unrecoveredAmount reaches zero.
+    // Rise/Fall: flat multiplier — stake = baseStake × recoveryMultiplier (no compounding).
+    // Even/Odd:  flat multiplier — stake = baseStake × recoveryMultiplier (no compounding).
     // Once cumulative profit from recovery trades ≥ unrecoveredAmount, normal mode resumes.
     let stake = rec.stake;
     const recMultiplier = settings ? Number(settings.recoveryMultiplier ?? 1.2) : 1.2;
@@ -700,14 +730,17 @@ async function runAutonomousLoop() {
     if (globalRecovery.isActive) {
       let stakeMultiplier: number;
       if (bestResult.family === "overunder") {
-        // Compounds on each consecutive recovery loss, capped at maxRecoverySteps
+        // OVER/UNDER: exponential compounding capped at maxRecoverySteps consecutive losses.
+        // recoveryStep=0 means first recovery trade after initial loss → ×recMultiplier^1.
+        // maxRecoverySteps defines the cap on the exponent — once reached, multiplier
+        // stays constant; additional losses continue recovery without further compounding.
         const step = Math.min(globalRecovery.overunderRecoveryLossCount, maxRecSteps - 1);
         stakeMultiplier = Math.pow(recMultiplier, step + 1);
       } else if (bestResult.family === "direction") {
-        const step = Math.min(globalRecovery.directionRecoveryLossCount, maxRecSteps - 1);
-        stakeMultiplier = Math.pow(recMultiplier, step + 1);
+        // Rise/Fall: flat multiplier per spec — no exponential compounding
+        stakeMultiplier = recMultiplier;
       } else {
-        // evenodd — flat multiplier (no compounding per spec)
+        // Even/Odd: flat multiplier per spec — no exponential compounding
         stakeMultiplier = recMultiplier;
       }
       const recoveryStake = Math.round(rec.stake * stakeMultiplier * 100) / 100;
@@ -1120,6 +1153,42 @@ async function getComputedAgentScores(): Promise<Record<string, number>> {
   } catch { return {}; }
 }
 
+// ── Recovery status builder ───────────────────────────────────────────────────
+// Centralises computation of "next stake multiplier" per family so that the
+// dashboard recovery card can show exactly what the next compounded stake will be.
+function buildRecoveryStatus(settings: any) {
+  const recMultiplier = settings ? Number(settings.recoveryMultiplier ?? 1.2) : 1.2;
+  const maxRecSteps   = settings ? (settings.maxRecoverySteps ?? 3) : 3;
+
+  // OVER/UNDER: exponential compounding capped at maxRecSteps
+  const ouStep        = Math.min(globalRecovery.overunderRecoveryLossCount, maxRecSteps - 1);
+  const nextOuMultiplier = globalRecovery.isActive
+    ? Math.pow(recMultiplier, ouStep + 1)
+    : 1.0;
+
+  // Rise/Fall: flat multiplier per spec (no compounding)
+  const nextDirMultiplier = globalRecovery.isActive ? recMultiplier : 1.0;
+
+  // Even/Odd: flat multiplier per spec (no compounding)
+  const nextEoMultiplier  = globalRecovery.isActive ? recMultiplier : 1.0;
+
+  return {
+    isActive:           globalRecovery.isActive,
+    unrecoveredAmount:  globalRecovery.unrecoveredAmount,
+    activeFamilies:     globalRecovery.activeFamilies,
+    recoveryLossCount:  globalRecovery.recoveryLossCount,
+    overunderStep:      globalRecovery.overunderRecoveryLossCount,
+    directionStep:      globalRecovery.directionRecoveryLossCount,
+    evenoddStep:        globalRecovery.evenoddRecoveryLossCount,
+    // Next-trade stake multipliers per family (for dashboard display)
+    nextOuMultiplier,
+    nextDirMultiplier,
+    nextEoMultiplier,
+    recoveryMultiplier: recMultiplier,
+    maxRecoverySteps:   maxRecSteps,
+  };
+}
+
 // ── Routes ─────────────────────────────────────────────────────────────────────
 
 router.get("/events", (req, res) => {
@@ -1283,15 +1352,7 @@ router.get("/engine/status", async (_req, res): Promise<void> => {
     sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: DERIV_MARKETS.length,
-    recoveryMode: {
-      isActive: globalRecovery.isActive,
-      unrecoveredAmount: globalRecovery.unrecoveredAmount,
-      activeFamilies: globalRecovery.activeFamilies,
-      recoveryLossCount: globalRecovery.recoveryLossCount,
-      overunderStep: globalRecovery.overunderRecoveryLossCount,
-      directionStep: globalRecovery.directionRecoveryLossCount,
-      evenoddStep: globalRecovery.evenoddRecoveryLossCount,
-    },
+    recoveryMode: buildRecoveryStatus(settings.length > 0 ? settings[0] : null),
   });
 });
 
@@ -1307,6 +1368,10 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     // Clear any active cooldown when manually starting
     if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
     cooldownUntil = null;
+    // Reset the cooldown baseline so consecutive-loss counting starts fresh from NOW.
+    // This prevents the engine from immediately re-triggering cooldown from journal
+    // entries that predate this manual start (per spec: only the current streak counts).
+    cooldownEndedAt = new Date();
     engineRunning = true; autonomousMode = "autonomous"; stopReasons = []; nextScanIn = loopIntervalSec;
     exploitSymbol = null; exploitCount = 0;
 
@@ -1396,15 +1461,7 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: DERIV_MARKETS.length,
-    recoveryMode: {
-      isActive: globalRecovery.isActive,
-      unrecoveredAmount: globalRecovery.unrecoveredAmount,
-      activeFamilies: globalRecovery.activeFamilies,
-      recoveryLossCount: globalRecovery.recoveryLossCount,
-      overunderStep: globalRecovery.overunderRecoveryLossCount,
-      directionStep: globalRecovery.directionRecoveryLossCount,
-      evenoddStep: globalRecovery.evenoddRecoveryLossCount,
-    },
+    recoveryMode: buildRecoveryStatus(settings.length > 0 ? settings[0] : null),
   });
 });
 

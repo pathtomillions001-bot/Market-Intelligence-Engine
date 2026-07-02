@@ -565,9 +565,12 @@ export default function Dashboard() {
           const rec = (engine as any)?.recoveryMode;
           if (!rec?.isActive) return null;
           const ouStep: number = rec.overunderStep ?? 0;
-          const dirStep: number = rec.directionStep ?? 0;
           const families: string[] = rec.activeFamilies ?? [];
           const familyLabels: Record<string, string> = { overunder: "Over/Under", direction: "Rise/Fall", evenodd: "Even/Odd" };
+          const nextOuMul: number = rec.nextOuMultiplier ?? 1;
+          const nextDirMul: number = rec.nextDirMultiplier ?? 1;
+          const nextEoMul: number = rec.nextEoMultiplier ?? 1;
+          const maxSteps: number = rec.maxRecoverySteps ?? 3;
           return (
             <motion.div
               key="recovery-card"
@@ -588,20 +591,29 @@ export default function Dashboard() {
                 </div>
                 <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-xs text-muted-foreground font-mono">
                   <span>
-                    Still to recover: <span className="text-orange-300 font-semibold">${rec.unrecoveredAmount.toFixed(2)}</span>
+                    To recover: <span className="text-orange-300 font-semibold">${rec.unrecoveredAmount.toFixed(2)}</span>
                   </span>
                   {families.includes("overunder") && (
-                    <span>OVER/UNDER step: <span className="text-orange-300">{ouStep + 1}</span></span>
+                    <span>
+                      O/U step: <span className="text-orange-300">{ouStep + 1}/{maxSteps}</span>
+                      {" "}· next: <span className="text-orange-300 font-semibold">{nextOuMul.toFixed(2)}×</span>
+                    </span>
                   )}
                   {families.includes("direction") && (
-                    <span>Rise/Fall step: <span className="text-orange-300">{dirStep + 1}</span></span>
+                    <span>
+                      Rise/Fall: <span className="text-orange-300 font-semibold">{nextDirMul.toFixed(2)}×</span>
+                      <span className="text-orange-500/60"> flat</span>
+                    </span>
                   )}
                   {families.includes("evenodd") && (
-                    <span>Even/Odd: <span className="text-orange-300">flat ×</span></span>
+                    <span>
+                      Even/Odd: <span className="text-orange-300 font-semibold">{nextEoMul.toFixed(2)}×</span>
+                      <span className="text-orange-500/60"> flat</span>
+                    </span>
                   )}
                 </div>
                 <div className="mt-1 text-[10px] text-orange-500/60 font-mono uppercase tracking-wider">
-                  {families.includes("overunder") ? "OVER 4 / UNDER 5 barriers" : "normal barriers"} · stake compounded until losses covered
+                  {families.includes("overunder") ? "OVER 4 / UNDER 5 barriers" : "normal barriers"} · stake multiplied until losses covered
                 </div>
               </div>
             </motion.div>
