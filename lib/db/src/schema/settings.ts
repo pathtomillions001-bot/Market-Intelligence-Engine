@@ -26,6 +26,7 @@ export const settingsTable = pgTable("settings", {
   paperTradeMode: boolean("paper_trade_mode").notNull().default(false),
   requirePositiveEv: boolean("require_positive_ev").notNull().default(false),
   cooldownMinutes: integer("cooldown_minutes").notNull().default(30),
+  recoveryStateJson: text("recovery_state_json"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

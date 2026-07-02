@@ -9,6 +9,7 @@ import { loadPersistedToken } from "./routes/auth";
 import { tickManager, DERIV_MARKETS, APP_ID } from "./lib/deriv";
 import { loadWinRatesFromDb } from "./lib/win-rate-store";
 import { loadCalibrationCache } from "./lib/calibration";
+import { loadRecoveryStateFromDb } from "./routes/ai";
 import { pool } from "@workspace/db";
 
 /** Ensure DB schema is applied — runs drizzle-kit push if tables are missing. */
@@ -54,6 +55,7 @@ bootstrapDb().then(() => {
   loadPersistedToken().catch((err) => logger.warn({ err }, "Token load on startup failed"));
   loadWinRatesFromDb().catch((err) => logger.warn({ err }, "Win rate load on startup failed"));
   loadCalibrationCache().catch((err) => logger.warn({ err }, "Calibration load on startup failed"));
+  loadRecoveryStateFromDb().catch((err) => logger.warn({ err }, "Recovery state load on startup failed"));
 });
 
 // Start persistent Deriv tick subscription for all synthetic markets

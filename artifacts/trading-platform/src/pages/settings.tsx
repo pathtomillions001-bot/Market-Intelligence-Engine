@@ -235,6 +235,51 @@ export default function Settings() {
         </CardContent>
       </Card>
 
+      {/* Recovery Mode */}
+      <Card className="bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Recovery Mode</CardTitle>
+          <CardDescription className="text-xs">
+            When enabled, after a loss the engine escalates stake size to recover the lost amount before returning to normal. Over/Under losses automatically switch to safer barriers (OVER 4 / UNDER 5) during recovery.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <SettingRow label="Enable Recovery Mode" description="Automatically increase stake after a loss to recover.">
+            <Switch checked={form.recoveryMode} onCheckedChange={(v) => set("recoveryMode", v)} />
+          </SettingRow>
+          <SettingRow
+            label="Recovery Multiplier"
+            description={`Stake is multiplied by this after each loss. At step ${form.maxRecoverySteps}, stake is ×${maxRecovery.toFixed(2)} of base.`}
+          >
+            <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", v)} min={1.01} max={5} step={0.05} suffix="×" />
+          </SettingRow>
+          <SettingRow
+            label="Max Recovery Steps"
+            description="Maximum number of consecutive stake escalations. Stakes cap here and won't increase further."
+          >
+            <NumInput value={form.maxRecoverySteps} onChange={(v) => set("maxRecoverySteps", v)} min={1} max={10} />
+          </SettingRow>
+          {form.recoveryMode && (
+            <div className="mt-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
+              <div className="text-xs font-medium text-amber-400 mb-2">Recovery stake escalation preview</div>
+              <div className="flex gap-2 flex-wrap">
+                {Array.from({ length: form.maxRecoverySteps }, (_, i) => i + 1).map((step) => (
+                  <div key={step} className="text-center">
+                    <div className="text-[10px] text-muted-foreground">Step {step}</div>
+                    <div className="text-xs font-mono font-bold text-amber-400">
+                      ×{Math.pow(form.recoveryMultiplier, step).toFixed(2)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="text-[10px] text-muted-foreground mt-2">
+                Over/Under recovery: switches to OVER 4 / UNDER 5 barriers (higher win probability) until fully recovered.
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       {/* AI Engine Contract Mode */}
       <Card className="bg-card">
         <CardHeader className="pb-2">

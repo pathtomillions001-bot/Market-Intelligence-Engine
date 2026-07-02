@@ -18,8 +18,9 @@
  *      amount but keeps the family in recovery (at the current stake) until
  *      accumulated recovery profit fully covers the unrecovered amount.
  *
- * State lives in-memory only (matches the rest of the engine's session state,
- * e.g. sessionLossCount in ai.ts) — it resets on server restart.
+ * State is persisted to the DB (recoveryStateJson in settings table) so
+ * recovery survives server restarts — the engine always resumes in recovery
+ * mode if there was an unrecovered loss streak when it last stopped.
  */
 
 export type ContractFamily = "overunder" | "risefall" | "evenodd";
@@ -32,10 +33,20 @@ export interface FamilyRecoveryState {
   recoveryStep: number;       // 0 = not in recovery; increments per consecutive recovery loss
   unrecoveredAmount: number;  // dollars still owed before returning to normal mode
   baseStake: number;          // the normal stake this family recovers back to
+  streakLossCount: number;    // how many losses in the current streak (for display)
+  streakStartAmount: number;  // total amount lost in this streak (for display)
 }
 
 function freshState(family: ContractFamily): FamilyRecoveryState {
-  return { family, inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: 0 };
+  return {
+    family,
+    inRecovery: false,
+    recoveryStep: 0,
+    unrecoveredAmount: 0,
+    baseStake: 0,
+    streakLossCount: 0,
+    streakStartAmount: 0,
+  };
 }
 
 const states = new Map<ContractFamily, FamilyRecoveryState>(
@@ -95,6 +106,10 @@ export function getNextStake(family: ContractFamily, normalStake: number, recove
  * Record the outcome of a settled trade for its contract family and update
  * recovery state accordingly. `stakeUsed` is the actual stake risked on this
  * trade (needed to know exactly how much still needs to be recovered).
+ *
+ * NB: The engine MUST call this immediately after every settled trade before
+ * deciding on the next trade — recovery mode must always be aware of the
+ * most recent outcome before opening a new position.
  */
 export function recordOutcome(
   family: ContractFamily,
@@ -109,7 +124,7 @@ export function recordOutcome(
     if (state.inRecovery) {
       const recovered = Math.max(0, profit);
       if (recovered >= state.unrecoveredAmount) {
-        // Fully recovered — return to normal mode.
+        // Fully recovered — return to normal mode, clear streak counters.
         states.set(family, freshState(family));
       } else {
         state.unrecoveredAmount -= recovered;
@@ -119,23 +134,82 @@ export function recordOutcome(
     // Not in recovery + win: nothing to track.
   } else {
     if (!state.inRecovery) {
-      // Enter recovery for the first time.
+      // Enter recovery for the first time — this is the start of a loss streak.
       state.inRecovery = true;
       state.recoveryStep = 1;
       state.baseStake = state.baseStake > 0 ? state.baseStake : stakeUsed;
       state.unrecoveredAmount = stakeUsed;
+      state.streakLossCount = 1;
+      state.streakStartAmount = stakeUsed;
     } else {
       // Consecutive recovery loss — escalate stake, add to the amount owed.
       const cap = maxRecoverySteps > 0 ? maxRecoverySteps : 3;
       state.recoveryStep = Math.min(state.recoveryStep + 1, cap);
       state.unrecoveredAmount += stakeUsed;
+      state.streakLossCount++;
+      state.streakStartAmount += stakeUsed;
     }
   }
 
   return getState(family);
 }
 
-/** Reset every family back to normal mode (e.g. when the engine is manually stopped/started). */
+/** Reset every family back to normal mode (e.g. daily reset, not on restart). */
 export function resetAll(): void {
   for (const f of CONTRACT_FAMILIES) states.set(f, freshState(f));
+}
+
+/**
+ * Serialize the current recovery state to a JSON string for DB persistence.
+ * Call this after every recordOutcome() so the state survives server restarts.
+ */
+export function serializeState(): string {
+  return JSON.stringify(CONTRACT_FAMILIES.map((f) => getState(f)));
+}
+
+/**
+ * Load recovery state from a previously serialized JSON string (from DB).
+ * Called on server startup so recovery resumes from where it left off.
+ */
+export function loadState(json: string): void {
+  try {
+    const parsed = JSON.parse(json) as FamilyRecoveryState[];
+    for (const s of parsed) {
+      if (CONTRACT_FAMILIES.includes(s.family)) {
+        states.set(s.family, {
+          family: s.family,
+          inRecovery: !!s.inRecovery,
+          recoveryStep: Number(s.recoveryStep) || 0,
+          unrecoveredAmount: Number(s.unrecoveredAmount) || 0,
+          baseStake: Number(s.baseStake) || 0,
+          streakLossCount: Number(s.streakLossCount) || 0,
+          streakStartAmount: Number(s.streakStartAmount) || 0,
+        });
+      }
+    }
+  } catch {
+    /* ignore malformed state — start fresh */
+  }
+}
+
+/**
+ * Returns a summary of the last active loss streak across all families.
+ * Used by the dashboard recovery card and the AI engine to know the
+ * total unrecovered amount before opening the next trade.
+ */
+export function getLossStreakSummary(): {
+  active: boolean;
+  totalUnrecovered: number;
+  totalStreakLosses: number;
+  totalStreakAmount: number;
+  families: ContractFamily[];
+} {
+  const active = getAllStates().filter((s) => s.inRecovery);
+  return {
+    active: active.length > 0,
+    totalUnrecovered: active.reduce((s, f) => s + f.unrecoveredAmount, 0),
+    totalStreakLosses: active.reduce((s, f) => s + f.streakLossCount, 0),
+    totalStreakAmount: active.reduce((s, f) => s + f.streakStartAmount, 0),
+    families: active.map((f) => f.family),
+  };
 }

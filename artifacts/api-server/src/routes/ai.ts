@@ -13,6 +13,37 @@ import { broadcastSSE, addSSEClient, removeSSEClient } from "../lib/sse";
 
 const router = Router();
 
+// ── Recovery state persistence ────────────────────────────────────────────────
+/** Load persisted recovery state from DB on server startup. */
+export async function loadRecoveryStateFromDb(): Promise<void> {
+  try {
+    const rows = await db.select().from(settingsTable).limit(1);
+    const json = (rows[0] as any)?.recoveryStateJson;
+    if (json) {
+      recoveryEngine.loadState(json);
+      const summary = recoveryEngine.getLossStreakSummary();
+      if (summary.active) {
+        logger.info(
+          { totalUnrecovered: summary.totalUnrecovered, families: summary.families },
+          "Recovery state restored from DB — engine will resume in recovery mode",
+        );
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, "Could not load recovery state from DB");
+  }
+}
+
+/** Persist current recovery state to DB after each trade outcome. */
+async function persistRecoveryState(): Promise<void> {
+  try {
+    const json = recoveryEngine.serializeState();
+    await db.update(settingsTable).set({ recoveryStateJson: json, updatedAt: new Date() });
+  } catch (err) {
+    logger.warn({ err }, "Could not persist recovery state to DB");
+  }
+}
+
 // ── Engine state ─────────────────────────────────────────────────────────────
 let engineRunning = false;
 let autonomousMode = "manual";
@@ -343,8 +374,9 @@ async function runAutonomousLoop() {
       );
       journalConsecutiveLosses = 0;
       for (const t of sortedByTime) {
-        // Stop at any trade that predates the last cooldown end (already accounted for)
-        if (cooldownEndedMs > 0 && new Date(t.createdAt).getTime() <= cooldownEndedMs) break;
+        // Stop at any trade that predates the last cooldown end (already accounted for).
+        // Use strict less-than (<) so trades at exactly the cooldown boundary are included.
+        if (cooldownEndedMs > 0 && new Date(t.createdAt).getTime() < cooldownEndedMs) break;
         if (t.status === "lost") journalConsecutiveLosses++;
         else break;
       }
@@ -748,6 +780,7 @@ async function runAutonomousLoop() {
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
       if (recoveryFamily) {
         recoveryEngine.recordOutcome(recoveryFamily, won, profit, stake, settings?.maxRecoverySteps ?? 3);
+        persistRecoveryState().catch(() => {});
       }
 
       await db.insert(tradesTable).values({
@@ -858,6 +891,7 @@ async function runAutonomousLoop() {
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
       if (recoveryFamily) {
         recoveryEngine.recordOutcome(recoveryFamily, won, profit, stake, settings?.maxRecoverySteps ?? 3);
+        persistRecoveryState().catch(() => {});
       }
 
       await db.update(tradesTable).set({
@@ -885,6 +919,41 @@ async function runAutonomousLoop() {
     // Track consecutive losses — a win resets to 0; cooldown expiry also resets it
     if (!won) sessionLossCount++;
     else sessionLossCount = 0;
+
+    // ── Immediate post-loss cooldown gate ─────────────────────────────────────
+    // Check the streak limit right after recording a loss so the engine NEVER
+    // opens the next trade without first knowing if it should enter cooldown.
+    // This is the authoritative gate — the start-of-loop check is a secondary
+    // safety net. Together they guarantee the limit is respected immediately.
+    if (!won && engineRunning) {
+      const freshSettingsForCooldown = await db.select().from(settingsTable).limit(1);
+      const hardLimit = freshSettingsForCooldown[0]?.consecutiveLossLimit ?? 3;
+      const cooldownMins = freshSettingsForCooldown[0]?.cooldownMinutes ?? 30;
+      if (sessionLossCount >= hardLimit) {
+        broadcastSSE("trade_completed", {
+          symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
+          contract: effectiveContractType,
+          barrier: barrierToStore,
+          stake,
+          live: !!token && !paperTradeMode,
+          paper: paperTradeMode,
+          ev: analysis.expectedValue,
+          regime: output.regime,
+        });
+        if (!paperTradeMode && token) journalManager.forceRefresh();
+        logger.info({
+          symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
+          stake, ev: analysis.expectedValue, contract: effectiveContractType,
+        }, "Trade executed");
+        stopEngine(
+          `${sessionLossCount} consecutive losses — limit ${hardLimit} reached, cooling down ${cooldownMins}m`,
+          cooldownMins,
+        );
+        tradesExecutedToday++;
+        lastTradeTime = new Date();
+        return;
+      }
+    }
 
     tradesExecutedToday++;
     lastTradeTime = new Date();
@@ -1153,6 +1222,7 @@ router.get("/insights", async (_req, res): Promise<void> => {
 function buildRecoveryPayload(recoveryMultiplier: number) {
   const states = recoveryEngine.getAllStates();
   const active = states.filter((s) => s.inRecovery);
+  const summary = recoveryEngine.getLossStreakSummary();
   return {
     active: active.length > 0,
     families: states.map((s) => ({
@@ -1160,14 +1230,24 @@ function buildRecoveryPayload(recoveryMultiplier: number) {
       inRecovery: s.inRecovery,
       recoveryStep: s.recoveryStep,
       unrecoveredAmount: Math.round(s.unrecoveredAmount * 100) / 100,
+      streakLossCount: s.streakLossCount,
+      streakStartAmount: Math.round(s.streakStartAmount * 100) / 100,
       nextStakeMultiplier: s.inRecovery ? Math.round(Math.pow(recoveryMultiplier, s.recoveryStep) * 100) / 100 : 1,
       nextStake: s.inRecovery
         ? Math.round(s.baseStake * Math.pow(recoveryMultiplier, s.recoveryStep) * 100) / 100
         : null,
+      // For overunder family: show the recovery barrier being used
+      recoveryBarrier: s.family === "overunder" && s.inRecovery
+        ? { DIGITOVER: 4, DIGITUNDER: 5 }
+        : s.family === "overunder" && !s.inRecovery
+        ? { DIGITOVER: 2, DIGITUNDER: 7 }
+        : null,
     })),
     // Convenience aggregates for the dashboard card
     activeFamilies: active.map((s) => s.family),
-    totalUnrecovered: Math.round(active.reduce((sum, s) => sum + s.unrecoveredAmount, 0) * 100) / 100,
+    totalUnrecovered: Math.round(summary.totalUnrecovered * 100) / 100,
+    totalStreakLosses: summary.totalStreakLosses,
+    totalStreakAmount: Math.round(summary.totalStreakAmount * 100) / 100,
     highestStep: active.reduce((max, s) => Math.max(max, s.recoveryStep), 0),
   };
 }
@@ -1223,10 +1303,14 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     // This prevents the engine from immediately re-triggering cooldown from journal
     // entries that predate this manual start (per spec: only the current streak counts).
     cooldownEndedAt = new Date();
+    // Reset session loss counter so the new session starts from 0 consecutive losses.
+    sessionLossCount = 0;
     engineRunning = true; autonomousMode = "autonomous"; stopReasons = []; nextScanIn = loopIntervalSec;
     exploitSymbol = null; exploitCount = 0;
-    // Fresh session — clear any leftover recovery state from a previous run
-    recoveryEngine.resetAll();
+    // NOTE: Do NOT call recoveryEngine.resetAll() here — any unrecovered loss amount
+    // from before this session must be preserved so the engine can continue recovery.
+    // Recovery state is persisted to DB and loaded on startup — it should survive
+    // both manual engine restarts AND server restarts.
 
     // Reset group cursors → scanning restarts from V10 1s / V10 / JD10 / RDBULL
     groupCursors.fill(0);

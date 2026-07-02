@@ -634,25 +634,41 @@ export default function Dashboard() {
               </div>
             </CardContent>
           </Card>
-          <Card className="bg-card">
+          <Card className={`${engine?.recovery?.active ? "bg-amber-500/5 border-amber-500/20" : "bg-card"}`}>
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Recovery</div>
               {engine?.recovery?.active ? (
                 <>
-                  <div className="text-2xl font-mono font-bold text-amber-500">
-                    x{(engine.recovery.families.find((f) => f.inRecovery)?.nextStakeMultiplier ?? 1).toFixed(2)}
+                  <div className="flex items-baseline gap-1.5">
+                    <div className="text-2xl font-mono font-bold text-amber-500">
+                      ×{(engine.recovery.families.find((f: any) => f.inRecovery)?.nextStakeMultiplier ?? 1).toFixed(2)}
+                    </div>
+                    <div className="text-xs text-amber-400/70 font-mono">step {engine.recovery.highestStep}</div>
                   </div>
-                  <div className="text-xs text-muted-foreground -mt-1 mb-0.5">
-                    step {engine.recovery.highestStep}
+                  <div className="text-xs text-amber-400/80 mt-0.5 font-medium">
+                    ${engine.recovery.totalUnrecovered.toFixed(2)} to recover
                   </div>
                   <div className="text-xs text-muted-foreground mt-1">
-                    ${engine.recovery.totalUnrecovered.toFixed(2)} to recover · {engine.recovery.activeFamilies.join(", ")}
+                    {engine.recovery.totalStreakLosses > 0 && (
+                      <span className="text-amber-500/70">{engine.recovery.totalStreakLosses} loss streak · ${(engine.recovery.totalStreakAmount ?? 0).toFixed(2)} lost · </span>
+                    )}
+                    {engine.recovery.activeFamilies.map((f: string) => {
+                      const fam = engine.recovery.families.find((x: any) => x.family === f);
+                      const barrier = fam?.recoveryBarrier;
+                      if (f === "overunder" && barrier) return `over/under (OVER ${barrier.DIGITOVER} / UNDER ${barrier.DIGITUNDER})`;
+                      if (f === "risefall") return "rise/fall";
+                      if (f === "evenodd") return "even/odd";
+                      return f;
+                    }).join(", ")}
                   </div>
                 </>
               ) : (
                 <>
                   <div className="text-2xl font-mono font-bold text-green-500">Normal</div>
-                  <div className="text-xs text-muted-foreground mt-1">no families in recovery</div>
+                  <div className="text-xs text-muted-foreground mt-1">no active recovery</div>
+                  {engine?.recovery?.families?.find((f: any) => f.family === "overunder") && (
+                    <div className="text-[10px] text-muted-foreground mt-0.5">OVER 2 / UNDER 7 barriers</div>
+                  )}
                 </>
               )}
             </CardContent>
