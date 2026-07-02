@@ -44,6 +44,155 @@ async function persistRecoveryState(): Promise<void> {
   }
 }
 
+/**
+ * Normalised trade entry — common shape accepted by the core sync logic.
+ * Both the Deriv profit_table and local DB trades are normalised to this.
+ */
+interface NormalisedTrade {
+  contractType: string;   // e.g. "DIGITUNDER", "CALL", "DIGITEVEN"
+  won: boolean;           // true = profit > 0
+  stake: number;          // amount risked (buy_price / stake column)
+  amountLost: number;     // 0 on win; stake value on loss
+  sellTimeSec: number;    // unix seconds for sort ordering
+}
+
+/** Map a raw Deriv profit_table entry → NormalisedTrade (or null if unusable). */
+function normaliseDerivEntry(e: any): NormalisedTrade | null {
+  // Normalize contract type — Deriv uses "RISE"/"FALL" interchangeably with "CALL"/"PUT"
+  let ct: string = (e.contract_type ?? e.contractType ?? "").toUpperCase();
+  if (ct === "RISE") ct = "CALL";
+  if (ct === "FALL") ct = "PUT";
+  if (!ct || ct === "UNKNOWN") return null;
+
+  // Win = received more than paid (sell_price > buy_price)
+  // This matches exactly how the trades/stats and daily-summary routes determine win/loss
+  const buyPrice  = Number(e.buy_price ?? 0);
+  const sellPrice = Number(e.sell_price ?? 0);
+  if (buyPrice <= 0) return null;
+  const won = sellPrice > buyPrice;
+  const stake = buyPrice;
+
+  return {
+    contractType: ct,
+    won,
+    stake,
+    amountLost: won ? 0 : stake,
+    // Prefer sell_time (contract settled); fall back to purchase_time
+    sellTimeSec: Number(e.sell_time ?? e.purchase_time ?? 0),
+  };
+}
+
+/** Map a local DB trade row → NormalisedTrade (or null if unusable). */
+function normaliseDbTrade(t: any): NormalisedTrade | null {
+  const ct: string = (t.contractType ?? t.contract_type ?? "").toUpperCase();
+  if (!ct) return null;
+  const stake = Math.abs(Number(t.stake ?? 0));
+  if (stake <= 0) return null;
+  const won = t.status === "won";
+  return {
+    contractType: ct,
+    won,
+    stake,
+    amountLost: won ? 0 : stake,
+    sellTimeSec: t.createdAt ? new Date(t.createdAt).getTime() / 1000 : 0,
+  };
+}
+
+/**
+ * Core sync logic — takes a list of already-normalised trades (sorted newest-first)
+ * and updates the recovery engine state to match the journal ground truth.
+ *
+ * Rules per contract family:
+ *  – Consecutive losses at the TOP of the list (most recent first) = active loss streak.
+ *  – If journal shows a streak AND engine is "Normal" → seed engine from journal.
+ *  – If journal shows NO streak AND engine was "in recovery" but most-recent is a win
+ *    → clear to normal (fully recovered via a trade outside the engine loop).
+ *  – If engine is already "in recovery" with remaining unrecovered amount, trust it
+ *    (engine has more precise partial-recovery tracking than a raw journal snapshot).
+ */
+function applyJournalSync(sorted: NormalisedTrade[]): void {
+  const families: recoveryEngine.ContractFamily[] = ["overunder", "risefall", "evenodd"];
+
+  for (const family of families) {
+    const currentState = recoveryEngine.getState(family);
+
+    // Trades for this family, already sorted newest → oldest
+    const familyTrades = sorted.filter(t => recoveryEngine.contractTypeToFamily(t.contractType) === family);
+    if (familyTrades.length === 0) continue;
+
+    // Count consecutive losses starting from the most recent trade
+    let streakLosses = 0;
+    let totalAmountLost = 0;
+    for (const t of familyTrades) {
+      if (!t.won) {
+        streakLosses++;
+        totalAmountLost += t.amountLost;
+      } else {
+        break;
+      }
+    }
+
+    if (streakLosses === 0) {
+      // No active loss streak in journal
+      if (currentState.inRecovery && familyTrades[0]?.won) {
+        // Most recent trade was a win — streak cleared by a trade the engine didn't see
+        recoveryEngine.seedFamilyState(family, {
+          inRecovery: false,
+          recoveryStep: 0,
+          unrecoveredAmount: 0,
+          baseStake: currentState.baseStake,
+          streakLossCount: 0,
+          streakStartAmount: 0,
+        });
+      }
+    } else if (!currentState.inRecovery) {
+      // Journal shows a streak but engine thinks it's Normal → seed it
+      const oldestLossInStreak = familyTrades[streakLosses - 1];
+      const baseStake = oldestLossInStreak?.stake || (totalAmountLost / streakLosses);
+      recoveryEngine.seedFamilyState(family, {
+        inRecovery: true,
+        recoveryStep: Math.max(1, streakLosses),
+        unrecoveredAmount: totalAmountLost,
+        baseStake,
+        streakLossCount: streakLosses,
+        streakStartAmount: totalAmountLost,
+      });
+      logger.info(
+        { family, streakLosses, totalAmountLost: totalAmountLost.toFixed(2), baseStake: baseStake.toFixed(2) },
+        "Recovery engine seeded from journal — engine was Normal but journal shows loss streak",
+      );
+    }
+    // Engine already in recovery → trust engine (more precise partial-recovery tracking)
+  }
+}
+
+/**
+ * Sync recovery state from the Deriv profit_table (primary source of truth).
+ * Also accepts local DB trades as a fallback when the journal is empty.
+ * Called at the start of every autonomous loop iteration and on each engine/status poll.
+ */
+function syncRecoveryStateFromDerivJournal(derivEntries: any[], dbTrades: any[] = []): void {
+  // Build a unified list from Deriv journal first, then fall back to DB rows
+  const derivNorm: NormalisedTrade[] = derivEntries
+    .map(normaliseDerivEntry)
+    .filter((x): x is NormalisedTrade => x !== null);
+
+  const dbNorm: NormalisedTrade[] = dbTrades
+    .map(normaliseDbTrade)
+    .filter((x): x is NormalisedTrade => x !== null);
+
+  // Prefer Deriv journal; supplement with local DB rows that aren't already represented
+  // (by checking for close timestamps). In practice, for live trades the journal is always present.
+  const combined = derivNorm.length > 0
+    ? derivNorm   // Journal is authoritative when available
+    : dbNorm;     // Fall back to DB rows (paper/demo sessions without live token)
+
+  // Sort newest → oldest
+  const sorted = combined.sort((a, b) => b.sellTimeSec - a.sellTimeSec);
+
+  applyJournalSync(sorted);
+}
+
 // ── Engine state ─────────────────────────────────────────────────────────────
 let engineRunning = false;
 let autonomousMode = "manual";
@@ -344,6 +493,19 @@ async function runAutonomousLoop() {
     const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
     const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
     tradesExecutedToday = closedToday.length;
+
+    // ── Sync recovery state from Deriv journal (ground-truth) ────────────────
+    // The Deriv profit_table is the authoritative source (all trades, including
+    // manual Quick Strike trades and pre-existing history). Local DB is the
+    // fallback for paper/demo sessions with no live token.
+    {
+      const derivJournal = token ? journalManager.getCached() : [];
+      const recentDbTrades = await db.select().from(tradesTable)
+        .where(sql`${tradesTable.status} IN ('won','lost')`)
+        .orderBy(desc(tradesTable.createdAt))
+        .limit(50);
+      syncRecoveryStateFromDerivJournal(derivJournal, recentDbTrades as any);
+    }
 
     // ── Ground-truth consecutive-loss and daily P&L ──────────────────────────
     // Consecutive losses: ALWAYS use local DB (written immediately when trades settle,
@@ -1258,6 +1420,19 @@ router.get("/engine/status", async (_req, res): Promise<void> => {
   const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
   const liveScores = await getComputedAgentScores();
   const recoveryMultiplier = settings.length > 0 ? Number((settings[0] as any).recoveryMultiplier) : 1.2;
+
+  // Sync recovery from Deriv journal on every dashboard poll — ground truth.
+  {
+    const statusToken = settings.length > 0 ? (settings[0] as any)?.token ?? null : null;
+    const cachedToken = getCachedToken();
+    const hasToken = !!(cachedToken || statusToken);
+    const derivJournalForStatus = hasToken ? journalManager.getCached() : [];
+    const recentDbForStatus = await db.select().from(tradesTable)
+      .where(sql`${tradesTable.status} IN ('won','lost')`)
+      .orderBy(desc(tradesTable.createdAt))
+      .limit(50);
+    syncRecoveryStateFromDerivJournal(derivJournalForStatus, recentDbForStatus as any);
+  }
 
   res.json({
     isRunning: engineRunning, mode: engineRunning ? "autonomous" : "manual",

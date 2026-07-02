@@ -160,6 +160,25 @@ export function resetAll(): void {
 }
 
 /**
+ * Directly seed a family's recovery state from external data (e.g. DB journal sync).
+ * Used by the journal-sync routine to ensure recovery state always matches actual
+ * trade history, even for manual trades or after server restarts.
+ */
+export function seedFamilyState(
+  family: ContractFamily,
+  data: {
+    inRecovery: boolean;
+    recoveryStep: number;
+    unrecoveredAmount: number;
+    baseStake: number;
+    streakLossCount: number;
+    streakStartAmount: number;
+  },
+): void {
+  states.set(family, { family, ...data });
+}
+
+/**
  * Serialize the current recovery state to a JSON string for DB persistence.
  * Call this after every recordOutcome() so the state survives server restarts.
  */
