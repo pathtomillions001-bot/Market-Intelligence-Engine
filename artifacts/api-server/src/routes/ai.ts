@@ -1380,37 +1380,71 @@ router.get("/insights", async (_req, res): Promise<void> => {
   res.json(insights);
 });
 
-// ── Recovery dashboard payload ──────────────────────────────────────────────
-function buildRecoveryPayload(recoveryMultiplier: number) {
-  const states = recoveryEngine.getAllStates();
-  const active = states.filter((s) => s.inRecovery);
-  const summary = recoveryEngine.getLossStreakSummary();
+// ── Recovery dashboard payload — derived directly from Deriv journal ─────────
+//
+// Uses the IDENTICAL win/loss formula as the Streak card (sell_price > buy_price),
+// so the streak count is always in perfect sync between both cards.
+// No in-memory state machine is involved for display purposes.
+//
+// auto-reset: when consecutive losses from newest = 0 (a win broke the streak),
+// the card returns to "Normal" automatically.
+function buildRecoveryPayloadFromJournal(
+  journalEntries: any[],  // raw Deriv profit_table entries — newest first (sort: DESC)
+  multiplierSetting: number,
+) {
+  // Map entries — exact same formula as /trades/stats and /trades/daily-summary
+  const mapped = journalEntries.map((e: any) => {
+    const buyPrice  = Number(e.buy_price ?? 0);
+    const sellPrice = Number(e.sell_price ?? 0);
+    const won = sellPrice > buyPrice;
+    let ct: string = (e.contract_type ?? "").toUpperCase();
+    if (ct === "RISE") ct = "CALL";
+    if (ct === "FALL") ct = "PUT";
+    let family: string | null = null;
+    if (ct === "DIGITOVER" || ct === "DIGITUNDER") family = "overunder";
+    else if (ct === "CALL" || ct === "PUT") family = "risefall";
+    else if (ct === "DIGITEVEN" || ct === "DIGITODD") family = "evenodd";
+    return { won, family, amountLost: won ? 0 : Math.max(0, buyPrice - sellPrice) };
+  });
+
+  // Count consecutive losses from newest (index 0) — stops at first win
+  let streakLosses = 0;
+  let totalAmountLost = 0;
+  const familiesInStreak = new Set<string>();
+
+  for (const t of mapped) {
+    if (!t.won) {
+      streakLosses++;
+      totalAmountLost += t.amountLost;
+      if (t.family) familiesInStreak.add(t.family);
+    } else {
+      break;
+    }
+  }
+
+  const active = streakLosses > 0;
+  const multiplier = active
+    ? Math.round(Math.pow(multiplierSetting, streakLosses) * 100) / 100
+    : 1;
+  const activeFamiliesArr = Array.from(familiesInStreak);
+
+  const allFamilies = ["overunder", "risefall", "evenodd"] as const;
+  const families = allFamilies.map((fam) => ({
+    family: fam,
+    inRecovery: familiesInStreak.has(fam),
+    recoveryStep: familiesInStreak.has(fam) ? streakLosses : 0,
+    nextStakeMultiplier: familiesInStreak.has(fam) ? multiplier : 1,
+    recoveryBarrier: fam === "overunder" ? { DIGITOVER: 2, DIGITUNDER: 7 } : null,
+  }));
+
   return {
-    active: active.length > 0,
-    families: states.map((s) => ({
-      family: s.family,
-      inRecovery: s.inRecovery,
-      recoveryStep: s.recoveryStep,
-      unrecoveredAmount: Math.round(s.unrecoveredAmount * 100) / 100,
-      streakLossCount: s.streakLossCount,
-      streakStartAmount: Math.round(s.streakStartAmount * 100) / 100,
-      nextStakeMultiplier: s.inRecovery ? Math.round(Math.pow(recoveryMultiplier, s.recoveryStep) * 100) / 100 : 1,
-      nextStake: s.inRecovery
-        ? Math.round(s.baseStake * Math.pow(recoveryMultiplier, s.recoveryStep) * 100) / 100
-        : null,
-      // For overunder family: show the recovery barrier being used
-      recoveryBarrier: s.family === "overunder" && s.inRecovery
-        ? { DIGITOVER: 4, DIGITUNDER: 5 }
-        : s.family === "overunder" && !s.inRecovery
-        ? { DIGITOVER: 2, DIGITUNDER: 7 }
-        : null,
-    })),
-    // Convenience aggregates for the dashboard card
-    activeFamilies: active.map((s) => s.family),
-    totalUnrecovered: Math.round(summary.totalUnrecovered * 100) / 100,
-    totalStreakLosses: summary.totalStreakLosses,
-    totalStreakAmount: Math.round(summary.totalStreakAmount * 100) / 100,
-    highestStep: active.reduce((max, s) => Math.max(max, s.recoveryStep), 0),
+    active,
+    families,
+    activeFamilies: activeFamiliesArr,
+    totalUnrecovered: Math.round(totalAmountLost * 100) / 100,
+    totalStreakLosses: streakLosses,
+    totalStreakAmount: Math.round(totalAmountLost * 100) / 100,
+    highestStep: active ? streakLosses : 0,
   };
 }
 
@@ -1421,18 +1455,9 @@ router.get("/engine/status", async (_req, res): Promise<void> => {
   const liveScores = await getComputedAgentScores();
   const recoveryMultiplier = settings.length > 0 ? Number((settings[0] as any).recoveryMultiplier) : 1.2;
 
-  // Sync recovery from Deriv journal on every dashboard poll — ground truth.
-  {
-    const statusToken = settings.length > 0 ? (settings[0] as any)?.token ?? null : null;
-    const cachedToken = getCachedToken();
-    const hasToken = !!(cachedToken || statusToken);
-    const derivJournalForStatus = hasToken ? journalManager.getCached() : [];
-    const recentDbForStatus = await db.select().from(tradesTable)
-      .where(sql`${tradesTable.status} IN ('won','lost')`)
-      .orderBy(desc(tradesTable.createdAt))
-      .limit(50);
-    syncRecoveryStateFromDerivJournal(derivJournalForStatus, recentDbForStatus as any);
-  }
+  // Recovery is derived directly from the Deriv journal — same source as the Streak card.
+  // No state machine sync needed; the payload function computes it fresh every poll.
+  const derivJournalForStatus = journalManager.getCached();
 
   res.json({
     isRunning: engineRunning, mode: engineRunning ? "autonomous" : "manual",
@@ -1458,7 +1483,7 @@ router.get("/engine/status", async (_req, res): Promise<void> => {
     sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: DERIV_MARKETS.length,
-    recovery: buildRecoveryPayload(recoveryMultiplier),
+    recovery: buildRecoveryPayloadFromJournal(derivJournalForStatus, recoveryMultiplier),
   });
 });
 
@@ -1521,7 +1546,7 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: DERIV_MARKETS.length,
-    recovery: buildRecoveryPayload(settings.length > 0 ? Number((settings[0] as any).recoveryMultiplier) : 1.2),
+    recovery: buildRecoveryPayloadFromJournal(journalManager.getCached(), settings.length > 0 ? Number((settings[0] as any).recoveryMultiplier) : 1.2),
   });
 });
 
