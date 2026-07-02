@@ -1,7 +1,6 @@
 import { useGetSettings, useUpdateSettings, useGetAccount } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -233,29 +232,6 @@ export default function Settings() {
           <SettingRow label="Cooldown Duration" description="Minutes before engine auto-resumes after a consecutive-loss stop.">
             <NumInput value={form.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} min={1} max={1440} step={5} suffix="min" />
           </SettingRow>
-        </CardContent>
-      </Card>
-
-      {/* Engine Behavior */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Engine Behavior</CardTitle>
-          <CardDescription className="text-xs">The AI scans all markets in milliseconds from live tick buffers. Confidence and scan speed are self-managed.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SettingRow label="Trade Duration" description="Contract duration in ticks (5t ≈ 5s on 1s synthetics).">
-            <NumInput value={form.tradeDurationSec} onChange={(v) => set("tradeDurationSec", v)} min={1} max={10} step={1} suffix="t" />
-          </SettingRow>
-          <SettingRow label="Market Rotation After" description="Exploit hot market for N trades before rotating.">
-            <NumInput value={form.marketRotationAfter} onChange={(v) => set("marketRotationAfter", v)} min={1} max={20} step={1} />
-          </SettingRow>
-          <SettingRow label="Paper Trade Mode" description="Log trades with ML features but do not send live orders to Deriv.">
-            <Switch checked={form.paperTradeMode} onCheckedChange={(v) => set("paperTradeMode", v)} />
-          </SettingRow>
-          <div className="pt-2 pb-1 flex gap-2 text-xs text-muted-foreground bg-secondary/20 rounded-lg px-3 py-2">
-            <Info className="w-3.5 h-3.5 text-primary flex-shrink-0 mt-0.5" />
-            <span>The AI engine scans all 17 markets every 2–3 seconds from live tick buffers. Confidence thresholds, scan intervals, and trade timing are determined autonomously by the ML ensemble — not user settings.</span>
-          </div>
         </CardContent>
       </Card>
 
