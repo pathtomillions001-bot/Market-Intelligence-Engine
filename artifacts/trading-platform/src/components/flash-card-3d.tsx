@@ -1,8 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useExecuteTrade, useGetSettings } from "@workspace/api-client-react";
 import { toast } from "sonner";
-import { Zap, TrendingUp, TrendingDown, ChevronDown, ChevronUp, AlertTriangle } from "lucide-react";
+import { Zap, TrendingUp, TrendingDown, ChevronDown, ChevronUp } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 // ── Contract type groups ────────────────────────────────────────────────────────
@@ -64,7 +64,6 @@ function WinProbBar({ value }: { value: number }) {
 // ── Quick Strike Card ──────────────────────────────────────────────────────────
 export function MarketOpportunityFlashCard({
   onTrade,
-  currentStreak = 0,
 }: {
   onTrade?: () => void;
   currentStreak?: number;
@@ -72,23 +71,13 @@ export function MarketOpportunityFlashCard({
   const [selectedGroupIdx, setSelectedGroupIdx] = useState(0);
   const [executingSymbol, setExecutingSymbol] = useState<string | null>(null);
   const [showMarkets, setShowMarkets] = useState(false);
-  const [recoveryDismissed, setRecoveryDismissed] = useState(false);
 
   const executeTrade = useExecuteTrade();
 
   // Read user's enabled contract families from settings
   const { data: settings } = useGetSettings();
   const preferredTypes: string[] = (settings as any)?.preferredContractTypes ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
-  const maxTradeStake: number = (settings as any)?.maxTradeStake ?? 500;
 
-  // Engine status — needed for recovery multiplier preview
-  const { data: engineStatus } = useQuery<any>({
-    queryKey: ["engine-status-flash"],
-    queryFn: () => fetch("/api/ai/engine/status").then(r => r.json()),
-    refetchInterval: 3000,
-  });
-  const recoveryMode = engineStatus?.recoveryMode ?? { isActive: false, recoveryLossCount: 0 };
-  const recoveryLossCount: number = recoveryMode.recoveryLossCount ?? 0;
   // Only show tabs for enabled groups; fall back to all groups if nothing is active
   const enabledGroups = CONTRACT_GROUPS.filter(g =>
     (g.types as readonly string[]).some(t => preferredTypes.includes(t))
@@ -97,20 +86,9 @@ export function MarketOpportunityFlashCard({
 
   // Auto-reset selectedGroupIdx when enabled groups change (e.g. user disables Rise/Fall)
   const clampedIdx = Math.min(selectedGroupIdx, visibleGroups.length - 1);
-  useEffect(() => {
-    if (selectedGroupIdx !== clampedIdx) setSelectedGroupIdx(clampedIdx);
-  }, [clampedIdx, selectedGroupIdx]);
 
-  // Recovery mode: activated when losing streak is ≥ 2 consecutive losses and user hasn't dismissed it
-  const isLosingStreak = currentStreak <= -2;
-  const recoveryActive = isLosingStreak && !recoveryDismissed;
-
-  // In recovery, default to Over/Under if it's enabled; otherwise use first visible group
-  const recoveryGroup = visibleGroups.find(g => g.short === "O/U") ?? visibleGroups[0];
-  const selectedGroup = recoveryActive ? recoveryGroup : visibleGroups[clampedIdx];
-  const effectiveGroupIdx = recoveryActive
-    ? CONTRACT_GROUPS.findIndex(g => g.short === recoveryGroup.short)
-    : CONTRACT_GROUPS.findIndex(g => g.short === selectedGroup.short);
+  const selectedGroup = visibleGroups[clampedIdx];
+  const effectiveGroupIdx = CONTRACT_GROUPS.findIndex(g => g.short === selectedGroup.short);
 
   // All markets ranked by quality score from background scanner
   const { data: allMarkets } = useQuery<any[]>({
@@ -119,29 +97,18 @@ export function MarketOpportunityFlashCard({
     refetchInterval: 8000,
   });
 
-  // In recovery mode: find the best market with a tier-2 recovery barrier (OVER 4 or UNDER 5)
-  const recoveryMarket = recoveryActive
-    ? (allMarkets ?? []).find((m: any) =>
-        (m.recommendedContractType === "DIGITOVER" || m.recommendedContractType === "DIGITUNDER") && m.shouldTrade
-      ) ?? (allMarkets ?? []).find((m: any) =>
-        m.recommendedContractType === "DIGITOVER" || m.recommendedContractType === "DIGITUNDER"
-      )
-    : null;
-
   // Filter to markets whose AI-recommended contract type is in the selected group
   const groupMarkets = (allMarkets ?? []).filter((m: any) =>
     (selectedGroup.types as readonly string[]).includes(m.recommendedContractType)
   );
   const tradeableGroupMarkets = groupMarkets.filter((m: any) => m.shouldTrade);
 
-  // Best market: in recovery mode use recovery market, otherwise tradeable first then by quality score
-  const bestGroupMarket = recoveryActive
-    ? (recoveryMarket ?? groupMarkets[0] ?? allMarkets?.[0])
-    : (tradeableGroupMarkets[0] ?? groupMarkets[0] ?? allMarkets?.[0]);
+  // Best market: tradeable first, then highest quality score
+  const bestGroupMarket = tradeableGroupMarkets[0] ?? groupMarkets[0] ?? allMarkets?.[0];
 
   // Fetch full recommendation for the selected market (AI-configured ticks, stake, barrier)
   const { data: marketDetail } = useQuery<any>({
-    queryKey: ["market-detail-flash", bestGroupMarket?.symbol, effectiveGroupIdx, recoveryActive],
+    queryKey: ["market-detail-flash", bestGroupMarket?.symbol, effectiveGroupIdx],
     queryFn: () => bestGroupMarket?.symbol
       ? fetch(`/api/markets/${bestGroupMarket.symbol}`).then(r => r.json())
       : Promise.resolve(null),
@@ -151,72 +118,43 @@ export function MarketOpportunityFlashCard({
 
   const rec = marketDetail?.recommendation;
 
-  // Contract type: in recovery force a recovery barrier contract, else use AI recommendation
+  // Contract type from AI recommendation, clamped to the selected group
   const recContractType: string = rec?.contractType ?? bestGroupMarket?.recommendedContractType ?? selectedGroup.types[0];
   const contractType = (selectedGroup.types as readonly string[]).includes(recContractType)
     ? recContractType
     : selectedGroup.types[0];
 
-  // Recovery barrier override: look for tier-2 barriers in agentOutputs (OVER 4 / UNDER 5)
-  const digitAgent = (rec as any)?.agentOutputs?.digitDistribution;
-  const tier2Options: any[] = digitAgent?.data?.tier2Options ?? [];
-  const bestRecoveryOption = tier2Options.find((o: any) =>
-    (o.contractType === "DIGITOVER" && o.barrier === 4) ||
-    (o.contractType === "DIGITUNDER" && o.barrier === 5)
-  ) ?? tier2Options[0];
+  // Barrier from AI recommendation
+  const activeBarrier = contractType.includes("DIGIT") && rec?.digitBarrier != null
+    ? rec.digitBarrier
+    : undefined;
 
-  const recoveryContractType: string = bestRecoveryOption?.contractType ?? contractType;
-  const recoveryBarrier: number | undefined = bestRecoveryOption?.barrier;
-  const recoveryWinProb: number = bestRecoveryOption
-    ? Math.round((bestRecoveryOption.winProbability ?? 0) * 100)
-    : 50;
+  const ctColor = contractColor(contractType);
+  const isUp = contractToDirection(contractType) === "up";
 
-  // Active contract type and barrier
-  const activeContractType = recoveryActive ? recoveryContractType : contractType;
-  const activeBarrier = recoveryActive
-    ? recoveryBarrier
-    : (contractType.includes("DIGIT") && rec?.digitBarrier != null ? rec.digitBarrier : undefined);
-
-  // Execute is active:
-  // - Normal mode: there is a recommendation for the selected group (user can always execute;
-  //   AI shouldTrade flag is shown visually but no longer gates the button so the user can
-  //   override the AI's "wait" signal with a manual trade when they see a good opportunity)
-  // - Recovery mode: we have a recovery option with positive EV
+  // Execute is active when there is a recommendation for the selected group
   const isGroupMatch = (selectedGroup.types as readonly string[]).includes(
     rec?.contractType ?? bestGroupMarket?.recommendedContractType ?? ""
   );
-  const hasGroupRec = isGroupMatch && !!rec;
-  const aiSaysTrade = !!(rec?.shouldTrade && isGroupMatch);
-  const normalShouldTrade = hasGroupRec;
-  const recoveryShouldTrade = !!(recoveryActive && bestRecoveryOption && (bestRecoveryOption.expectedValue ?? 0) > 0);
-  const shouldTrade = recoveryActive ? recoveryShouldTrade : normalShouldTrade;
+  const shouldTrade = isGroupMatch && !!rec;
 
-  const ctColor = contractColor(activeContractType);
-  const isUp = contractToDirection(activeContractType) === "up";
-
-  const winProb = recoveryActive ? recoveryWinProb : (rec?.winProbability ?? rec?.confidence ?? 0);
+  const winProb = rec?.winProbability ?? rec?.confidence ?? 0;
   const isExecuting = executingSymbol === bestGroupMarket?.symbol;
 
   const handleExecute = () => {
-    if (!bestGroupMarket) return;
-    if (recoveryActive && !bestRecoveryOption && !rec) return;
-    if (!recoveryActive && !rec) return;
+    if (!bestGroupMarket || !rec) return;
 
     const sym = bestGroupMarket.symbol;
-    const barrier = activeBarrier;
+    const stake = rec?.stake ?? 1;
     setExecutingSymbol(sym);
-
-    const stake = recoveryActive
-      ? (bestRecoveryOption ? Number((bestRecoveryOption?.stake ?? rec?.stake ?? 1).toFixed(2)) : rec?.stake ?? 1)
-      : (rec?.stake ?? 1);
 
     executeTrade.mutate({
       data: {
         symbol: sym,
-        contractType: activeContractType,
+        contractType,
         stake,
-        direction: contractToDirection(activeContractType),
-        ...(barrier != null && { barrier }),
+        direction: contractToDirection(contractType),
+        ...(activeBarrier != null && { barrier: activeBarrier }),
         duration: rec?.recommendedDuration ?? 5,
         durationUnit: "t",
       } as any
@@ -236,58 +174,45 @@ export function MarketOpportunityFlashCard({
     });
   };
 
-  const recoveryColor = "#f59e0b";
-
   return (
     <div
       className="relative w-full h-full rounded-2xl border overflow-hidden"
       style={{
-        background: recoveryActive
-          ? "linear-gradient(135deg, #1a0f00 0%, #1a1200 50%, #0f0f0f 100%)"
-          : "linear-gradient(135deg, #18181b 0%, #18181b 50%, #0f0f10 100%)",
-        borderColor: recoveryActive ? `${recoveryColor}50` : "rgba(0,255,255,0.2)",
-        boxShadow: recoveryActive
-          ? `0 0 30px ${recoveryColor}30, 0 0 60px ${recoveryColor}10, inset 0 1px 0 rgba(255,255,255,0.05)`
-          : `0 0 30px ${ctColor}30, 0 0 60px ${ctColor}10, inset 0 1px 0 rgba(255,255,255,0.05)`,
+        background: "linear-gradient(135deg, #18181b 0%, #18181b 50%, #0f0f10 100%)",
+        borderColor: "rgba(0,255,255,0.2)",
+        boxShadow: `0 0 30px ${ctColor}30, 0 0 60px ${ctColor}10, inset 0 1px 0 rgba(255,255,255,0.05)`,
       }}
     >
       {/* Corner accents */}
-      <span className="absolute top-0 left-0 w-5 h-5 border-t-2 border-l-2 border-primary rounded-tl-2xl" style={recoveryActive ? { borderColor: recoveryColor } : {}} />
-      <span className="absolute top-0 right-0 w-5 h-5 border-t-2 border-r-2 border-primary rounded-tr-2xl" style={recoveryActive ? { borderColor: recoveryColor } : {}} />
-      <span className="absolute bottom-0 left-0 w-5 h-5 border-b-2 border-l-2 border-primary rounded-bl-2xl" style={recoveryActive ? { borderColor: recoveryColor } : {}} />
-      <span className="absolute bottom-0 right-0 w-5 h-5 border-b-2 border-r-2 border-primary rounded-br-2xl" style={recoveryActive ? { borderColor: recoveryColor } : {}} />
+      <span className="absolute top-0 left-0 w-5 h-5 border-t-2 border-l-2 border-primary rounded-tl-2xl" />
+      <span className="absolute top-0 right-0 w-5 h-5 border-t-2 border-r-2 border-primary rounded-tr-2xl" />
+      <span className="absolute bottom-0 left-0 w-5 h-5 border-b-2 border-l-2 border-primary rounded-bl-2xl" />
+      <span className="absolute bottom-0 right-0 w-5 h-5 border-b-2 border-r-2 border-primary rounded-br-2xl" />
 
       {/* Scan line */}
       <motion.div
         className="absolute inset-x-0 h-px"
-        style={{ background: recoveryActive ? `linear-gradient(90deg, transparent, ${recoveryColor}80, transparent)` : "linear-gradient(90deg, transparent, rgba(0,255,255,0.5), transparent)" }}
+        style={{ background: "linear-gradient(90deg, transparent, rgba(0,255,255,0.5), transparent)" }}
         animate={{ top: ["0%", "100%", "0%"] }}
-        transition={{ duration: recoveryActive ? 2 : 4, ease: "linear", repeat: Infinity }}
+        transition={{ duration: 4, ease: "linear", repeat: Infinity }}
       />
 
       {/* Grid overlay */}
       <div className="absolute inset-0 opacity-[0.025]" style={{
-        backgroundImage: `linear-gradient(${recoveryActive ? "rgba(245,158,11,1)" : "rgba(0,255,255,1)"} 1px, transparent 1px), linear-gradient(90deg, ${recoveryActive ? "rgba(245,158,11,1)" : "rgba(0,255,255,1)"} 1px, transparent 1px)`,
+        backgroundImage: `linear-gradient(rgba(0,255,255,1) 1px, transparent 1px), linear-gradient(90deg, rgba(0,255,255,1) 1px, transparent 1px)`,
         backgroundSize: "20px 20px"
       }} />
 
       <div className="relative z-10 p-4 flex flex-col gap-3 h-full">
         {/* Header: label + contract group selector + live dot */}
         <div className="flex items-center gap-2">
-          {recoveryActive ? (
-            <AlertTriangle className="w-3.5 h-3.5 shrink-0" style={{ color: recoveryColor }} />
-          ) : (
-            <Zap className="w-3.5 h-3.5 text-primary shrink-0" />
-          )}
-          <span
-            className="text-[10px] font-mono uppercase tracking-widest"
-            style={{ color: recoveryActive ? recoveryColor : "rgba(0,255,255,0.7)" }}
-          >
-            {recoveryActive ? `Recovery Mode — ${Math.abs(currentStreak)} Loss Streak` : "Quick Strike"}
+          <Zap className="w-3.5 h-3.5 text-primary shrink-0" />
+          <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: "rgba(0,255,255,0.7)" }}>
+            Quick Strike
           </span>
 
-          {/* Contract group tab selector — only shows enabled families; hidden in recovery mode */}
-          {!recoveryActive && visibleGroups.length > 0 && (
+          {/* Contract group tab selector — only shows enabled families */}
+          {visibleGroups.length > 0 && (
             <div className="ml-auto flex items-center bg-black/40 rounded-lg p-0.5 gap-0.5">
               {visibleGroups.map((g, i) => (
                 <button
@@ -306,32 +231,8 @@ export function MarketOpportunityFlashCard({
             </div>
           )}
 
-          {/* Recovery: dismiss button */}
-          {recoveryActive && (
-            <button
-              onClick={() => setRecoveryDismissed(true)}
-              className="ml-auto text-[8px] font-mono px-2 py-0.5 rounded border border-amber-500/30 text-amber-500/60 hover:text-amber-400 transition-colors"
-            >
-              dismiss
-            </button>
-          )}
-
-          <span className="w-1.5 h-1.5 rounded-full animate-pulse ml-1" style={{ background: recoveryActive ? recoveryColor : "#22c55e" }} />
+          <span className="w-1.5 h-1.5 rounded-full animate-pulse ml-1 bg-green-500" />
         </div>
-
-        {/* Recovery banner */}
-        {recoveryActive && (
-          <div
-            className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-[9px] font-mono"
-            style={{ borderColor: `${recoveryColor}40`, background: `${recoveryColor}10`, color: recoveryColor }}
-          >
-            <AlertTriangle className="w-3 h-3 shrink-0" />
-            <span>
-              AI detected {Math.abs(currentStreak)} consecutive losses — recommending highest-EV recovery contract
-              {bestRecoveryOption ? ` (${bestRecoveryOption.contractType === "DIGITOVER" ? "OVER" : "UNDER"} ${bestRecoveryOption.barrier})` : ""}
-            </span>
-          </div>
-        )}
 
         {/* Market info + win prob + execute */}
         <div className="flex items-center gap-2">
@@ -347,23 +248,18 @@ export function MarketOpportunityFlashCard({
                 className="text-sm font-mono font-bold px-2 py-0.5 rounded-full border"
                 style={{ color: ctColor, borderColor: `${ctColor}50`, background: `${ctColor}15` }}
               >
-                {formatContractLabel(activeContractType, activeBarrier ?? rec?.digitBarrier ?? rec?.barrier)}
+                {formatContractLabel(contractType, activeBarrier ?? rec?.digitBarrier ?? rec?.barrier)}
               </span>
-              {recoveryActive && bestRecoveryOption && (
-                <span className="text-[9px] font-mono px-1.5 py-0.5 rounded" style={{ background: `${recoveryColor}20`, color: recoveryColor }}>
-                  TIER-2
-                </span>
-              )}
               <span className="text-[9px] text-muted-foreground font-mono capitalize truncate">
                 {(bestGroupMarket?.regime ?? marketDetail?.regime ?? "").replace(/_/g, " ")}
               </span>
             </div>
           </div>
 
-          {/* Center: win probability — shifted slightly left via reduced gap */}
-          <WinProbBar value={winProb} />
+          {/* Center: win probability */}
+          <WinProbBar value={Math.round(winProb * (winProb > 1 ? 1 : 100))} />
 
-          {/* Right: execute button — rectangle shape */}
+          {/* Right: execute button */}
           <div className="shrink-0">
             <button
               onClick={handleExecute}
@@ -372,10 +268,10 @@ export function MarketOpportunityFlashCard({
               style={{
                 minWidth: "96px",
                 ...(shouldTrade ? {
-                  borderColor: recoveryActive ? recoveryColor : ctColor,
-                  background: recoveryActive ? `${recoveryColor}20` : `${ctColor}20`,
-                  color: recoveryActive ? recoveryColor : ctColor,
-                  boxShadow: `0 0 20px ${recoveryActive ? recoveryColor : ctColor}30`,
+                  borderColor: ctColor,
+                  background: `${ctColor}20`,
+                  color: ctColor,
+                  boxShadow: `0 0 20px ${ctColor}30`,
                 } : {
                   borderColor: "rgba(255,255,255,0.1)",
                   color: "rgba(255,255,255,0.3)",
@@ -384,11 +280,6 @@ export function MarketOpportunityFlashCard({
             >
               {isExecuting ? (
                 <span className="text-[9px] uppercase tracking-wide">EXEC…</span>
-              ) : recoveryActive ? (
-                <>
-                  <span className="text-sm leading-none">🔄</span>
-                  <span className="text-[9px] uppercase tracking-widest">Recover</span>
-                </>
               ) : shouldTrade ? (
                 <>
                   <span className="text-sm leading-none">⚡</span>
@@ -406,77 +297,24 @@ export function MarketOpportunityFlashCard({
 
         {/* Stats row: EV | Ticks | Stake */}
         <div className="grid grid-cols-3 gap-1.5">
-        {(() => {
-          // Compute the effective stake the engine will actually use.
-          // When global recovery is active, the server applies 1.14^(n+1) to the base stake.
-          // We mirror that calculation here so the user sees the real stake before executing.
-          const baseStake = rec?.stake ?? 1;
-          const isGlobalRecovery = recoveryMode.isActive && !recoveryActive; // not in card-level recovery
-          const scaleMult = isGlobalRecovery
-            ? Math.min(Math.pow(1.14, recoveryLossCount + 1), 4.0)
-            : 1.0;
-          const effectiveStake = isGlobalRecovery
-            ? Math.min(Math.round(baseStake * scaleMult * 100) / 100, maxTradeStake)
-            : baseStake;
-          const multLabel = isGlobalRecovery && scaleMult > 1.005
-            ? `×${scaleMult.toFixed(2)}`
-            : null;
-
-          const evValue = recoveryActive && bestRecoveryOption
-            ? (bestRecoveryOption.expectedValue > 0 ? `+${(bestRecoveryOption.expectedValue * 100).toFixed(1)}%` : `${(bestRecoveryOption.expectedValue * 100).toFixed(1)}%`)
-            : rec ? (rec.expectedValue > 0 ? `+$${rec.expectedValue.toFixed(2)}` : `$${rec.expectedValue?.toFixed(2) ?? "—"}`) : "—";
-          const ticksValue = rec ? `${rec.recommendedDuration ?? 5}t` : "—";
-          const stakeDisplay = rec
-            ? recoveryActive && bestRecoveryOption
-              ? `$${(rec?.stake ?? 1).toFixed(2)}`
-              : `$${effectiveStake.toFixed(2)}`
-            : "—";
-
-          return (
-            <>
-              {[
-                { label: "EV", value: evValue },
-                { label: "Ticks", value: ticksValue },
-              ].map(({ label, value }) => (
-                <div key={label} className="text-center p-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06]">
-                  <div className="text-[8px] text-muted-foreground uppercase tracking-wide">{label}</div>
-                  <div className="text-[11px] font-mono font-bold mt-0.5">{value}</div>
-                </div>
-              ))}
-              {/* Stake cell — shows recovery multiplier badge when engine is in recovery */}
-              <div className={`text-center p-1.5 rounded-lg border ${isGlobalRecovery ? "border-amber-500/30 bg-amber-500/[0.06]" : "bg-white/[0.04] border-white/[0.06]"}`}>
-                <div className="text-[8px] text-muted-foreground uppercase tracking-wide">Stake</div>
-                <div className="flex items-center justify-center gap-1 mt-0.5">
-                  <span className={`text-[11px] font-mono font-bold ${isGlobalRecovery ? "text-amber-400" : ""}`}>
-                    {stakeDisplay}
-                  </span>
-                  {multLabel && (
-                    <span className="text-[8px] font-mono px-1 py-0.5 rounded" style={{ background: "rgba(245,158,11,0.2)", color: "#f59e0b" }}>
-                      {multLabel}
-                    </span>
-                  )}
-                </div>
-                {isGlobalRecovery && (
-                  <div className="text-[7px] font-mono mt-0.5" style={{ color: "rgba(245,158,11,0.6)" }}>recovery</div>
-                )}
-              </div>
-            </>
-          );
-        })()}
+          {[
+            { label: "EV",    value: rec ? (rec.expectedValue > 0 ? `+$${rec.expectedValue.toFixed(2)}` : `$${rec.expectedValue?.toFixed(2) ?? "—"}`) : "—" },
+            { label: "Ticks", value: rec ? `${rec.recommendedDuration ?? 5}t` : "—" },
+            { label: "Stake", value: rec ? `$${(rec.stake ?? 1).toFixed(2)}` : "—" },
+          ].map(({ label, value }) => (
+            <div key={label} className="text-center p-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06]">
+              <div className="text-[8px] text-muted-foreground uppercase tracking-wide">{label}</div>
+              <div className="text-[11px] font-mono font-bold mt-0.5">{value}</div>
+            </div>
+          ))}
         </div>
 
         {/* Footer: count + expand */}
         <div className="flex items-center justify-between mt-auto">
-          {recoveryActive ? (
-            <span className="text-[9px] font-mono" style={{ color: `${recoveryColor}80` }}>
-              🔄 Recovery override — highest-EV tier-2 barrier selected
-            </span>
-          ) : (
-            <span className="text-[9px] font-mono text-muted-foreground">
-              {allMarkets?.length ?? 0} markets scanned &middot; {tradeableGroupMarkets.length} tradeable in {selectedGroup.short}
-            </span>
-          )}
-          {!recoveryActive && groupMarkets.length > 1 && (
+          <span className="text-[9px] font-mono text-muted-foreground">
+            {allMarkets?.length ?? 0} markets scanned &middot; {tradeableGroupMarkets.length} tradeable in {selectedGroup.short}
+          </span>
+          {groupMarkets.length > 1 && (
             <button
               onClick={() => setShowMarkets(s => !s)}
               className="flex items-center gap-1 text-[9px] font-mono text-primary/50 hover:text-primary transition-colors"
@@ -486,9 +324,9 @@ export function MarketOpportunityFlashCard({
           )}
         </div>
 
-        {/* Expandable group market list — hidden in recovery mode */}
+        {/* Expandable group market list */}
         <AnimatePresence>
-          {!recoveryActive && showMarkets && groupMarkets.length > 1 && (
+          {showMarkets && groupMarkets.length > 1 && (
             <motion.div
               initial={{ height: 0, opacity: 0 }}
               animate={{ height: "auto", opacity: 1 }}

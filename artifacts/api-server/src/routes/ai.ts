@@ -5,7 +5,7 @@ import { sql, desc, eq } from "drizzle-orm";
 import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, journalManager } from "../lib/deriv";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
-import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome, updateDigitRecovery, setGlobalDigitRecovery } from "../lib/agent-coordinator";
+import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 import { broadcastSSE, addSSEClient, removeSSEClient } from "../lib/sse";
 
@@ -40,31 +40,6 @@ let exploitQualityThreshold = 0;
 // Real-time agent scores (updated each scan)
 let lastAgentScores: Record<string, number> = {};
 
-// ── Global cross-market recovery state ───────────────────────────────────────
-// When any trade is lost, ALL enabled market families enter recovery mode.
-// Over/Under: switches from OVER 2/UNDER 8 → OVER 4/UNDER 5
-// Direction/EvenOdd: stake is increased to recover the loss in one trade
-// Recovery ends when the cumulative profit from recovery trades ≥ unrecovered amount
-interface GlobalRecoveryState {
-  isActive: boolean;
-  unrecoveredAmount: number;            // total USD still to recover (all families combined)
-  activeFamilies: string[];             // which families are currently in recovery
-  recoveredFamilies: string[];          // which families have been fully recovered
-  recoveryLossCount: number;            // legacy — kept for backward compat
-  overunderRecoveryLossCount: number;   // consecutive losses DURING recovery for OU (drives compounding)
-  directionRecoveryLossCount: number;   // consecutive losses DURING recovery for Rise/Fall
-  evenoddRecoveryLossCount: number;     // consecutive losses DURING recovery for Even/Odd
-}
-let globalRecovery: GlobalRecoveryState = {
-  isActive: false,
-  unrecoveredAmount: 0,
-  activeFamilies: [],
-  recoveredFamilies: [],
-  recoveryLossCount: 0,
-  overunderRecoveryLossCount: 0,
-  directionRecoveryLossCount: 0,
-  evenoddRecoveryLossCount: 0,
-};
 
 // ── Family rotation hint ───────────────────────────────────────────────────────
 // Tracks which contract family should be preferred in the NEXT scan so that
@@ -510,7 +485,6 @@ async function runAutonomousLoop() {
                         ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 48)
                         : baseCtx.settings.minConfidenceThreshold,
                     },
-                    inRecovery: globalRecovery.isActive,
                   };
                   const output = await withTimeout(runCoordinator(famCtx), SCAN_TIMEOUT_MS, null as any);
                   if (!output) return null;
@@ -584,37 +558,20 @@ async function runAutonomousLoop() {
     // losing the quality tournament to higher-scoring digit barriers.
     const tradeableWinners = groupWinners.filter(w => w.output.shouldTrade);
 
-    // RECOVERY FALLBACK: When recovery mode is active and no group won the
-    // shouldTrade gate (e.g. all OVER 4/UNDER 5 proposals were rejected by
-    // the consensus gate), we MUST still execute a trade to recover losses.
-    // Use the full groupWinners list so recovery candidates enter the tournament
-    // even when their shouldTrade flag is false.  The per-market fallback at
-    // line 531 already ensures the best market per group is selected; this
-    // fallback just lets that candidate reach the execution stage.
-    const tournamentCandidates = (tradeableWinners.length > 0 || !globalRecovery.isActive)
-      ? tradeableWinners
-      : groupWinners;  // recovery fallback: include non-shouldTrade winners
-
     // Determine which families actually have tradeable results this scan
-    const enabledFamiliesThisScan = new Set(tournamentCandidates.map(w => w.family));
+    const enabledFamiliesThisScan = new Set(tradeableWinners.map(w => w.family));
     const multipleFamily = enabledFamiliesThisScan.size > 1;
 
     // When multiple families are active, narrow the pool to the scheduled family
     // so each family gets executed roughly in turn.
-    let tournamentPool = tournamentCandidates;
+    let tournamentPool = tradeableWinners;
     if (multipleFamily && scheduledFamilyHint && enabledFamiliesThisScan.has(scheduledFamilyHint)) {
-      const hinted = tournamentCandidates.filter(w => w.family === scheduledFamilyHint);
+      const hinted = tradeableWinners.filter(w => w.family === scheduledFamilyHint);
       if (hinted.length > 0) tournamentPool = hinted;
     }
 
-    // During recovery with multiple families: spec requires picking the trade with the
-    // highest AI confidence score (not quality score) so the most reliable signal wins.
     const bestResult: (ScanResult & { groupName: string }) | null = tournamentPool.length > 0
-      ? tournamentPool.sort((a, b) =>
-          globalRecovery.isActive
-            ? b.output.confidenceScore - a.output.confidenceScore
-            : b.output.qualityScore - a.output.qualityScore
-        )[0]
+      ? tournamentPool.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
       : null;
 
     if (bestResult) {
@@ -690,35 +647,14 @@ async function runAutonomousLoop() {
       consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
     });
 
-    // RECOVERY GATE BYPASS: When the global recovery is active the engine MUST
-    // place a trade to recover the open deficit — even if the master-decision
-    // agent rated conditions as "not favourable" (shouldTrade=false).  The only
-    // hard vetoes that are still respected during recovery are:
-    //   • Risk hard-stop (daily loss limit / drawdown)         — Gate 1
-    //   • Outlier-tick veto (extreme z-score at entry)         — Gate 3
-    // All other rejects (consensus below threshold, near-zero EV, timing
-    // advisory) are overridden during recovery so the deficit is not left open.
-    const riskHardStop  = output.rejectReason?.includes("Risk gate");
-    const outlierTick   = output.rejectReason?.includes("Outlier tick");
-    const hardVeto      = riskHardStop || outlierTick;
-
-    if (!output.shouldTrade && (!globalRecovery.isActive || hardVeto)) {
+    if (!output.shouldTrade) {
       logger.info({
         symbol: bestMarket.symbol,
         quality: output.qualityScore,
         reason: output.rejectReason,
-        recoveryOverride: globalRecovery.isActive && !hardVeto,
       }, "Conditions not favourable — scanning next");
       scheduleNext(false);
       return;
-    }
-
-    if (!output.shouldTrade && globalRecovery.isActive && !hardVeto) {
-      logger.info({
-        symbol: bestMarket.symbol,
-        reason: output.rejectReason,
-        unrecoveredAmount: globalRecovery.unrecoveredAmount,
-      }, "Recovery mode: overriding shouldTrade=false — must place recovery trade");
     }
 
     // ── Advance family rotation hint for the NEXT scan ───────────────────────
@@ -746,46 +682,8 @@ async function runAutonomousLoop() {
       ? Math.max(5, rawDuration)
       : rawDuration;
 
-    // ── Recovery stake override ───────────────────────────────────────────────
-    // OVER/UNDER: stake = baseStake × (recoveryMultiplier ^ recoveryStep) — compounds
-    //   with each consecutive recovery loss (capped at maxRecoverySteps); barriers
-    //   switch to OVER 4 / UNDER 5 until unrecoveredAmount reaches zero.
-    // Rise/Fall: flat multiplier — stake = baseStake × recoveryMultiplier (no compounding).
-    // Even/Odd:  flat multiplier — stake = baseStake × recoveryMultiplier (no compounding).
-    // Once cumulative profit from recovery trades ≥ unrecoveredAmount, normal mode resumes.
+    // Stake comes directly from the AI recommendation — no recovery multiplier
     let stake = rec.stake;
-    const recMultiplier = settings ? Number(settings.recoveryMultiplier ?? 1.2) : 1.2;
-    const maxRecSteps = settings ? (settings.maxRecoverySteps ?? 3) : 3;
-    if (globalRecovery.isActive) {
-      let stakeMultiplier: number;
-      if (bestResult.family === "overunder") {
-        // OVER/UNDER: exponential compounding capped at maxRecoverySteps consecutive losses.
-        // recoveryStep=0 means first recovery trade after initial loss → ×recMultiplier^1.
-        // maxRecoverySteps defines the cap on the exponent — once reached, multiplier
-        // stays constant; additional losses continue recovery without further compounding.
-        const step = Math.min(globalRecovery.overunderRecoveryLossCount, maxRecSteps - 1);
-        stakeMultiplier = Math.pow(recMultiplier, step + 1);
-      } else if (bestResult.family === "direction") {
-        // Rise/Fall: flat multiplier per spec — no exponential compounding
-        stakeMultiplier = recMultiplier;
-      } else {
-        // Even/Odd: flat multiplier per spec — no exponential compounding
-        stakeMultiplier = recMultiplier;
-      }
-      const recoveryStake = Math.round(rec.stake * stakeMultiplier * 100) / 100;
-      stake = Math.min(Math.max(stake, recoveryStake), tradingSettings.maxTradeStake);
-      stake = Math.round(stake * 100) / 100;
-      logger.info({
-        symbol: bestMarket.symbol,
-        family: bestResult.family,
-        unrecoveredAmount: globalRecovery.unrecoveredAmount,
-        normalStake: rec.stake,
-        recoveryStake: stake,
-        stakeMultiplier,
-        contractType: effectiveContractType,
-        barrier: effectiveBarrier,
-      }, "Recovery mode: compounded stake active");
-    }
 
     // Estimated payout for paper trades (live payout comes from Deriv result)
     const estimatedPayout = stake * rec.payoutMultiplier;
@@ -806,7 +704,6 @@ async function runAutonomousLoop() {
 
       // Paper trades: insert completed record immediately
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
-      updateDigitRecovery(bestMarket.symbol, effectiveContractType, won, profit, stake);
 
       await db.insert(tradesTable).values({
         symbol: bestMarket.symbol,
@@ -897,7 +794,7 @@ async function runAutonomousLoop() {
           profit: "0", contract: effectiveContractType, error: errMsg });
         journalManager.forceRefresh();
 
-        // Do NOT touch sessionLossCount or globalRecovery here — the contract outcome
+        // Do NOT touch sessionLossCount here — the contract outcome
         // is unknown (Deriv may have settled it as won). Adding a false loss count here
         // is what caused consecutive-loss / daily-limit false-positives.
         // Only record the cooldown timestamp so the engine waits before re-scanning
@@ -914,7 +811,6 @@ async function runAutonomousLoop() {
 
       // Update the open record to Deriv-confirmed final status
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
-      updateDigitRecovery(bestMarket.symbol, effectiveContractType, won, profit, stake);
 
       await db.update(tradesTable).set({
         status: won ? "won" : "lost",
@@ -938,121 +834,9 @@ async function runAutonomousLoop() {
     // ── Mark last-trade timestamp so journal-settle guard works correctly ─────
     lastTradeCompletedAt = symNow;
 
-    // Track consecutive losses — a win resets it to 0; cooldown expiry also resets it
+    // Track consecutive losses — a win resets to 0; cooldown expiry also resets it
     if (!won) sessionLossCount++;
     else sessionLossCount = 0;
-
-    // ── Global cross-market recovery state update ────────────────────────────
-    // Recovery is always active — no settings toggle required. Any loss triggers
-    // recovery immediately. recoveryMultiplier + maxRecoverySteps govern the stakes.
-    if (won) {
-      if (globalRecovery.isActive) {
-        // Recovery WIN: subtract this trade's profit from the unrecovered total.
-        // Gradual: if one win doesn't cover everything, stay in recovery until fully covered.
-        globalRecovery.unrecoveredAmount = Math.max(0, globalRecovery.unrecoveredAmount - Math.abs(profit));
-
-        // Reset the per-family recovery loss count for the winning family — it won, restart compounding
-        if (bestResult.family === "overunder") globalRecovery.overunderRecoveryLossCount = 0;
-        else if (bestResult.family === "direction") globalRecovery.directionRecoveryLossCount = 0;
-        else if (bestResult.family === "evenodd") globalRecovery.evenoddRecoveryLossCount = 0;
-
-        if (globalRecovery.unrecoveredAmount <= 0) {
-          // All losses recovered — return to OVER 2 / UNDER 7 (normal barriers), normal stake
-          globalRecovery.isActive = false;
-          globalRecovery.unrecoveredAmount = 0;
-          globalRecovery.activeFamilies = [];
-          globalRecovery.recoveredFamilies = [];
-          globalRecovery.recoveryLossCount = 0;
-          globalRecovery.overunderRecoveryLossCount = 0;
-          globalRecovery.directionRecoveryLossCount = 0;
-          globalRecovery.evenoddRecoveryLossCount = 0;
-          setGlobalDigitRecovery(false, 0);
-          logger.info({ symbol: bestMarket.symbol, family: bestResult.family, profit },
-            "Recovery complete — losses fully recovered, returning to normal barriers and base stake");
-          broadcastSSE("recovery_complete", { symbol: bestMarket.symbol, ts: Date.now(), profit });
-        } else {
-          // Partial recovery — still owe, stay in recovery (OVER 4/UNDER 5 + multiplied stakes)
-          setGlobalDigitRecovery(true, globalRecovery.unrecoveredAmount);
-          logger.info({
-            symbol: bestMarket.symbol,
-            profit,
-            remainingUnrecovered: globalRecovery.unrecoveredAmount,
-          }, "Recovery partial — continuing until losses fully covered");
-          broadcastSSE("recovery_progress", {
-            symbol: bestMarket.symbol,
-            profit,
-            remainingAmount: globalRecovery.unrecoveredAmount,
-            overunderStep: globalRecovery.overunderRecoveryLossCount,
-            directionStep: globalRecovery.directionRecoveryLossCount,
-            evenoddStep: globalRecovery.evenoddRecoveryLossCount,
-          });
-        }
-      }
-    } else {
-      // Trade lost — activate/continue recovery and increment per-family compounding counter
-      const lostAmount = Math.abs(profit);
-      const lostFamily = bestResult.family;
-
-      if (globalRecovery.isActive) {
-        // Already in recovery — increment this family's consecutive loss count for compounding
-        globalRecovery.recoveryLossCount++;
-        if (lostFamily === "overunder") globalRecovery.overunderRecoveryLossCount++;
-        else if (lostFamily === "direction") globalRecovery.directionRecoveryLossCount++;
-        else if (lostFamily === "evenodd") globalRecovery.evenoddRecoveryLossCount++;
-      } else {
-        // Fresh loss — enter recovery for the first time; loss counts start at 0
-        globalRecovery.recoveryLossCount = 0;
-        globalRecovery.overunderRecoveryLossCount = 0;
-        globalRecovery.directionRecoveryLossCount = 0;
-        globalRecovery.evenoddRecoveryLossCount = 0;
-      }
-
-      globalRecovery.isActive = true;
-      globalRecovery.unrecoveredAmount += lostAmount;
-
-      if (!globalRecovery.activeFamilies.includes(lostFamily)) {
-        globalRecovery.activeFamilies.push(lostFamily);
-      }
-      // All currently-enabled families enter recovery in parallel
-      if (dirTypes.length > 0 && !globalRecovery.activeFamilies.includes("direction")) {
-        globalRecovery.activeFamilies.push("direction");
-      }
-      if (ouTypes.length > 0 && !globalRecovery.activeFamilies.includes("overunder")) {
-        globalRecovery.activeFamilies.push("overunder");
-      }
-      if (eoTypes.length > 0 && !globalRecovery.activeFamilies.includes("evenodd")) {
-        globalRecovery.activeFamilies.push("evenodd");
-      }
-
-      // Sync digit-agent global flag → switches barrier engine to OVER 4 / UNDER 5
-      setGlobalDigitRecovery(true, globalRecovery.unrecoveredAmount);
-
-      const nextOuMultiplier = Math.pow(recMultiplier, Math.min(globalRecovery.overunderRecoveryLossCount + 1, maxRecSteps));
-      // Rise/Fall and Even/Odd: FLAT multiplier per spec — no compounding
-      const nextDirMultiplier = recMultiplier;
-      logger.info({
-        symbol: bestMarket.symbol,
-        family: lostFamily,
-        lostAmount,
-        totalUnrecovered: globalRecovery.unrecoveredAmount,
-        ouStep: globalRecovery.overunderRecoveryLossCount,
-        dirStep: globalRecovery.directionRecoveryLossCount,
-        eoStep: globalRecovery.evenoddRecoveryLossCount,
-        nextOuMultiplier,
-      }, "Recovery mode ACTIVE — OVER 4 / UNDER 5 barriers, compounded stakes until losses covered");
-      broadcastSSE("recovery_active", {
-        symbol: bestMarket.symbol,
-        lostAmount,
-        totalUnrecoveredAmount: globalRecovery.unrecoveredAmount,
-        activeFamilies: globalRecovery.activeFamilies,
-        overunderStep: globalRecovery.overunderRecoveryLossCount,
-        directionStep: globalRecovery.directionRecoveryLossCount,
-        evenoddStep: globalRecovery.evenoddRecoveryLossCount,
-        nextOuMultiplier,
-        nextDirMultiplier,
-        mode: { overunder: "OVER 4 / UNDER 5", direction: `${nextDirMultiplier.toFixed(2)}× stake`, evenodd: `${recMultiplier.toFixed(2)}× stake` },
-      });
-    }
 
     tradesExecutedToday++;
     lastTradeTime = new Date();
@@ -1183,41 +967,6 @@ async function getComputedAgentScores(): Promise<Record<string, number>> {
   } catch { return {}; }
 }
 
-// ── Recovery status builder ───────────────────────────────────────────────────
-// Centralises computation of "next stake multiplier" per family so that the
-// dashboard recovery card can show exactly what the next compounded stake will be.
-function buildRecoveryStatus(settings: any) {
-  const recMultiplier = settings ? Number(settings.recoveryMultiplier ?? 1.2) : 1.2;
-  const maxRecSteps   = settings ? (settings.maxRecoverySteps ?? 3) : 3;
-
-  // OVER/UNDER: exponential compounding capped at maxRecSteps
-  const ouStep        = Math.min(globalRecovery.overunderRecoveryLossCount, maxRecSteps - 1);
-  const nextOuMultiplier = globalRecovery.isActive
-    ? Math.pow(recMultiplier, ouStep + 1)
-    : 1.0;
-
-  // Rise/Fall: flat multiplier per spec (no compounding)
-  const nextDirMultiplier = globalRecovery.isActive ? recMultiplier : 1.0;
-
-  // Even/Odd: flat multiplier per spec (no compounding)
-  const nextEoMultiplier  = globalRecovery.isActive ? recMultiplier : 1.0;
-
-  return {
-    isActive:           globalRecovery.isActive,
-    unrecoveredAmount:  globalRecovery.unrecoveredAmount,
-    activeFamilies:     globalRecovery.activeFamilies,
-    recoveryLossCount:  globalRecovery.recoveryLossCount,
-    overunderStep:      globalRecovery.overunderRecoveryLossCount,
-    directionStep:      globalRecovery.directionRecoveryLossCount,
-    evenoddStep:        globalRecovery.evenoddRecoveryLossCount,
-    // Next-trade stake multipliers per family (for dashboard display)
-    nextOuMultiplier,
-    nextDirMultiplier,
-    nextEoMultiplier,
-    recoveryMultiplier: recMultiplier,
-    maxRecoverySteps:   maxRecSteps,
-  };
-}
 
 // ── Routes ─────────────────────────────────────────────────────────────────────
 
@@ -1382,7 +1131,6 @@ router.get("/engine/status", async (_req, res): Promise<void> => {
     sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: DERIV_MARKETS.length,
-    recoveryMode: buildRecoveryStatus(settings.length > 0 ? settings[0] : null),
   });
 });
 
@@ -1405,58 +1153,6 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     engineRunning = true; autonomousMode = "autonomous"; stopReasons = []; nextScanIn = loopIntervalSec;
     exploitSymbol = null; exploitCount = 0;
 
-    // ── Persistent recovery: re-enter if today's net P&L is still negative ────
-    // Recovery is always on — any unrecovered deficit from today is picked up immediately
-    // so the engine doesn't restart at base stake with the wrong barriers.
-    const derivTxnsAtStart = journalManager.getCached();
-    const todayAtStart = new Date(); todayAtStart.setHours(0, 0, 0, 0);
-    const todayMidSecAtStart = todayAtStart.getTime() / 1000;
-    const derivTodayAtStart = derivTxnsAtStart.filter(
-      (t: any) => Number(t.sell_time ?? t.purchase_time ?? 0) >= todayMidSecAtStart,
-    );
-    // derivTodayAtStart is DESC (most recent first); walk forward to find cumulative deficit
-    let unrecoveredOnStart = 0;
-    let runningNet = 0;
-    for (const t of [...derivTodayAtStart].reverse()) { // oldest → newest
-      runningNet += Number(t.profit ?? 0);
-      if (runningNet < 0) unrecoveredOnStart = Math.abs(runningNet);
-      else unrecoveredOnStart = 0; // a net-positive point resets the deficit
-    }
-
-    if (unrecoveredOnStart > 0) {
-      // Estimate per-family recovery step from the recent consecutive loss count
-      let consecLossesAtStart = 0;
-      for (const t of derivTodayAtStart) {
-        if (Number(t.profit ?? 0) < 0) consecLossesAtStart++;
-        else break;
-      }
-      const startStep = Math.max(0, consecLossesAtStart - 1);
-      const activeFamsAtStart: string[] = [];
-      const rawPct = settings[0].preferredContractTypes ?? "";
-      const pctArr = rawPct.split(",").filter(Boolean);
-      if (pctArr.some((x: string) => ["CALL","PUT","RISE","FALL"].includes(x))) activeFamsAtStart.push("direction");
-      if (pctArr.some((x: string) => ["DIGITOVER","DIGITUNDER"].includes(x))) activeFamsAtStart.push("overunder");
-      if (pctArr.some((x: string) => ["DIGITEVEN","DIGITODD"].includes(x))) activeFamsAtStart.push("evenodd");
-      globalRecovery = {
-        isActive: true,
-        unrecoveredAmount: unrecoveredOnStart,
-        activeFamilies: activeFamsAtStart.length > 0 ? activeFamsAtStart : ["overunder"],
-        recoveredFamilies: [],
-        recoveryLossCount: startStep,
-        overunderRecoveryLossCount: activeFamsAtStart.includes("overunder") ? startStep : 0,
-        directionRecoveryLossCount: activeFamsAtStart.includes("direction") ? startStep : 0,
-        evenoddRecoveryLossCount: activeFamsAtStart.includes("evenodd") ? startStep : 0,
-      };
-      setGlobalDigitRecovery(true, unrecoveredOnStart);
-      logger.info({ unrecoveredOnStart, consecLossesAtStart, startStep, activeFamsAtStart },
-        "Engine start: persistent recovery re-entered from today's journal deficit");
-    } else {
-      globalRecovery = {
-        isActive: false, unrecoveredAmount: 0, activeFamilies: [], recoveredFamilies: [],
-        recoveryLossCount: 0, overunderRecoveryLossCount: 0, directionRecoveryLossCount: 0, evenoddRecoveryLossCount: 0,
-      };
-      setGlobalDigitRecovery(false, 0);
-    }
     // Reset group cursors → scanning restarts from V10 1s / V10 / JD10 / RDBULL
     groupCursors.fill(0);
     if (settings.length > 0) await db.update(settingsTable).set({ autonomousEnabled: true });
@@ -1491,7 +1187,6 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: DERIV_MARKETS.length,
-    recoveryMode: buildRecoveryStatus(settings.length > 0 ? settings[0] : null),
   });
 });
 

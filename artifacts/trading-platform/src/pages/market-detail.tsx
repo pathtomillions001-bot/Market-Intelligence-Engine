@@ -16,18 +16,17 @@ import { useQueryClient } from "@tanstack/react-query";
 // ── AI Trade Panel ────────────────────────────────────────────────────────────
 // Unified recommendation panel synced to all 3 contract types + agent intelligence
 
-function TierBadge({ tier, inRecovery }: { tier: 1 | 2 | 0; inRecovery: boolean }) {
+function TierBadge({ tier }: { tier: 1 | 2 | 0 }) {
   if (tier === 1) return <span className="text-[8px] font-bold px-1.5 py-0.5 rounded bg-green-500/15 text-green-400 border border-green-500/20">SAFE</span>;
-  if (tier === 2) return <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded border ${inRecovery ? "bg-amber-500/20 text-amber-400 border-amber-500/30" : "bg-secondary/40 text-zinc-500 border-zinc-700"}`}>RECOVERY</span>;
+  if (tier === 2) return <span className="text-[8px] font-bold px-1.5 py-0.5 rounded border bg-secondary/40 text-zinc-500 border-zinc-700">TIER 2</span>;
   return <span className="text-[8px] font-bold px-1.5 py-0.5 rounded bg-red-500/10 text-red-500 border border-red-500/20">RISKY</span>;
 }
 
 function DigitBarrierButton({
-  option, isRecommended, inRecovery, onClick,
+  option, isRecommended, onClick,
 }: {
   option: { contractType: string; barrier: number; winProbability: number; expectedValue: number; payout: number; tier: number };
   isRecommended: boolean;
-  inRecovery: boolean;
   onClick: () => void;
 }) {
   const label = option.contractType === "DIGITOVER" ? `OVER ${option.barrier}` : `UNDER ${option.barrier}`;
@@ -41,18 +40,16 @@ function DigitBarrierButton({
       className={`relative flex flex-col items-center p-2 rounded-lg border text-center transition-all hover:scale-[1.03] active:scale-[0.98] ${
         isRecommended
           ? "border-primary/60 bg-primary/10 shadow-sm shadow-primary/20"
-          : tier === 1 && !inRecovery
+          : tier === 1
             ? "border-green-500/25 bg-green-500/5 hover:border-green-500/40"
-            : tier === 2 && inRecovery
-              ? "border-amber-500/30 bg-amber-500/8 hover:border-amber-500/50"
-              : "border-border bg-secondary/15 hover:border-muted-foreground/25"
+            : "border-border bg-secondary/15 hover:border-muted-foreground/25"
       }`}
     >
       {isRecommended && <span className="absolute -top-1.5 left-1/2 -translate-x-1/2 text-[7px] font-bold text-primary bg-card px-1.5 rounded-full border border-primary/30">AI ★</span>}
       <div className="text-[9px] font-mono font-bold text-muted-foreground">{label}</div>
       <div className={`text-sm font-mono font-bold mt-0.5 ${hasEdge ? "text-green-400" : "text-amber-400"}`}>{winPct}%</div>
       <div className={`text-[8px] font-mono mt-0.5 ${hasEdge ? "text-green-500/70" : "text-zinc-600"}`}>{hasEdge ? `+${evPct}%` : `${evPct}%`}</div>
-      <div className="mt-1"><TierBadge tier={tier} inRecovery={inRecovery} /></div>
+      <div className="mt-1"><TierBadge tier={tier} /></div>
     </button>
   );
 }

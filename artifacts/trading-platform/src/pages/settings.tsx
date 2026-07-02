@@ -291,36 +291,6 @@ export default function Settings() {
         </CardContent>
       </Card>
 
-      {/* Recovery Mode */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Recovery Mode</CardTitle>
-          <CardDescription className="text-xs">After a loss, the AI switches contract type and calculates a recovery stake to cover the loss.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SettingRow label="Enable Recovery Mode" description="AI switches contract type/market and adjusts stake after a loss.">
-            <Switch checked={form.recoveryMode} onCheckedChange={(v) => set("recoveryMode", v)} />
-          </SettingRow>
-          {form.recoveryMode && (
-            <>
-              <SettingRow label="Recovery Multiplier" description="Fallback multiplier if loss amount is small.">
-                <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", Math.min(1.5, Math.max(1.05, v)))} min={1.05} max={1.5} step={0.05} suffix="×" />
-              </SettingRow>
-              <SettingRow label="Max Recovery Steps" description="Max consecutive recovery attempts before reset.">
-                <NumInput value={form.maxRecoverySteps} onChange={(v) => set("maxRecoverySteps", v)} min={1} max={5} step={1} />
-              </SettingRow>
-              <div className="mt-3 p-3 bg-secondary/30 rounded-lg flex gap-2">
-                <Info className="w-4 h-4 text-primary flex-shrink-0 mt-0.5" />
-                <p className="text-xs text-muted-foreground">
-                  On a loss: agent switches contract type (OVER→UNDER, RISE→FALL, etc.) and calculates a stake that covers the loss + margin. Max: <span className="text-foreground font-mono">{form.recoveryMultiplier}^{form.maxRecoverySteps} = {maxRecovery.toFixed(3)}×</span> base stake.
-                  {maxRecovery > 1.5 && <span className="text-amber-400"> Warning: high multiplier.</span>}
-                </p>
-              </div>
-            </>
-          )}
-        </CardContent>
-      </Card>
-
       <div className="flex justify-end pt-2">
         <Button onClick={handleSave} disabled={updateSettings.isPending} className="w-full sm:w-48">
           {updateSettings.isPending ? "Saving…" : "Save All Settings"}

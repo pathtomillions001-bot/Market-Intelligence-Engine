@@ -1,15 +1,16 @@
 /**
  * Agent 8: Recovery Intelligence Agent
  *
- * RESPONSIBILITY: Detect when the trading engine is in a drawdown and select
- * the most appropriate recovery strategy. Manages stake sizing during recovery,
- * chooses recovery contract types, and enforces a cool-down after consecutive losses.
+ * RESPONSIBILITY: Track win/loss streaks and session P&L for informational
+ * purposes only. The engine always runs in normal mode — no recovery stake
+ * adjustments, no mode switching, no cooldown triggers from this agent.
+ * Cooldown is handled externally by the consecutive-loss limit in settings.
  */
 
 import type { AgentOutput, ScanContext } from "./types";
 import { scoreToSignal } from "./types";
 
-export type RecoveryMode = "normal" | "conservative" | "recovery" | "cooldown";
+export type RecoveryMode = "normal";
 
 export interface RecoveryState {
   consecutiveLosses: number;
@@ -19,7 +20,6 @@ export interface RecoveryState {
   mode: RecoveryMode;
   recommendedStakeMultiplier: number;
   cooldownUntil: number;
-  recoveryContractSuggestion?: string;
 }
 
 // In-memory state per session (resets on server restart)
@@ -54,74 +54,30 @@ export function recordTradeOutcomeRecovery(
   const sessionPnl = prev.sessionPnl + profit;
   const totalTrades = prev.totalTrades + 1;
 
-  // Determine mode
-  let mode: RecoveryMode = "normal";
-  let cooldownUntil = prev.cooldownUntil;
-  let recommendedStakeMultiplier = 1.0;
-
-  // Cool-down: uses the user-configured consecutiveLossLimit from settings.
-  // Hardcoded "3" was wrong — it was triggering engine pause before the user's
-  // configured limit (e.g. 5) was reached. Now the thresholds scale with the setting.
-  const limit = ctx.settings.consecutiveLossLimit;
-  if (consecutiveLosses >= limit) {
-    mode = "cooldown";
-    cooldownUntil = Date.now() + 60_000; // 60s pause
-    recommendedStakeMultiplier = 0.0; // no trading
-  } else if (consecutiveLosses >= Math.ceil(limit * 0.6)) {
-    mode = "recovery";
-    recommendedStakeMultiplier = 0.6; // reduce stake
-  } else if (consecutiveLosses >= Math.ceil(limit * 0.2)) {
-    mode = "conservative";
-    recommendedStakeMultiplier = 0.8;
-  } else if (consecutiveWins >= 3) {
-    // Winning streak — slight increase (but never above 1.3x to limit ruin risk)
-    recommendedStakeMultiplier = Math.min(1.3, 1.0 + consecutiveWins * 0.05);
-  }
-
-  // Recovery contract suggestion: prefer safer contracts when in drawdown
-  let recoveryContractSuggestion: string | undefined;
-  if (mode === "recovery" || mode === "conservative") {
-    recoveryContractSuggestion = "DIGITOVER_3"; // tier-1 barrier, safer
-  }
-
+  // Always normal mode — no recovery or cooldown triggers from this agent.
+  // The engine continues trading normally after any loss.
   recoveryStates.set(key, {
     consecutiveLosses, consecutiveWins,
-    sessionPnl, totalTrades, mode,
-    recommendedStakeMultiplier, cooldownUntil,
-    recoveryContractSuggestion,
+    sessionPnl, totalTrades,
+    mode: "normal",
+    recommendedStakeMultiplier: 1.0,
+    cooldownUntil: 0,
   });
 }
 
 export function runRecoveryIntelligenceAgent(ctx: ScanContext): AgentOutput & { recoveryState: RecoveryState } {
   const t0 = Date.now();
   const state = getRecoveryState(ctx);
-  const now = Date.now();
 
-  const inCooldown = state.mode === "cooldown" && now < state.cooldownUntil;
-  const remainingCooldownSec = inCooldown ? Math.round((state.cooldownUntil - now) / 1000) : 0;
-
-  // Score reflects trading readiness
-  let score: number;
-  if (inCooldown) {
-    score = 0; // blocked
-  } else if (state.mode === "recovery") {
-    score = 35;
-  } else if (state.mode === "conservative") {
-    score = 55;
-  } else if (state.consecutiveWins >= 3) {
-    score = 85;
-  } else {
-    score = 70;
-  }
+  // Score is always positive — engine always in normal trading mode
+  const score = state.consecutiveWins >= 3 ? 80 : 70;
 
   const reasoning = [
-    `Mode: ${state.mode.toUpperCase()}.`,
+    `Mode: NORMAL.`,
     `Consecutive losses: ${state.consecutiveLosses}. Consecutive wins: ${state.consecutiveWins}.`,
-    `Session P&L: $${state.sessionPnl.toFixed(2)}. Trades: ${state.totalTrades}.`,
-    `Stake multiplier: ×${state.recommendedStakeMultiplier.toFixed(2)}.`,
-    inCooldown ? `⛔ COOLDOWN — ${remainingCooldownSec}s remaining.` : "",
-    state.recoveryContractSuggestion ? `Preferred contract: ${state.recoveryContractSuggestion}.` : "",
-  ].filter(Boolean).join(" ");
+    `Session P&L: ${state.sessionPnl.toFixed(2)}. Trades: ${state.totalTrades}.`,
+    `Stake: base (no adjustment).`,
+  ].join(" ");
 
   return {
     agentId: "recoveryIntelligence",
@@ -134,9 +90,9 @@ export function runRecoveryIntelligenceAgent(ctx: ScanContext): AgentOutput & { 
       consecutiveLosses: state.consecutiveLosses,
       consecutiveWins: state.consecutiveWins,
       sessionPnl: state.sessionPnl,
-      stakeMultiplier: state.recommendedStakeMultiplier,
-      inCooldown,
-      remainingCooldownSec,
+      stakeMultiplier: 1.0,
+      inCooldown: false,
+      remainingCooldownSec: 0,
     },
     executionTimeMs: Date.now() - t0,
     recoveryState: state,

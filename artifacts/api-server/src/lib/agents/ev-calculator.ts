@@ -132,7 +132,7 @@ function evForDigitProducts(
 ): EVResult[] {
   // Sort by adjustedEvScore (tier preference already applied by the digit agent —
   // preferred-tier barriers with positive edge get score × 10, so they rank first).
-  // This preserves OVER 2 / UNDER 8 as the top option when the market is skewed,
+  // This preserves OVER 2 / UNDER 7 as the top option when the market is skewed,
   // even though their raw EV is negative (low payout by Deriv design).
   return barrierOptions
     .sort((a, b) => b.adjustedEvScore - a.adjustedEvScore)
@@ -224,12 +224,12 @@ export function runEVCalculatorAgent(
 
   const bestEVResult = strictPositiveEV[0] ?? nearBreakevenAny[0] ?? anySorted[0] ?? null;
 
-  // For tier-1 digit barriers (OVER 2, UNDER 8), positive EV is impossible at
-  // Deriv's fixed payouts (1.19x needs 84% win rate). Score by edge instead so
-  // these options don't drag the consensus into the floor.
+  // For tier-1 digit barriers (OVER 2, UNDER 7), positive EV is impossible at
+  // Deriv's fixed payouts. Score by edge instead so these options don't drag
+  // the consensus into the floor.
   const isDigitTier1Result = bestEVResult &&
     ((bestEVResult.product === "DIGITOVER"  && bestEVResult.barrier === 2) ||
-     (bestEVResult.product === "DIGITUNDER" && bestEVResult.barrier === 8));
+     (bestEVResult.product === "DIGITUNDER" && bestEVResult.barrier === 7));
 
   const score = bestEVResult
     ? isDigitTier1Result

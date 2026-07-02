@@ -11,7 +11,6 @@
 
 import type { AgentOutput, ProductType, ScanContext } from "./types";
 import { scoreToSignal } from "./types";
-import { isInDigitRecovery } from "./digit-agent";
 
 // ── Digit payout table (Deriv's actual payout schedule) ──────────────────────
 // OVER 0/UNDER 9 = lowest risk = lowest payout
@@ -173,23 +172,17 @@ function winProbForBarrier(
 
 // ── Barrier option builder ─────────────────────────────────────────────────────
 //
-// STRICT BARRIER POLICY (per user requirements):
-//   Normal mode  → ONLY OVER 2  and UNDER 8  (tier-1, safe/consistent)
-//   Recovery mode → ONLY OVER 4  and UNDER 5  (tier-2, higher payout to recover loss)
+// STRICT BARRIER POLICY:
+//   Always → ONLY OVER 2  and UNDER 7  (safe, consistent barriers)
 //
 // All other barriers are excluded regardless of edge or EV score.
 
-const NORMAL_BARRIERS: Record<"DIGITOVER" | "DIGITUNDER", number> = {
+const ALLOWED_BARRIERS: Record<"DIGITOVER" | "DIGITUNDER", number> = {
   DIGITOVER:  2,
   DIGITUNDER: 7,
 };
 
-const RECOVERY_BARRIERS: Record<"DIGITOVER" | "DIGITUNDER", number> = {
-  DIGITOVER:  4,
-  DIGITUNDER: 5,
-};
-
-function buildBarrierOptions(analysis: ReturnType<typeof analyzeDigits>, inRecovery = false): BarrierOption[] {
+function buildBarrierOptions(analysis: ReturnType<typeof analyzeDigits>): BarrierOption[] {
   const options: BarrierOption[] = [];
 
   for (const [ct, payoutMap] of Object.entries(DIGIT_PAYOUTS)) {
@@ -198,17 +191,14 @@ function buildBarrierOptions(analysis: ReturnType<typeof analyzeDigits>, inRecov
     for (const [bStr, payout] of Object.entries(payoutMap)) {
       const barrier = Number(bStr);
 
-      // STRICT: only allow the one permitted barrier per mode
-      const allowedBarrier = inRecovery ? RECOVERY_BARRIERS[contractType] : NORMAL_BARRIERS[contractType];
-      if (barrier !== allowedBarrier) continue;
+      // STRICT: only allow the one permitted barrier — OVER 2 / UNDER 7
+      if (barrier !== ALLOWED_BARRIERS[contractType]) continue;
 
       const winP = winProbForBarrier(contractType, barrier, analysis);
       const ev = winP * (payout - 1) - (1 - winP);
       const edge = winP - (1 / payout);
       const tier = DIGIT_TIERS[contractType]?.[barrier] ?? 2;
-
-      // In recovery use the higher edge score to signal urgency to the coordinator
-      const adjustedEvScore = inRecovery ? ev * 5 : edge > 0 ? ev * 10 : ev;
+      const adjustedEvScore = edge > 0 ? ev * 10 : ev;
 
       options.push({ contractType, barrier, winProbability: winP, payout, expectedValue: ev, edge, tier, adjustedEvScore });
     }
@@ -319,7 +309,7 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
   }
 
   const analysis = analyzeDigits(digits);
-  const barrierOptions = buildBarrierOptions(analysis, ctx.inRecovery ?? false);
+  const barrierOptions = buildBarrierOptions(analysis);
   const evenAnalysis = analyzeEvenOdd(digits);
 
   // Sort by adjustedEvScore

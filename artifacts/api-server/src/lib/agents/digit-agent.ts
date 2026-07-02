@@ -49,91 +49,11 @@ const UNDER_THEORETICAL: Record<number, number> = {
   6: 6/10, 7: 7/10, 8: 8/10, 9: 9/10,
 };
 
-// ── Tier definitions ─────────────────────────────────────────────────────────
-// Tier 1: normal mode — ONLY the one safest barrier per side
-// OVER 2 → ~70% win rate;  UNDER 8 → ~70% win rate
-// Normal mode: ONLY OVER 2 (~70% win) or UNDER 8 (~70% win)
-const TIER1_OVER  = new Set([2]);
-const TIER1_UNDER = new Set([8]);
-
-// Recovery mode (after any loss): OVER 4 (~50% win) or UNDER 5 (~50% win)
-// AI picks whichever has better digit-distribution probability for the current market
-const TIER2_OVER  = new Set([4]);
-const TIER2_UNDER = new Set([5]);
-
-// Hard-blocked: EVERYTHING except the two allowed barriers per mode.
-// Normal allowed: OVER 2, UNDER 8. Recovery allowed: OVER 4, UNDER 5.
-// Any barrier not in [2,4] for OVER or [5,8] for UNDER is forbidden.
-const HARD_BLOCKED_OVER  = new Set([0, 1, 3, 5, 6, 7, 8, 9]);
-const HARD_BLOCKED_UNDER = new Set([0, 1, 2, 3, 4, 6, 7, 9]);
-
-function inPreferredTier(
-  contractType: "DIGITOVER" | "DIGITUNDER",
-  barrier: number,
-  inRecovery: boolean,
-): boolean {
-  if (inRecovery) {
-    return contractType === "DIGITOVER" ? TIER2_OVER.has(barrier) : TIER2_UNDER.has(barrier);
-  }
-  return contractType === "DIGITOVER" ? TIER1_OVER.has(barrier) : TIER1_UNDER.has(barrier);
-}
-
-// ── In-memory recovery state ─────────────────────────────────────────────────
-// Tracks unrecovered loss per symbol so we can switch tiers automatically.
-interface RecoveryState {
-  unrecoveredLoss: number;  // USD amount not yet recovered
-  lastLossAt: number;       // unix ms
-}
-const recoveryStore = new Map<string, RecoveryState>();
-
-// ── Global digit recovery state (set by the autonomous loop) ─────────────────
-// When the global cross-market recovery is active, ALL symbols enter digit
-// recovery tier 2 (OVER 4 / UNDER 5) regardless of per-symbol history.
-let _globalDigitRecoveryActive = false;
-let _globalDigitUnrecoveredAmount = 0;
-
-/** Called by the autonomous loop to sync global recovery state into the digit agent. */
-export function setGlobalDigitRecovery(active: boolean, amount: number): void {
-  _globalDigitRecoveryActive = active;
-  _globalDigitUnrecoveredAmount = amount;
-}
-
-/** Call after every DIGIT trade to update recovery state. */
-export function updateDigitRecovery(
-  symbol: string,
-  contractType: string,
-  won: boolean,
-  profit: number,
-  stake: number,
-): void {
-  if (!contractType.startsWith("DIGIT")) return;
-  const prev = recoveryStore.get(symbol) ?? { unrecoveredLoss: 0, lastLossAt: 0 };
-  let unrecoveredLoss: number;
-  if (won) {
-    // Any win fully clears per-symbol recovery
-    unrecoveredLoss = 0;
-  } else {
-    // New loss: add stake to unrecovered amount
-    unrecoveredLoss = prev.unrecoveredLoss + Math.abs(stake);
-  }
-  recoveryStore.set(symbol, { unrecoveredLoss, lastLossAt: won ? prev.lastLossAt : Date.now() });
-}
-
-/**
- * True when this symbol's digit trades are in recovery mode.
- * Returns true if EITHER the global recovery is active (cross-market loss)
- * OR there is a per-symbol unrecovered loss.
- */
-export function isInDigitRecovery(symbol: string): boolean {
-  if (_globalDigitRecoveryActive) return true;
-  return (recoveryStore.get(symbol)?.unrecoveredLoss ?? 0) > 0;
-}
-
-export function getDigitRecoveryAmount(symbol: string): number {
-  // Return the larger of global or per-symbol amount
-  const perSymbol = recoveryStore.get(symbol)?.unrecoveredLoss ?? 0;
-  return Math.max(perSymbol, _globalDigitUnrecoveredAmount);
-}
+// ── Allowed barriers — always OVER 2 / UNDER 7 ───────────────────────────────
+// The engine always uses these safe, consistent barriers regardless of
+// win/loss history. Tier 1 (safe) only.
+const ALLOWED_OVER  = new Set([2]);
+const ALLOWED_UNDER = new Set([7]);
 
 // ── Markov chain ──────────────────────────────────────────────────────────────
 function buildTransitionMatrix(digits: number[]): number[][] {
@@ -196,7 +116,6 @@ function scoreAllBarriers(
   _digits: number[],
   markovProbs: number[],
   multinomialProbs: number[],
-  inRecovery: boolean,
 ): BarrierOption[] {
   // Combined model: 55% Markov, 45% multinomial
   const combined = Array.from({ length: 10 }, (_, d) =>
@@ -205,15 +124,15 @@ function scoreAllBarriers(
 
   const rawOptions: BarrierOption[] = [];
 
-  // OVER barriers: B from 0 to 8 (0 is ultra-safe, 8 is ultra-risky)
-  for (let b = 0; b <= 8; b++) {
+  // OVER 2 only
+  for (const b of ALLOWED_OVER) {
     const pWin = combined.slice(b + 1).reduce((s: number, p: number) => s + p, 0);
     const payout = OVER_PAYOUTS[b] ?? 1.1;
     const theoretical = OVER_THEORETICAL[b];
     const edge = pWin - theoretical;
     const ev = pWin * payout - 1;
-    const tier: 1 | 2 | 0 = TIER1_OVER.has(b) ? 1 : TIER2_OVER.has(b) ? 2 : 0;
     const baseEvScore = ev > 0 ? edge * (1 + ev) : -1;
+    const adjustedEvScore = edge > 0 ? baseEvScore * 10 + edge * 50 : baseEvScore;
     rawOptions.push({
       contractType: "DIGITOVER",
       barrier: b,
@@ -223,21 +142,21 @@ function scoreAllBarriers(
       payout,
       expectedValue: ev,
       evScore: baseEvScore,
-      tier,
-      isConservative: tier === 1,
-      adjustedEvScore: baseEvScore,
+      tier: 1,
+      isConservative: true,
+      adjustedEvScore,
     });
   }
 
-  // UNDER barriers: B from 1 to 9 (9 is ultra-safe, 1 is ultra-risky)
-  for (let b = 1; b <= 9; b++) {
+  // UNDER 7 only
+  for (const b of ALLOWED_UNDER) {
     const pWin = combined.slice(0, b).reduce((s: number, p: number) => s + p, 0);
     const payout = UNDER_PAYOUTS[b] ?? 1.1;
     const theoretical = UNDER_THEORETICAL[b];
     const edge = pWin - theoretical;
     const ev = pWin * payout - 1;
-    const tier: 1 | 2 | 0 = TIER1_UNDER.has(b) ? 1 : TIER2_UNDER.has(b) ? 2 : 0;
     const baseEvScore = ev > 0 ? edge * (1 + ev) : -1;
+    const adjustedEvScore = edge > 0 ? baseEvScore * 10 + edge * 50 : baseEvScore;
     rawOptions.push({
       contractType: "DIGITUNDER",
       barrier: b,
@@ -247,57 +166,10 @@ function scoreAllBarriers(
       payout,
       expectedValue: ev,
       evScore: baseEvScore,
-      tier,
-      isConservative: tier === 1,
-      adjustedEvScore: baseEvScore,
+      tier: 1,
+      isConservative: true,
+      adjustedEvScore,
     });
-  }
-
-  // ── Hard-block specific risky barriers — NEVER select these ──────────────
-  // Only block OVER 7/8 (10-20% win) and UNDER 1/2 (10-20% win).
-  // OVER 0 (90% win, 1.05x payout) and UNDER 9 (90% win, 1.05x payout) are
-  // tier-0 but NOT blocked — they can serve as a last-resort fallback.
-  for (const opt of rawOptions) {
-    const isHardBlocked = opt.contractType === "DIGITOVER"
-      ? HARD_BLOCKED_OVER.has(opt.barrier)
-      : HARD_BLOCKED_UNDER.has(opt.barrier);
-    if (isHardBlocked) {
-      opt.adjustedEvScore = -Infinity;
-    }
-  }
-
-  // ── Apply tiered preference ───────────────────────────────────────────────
-  // 1. First try: positive-EV options in the current preferred tier
-  const preferredTier = inRecovery ? 2 : 1;
-  const preferredWithEV = rawOptions
-    .filter((o) => o.tier === preferredTier && o.expectedValue > 0.003)
-    .sort((a, b) => b.evScore - a.evScore);
-
-  // Tier-1/2 with positive EDGE (actual win rate > theoretical) — no positive EV required.
-  // OVER 2 pays 1.19x so breakeven is 84% — unreachable. But if the market is skewed so
-  // that digit 3–9 appear more than 70% of the time, that IS a real edge worth trading.
-  const preferredWithEdge = rawOptions
-    .filter((o) => o.tier === preferredTier && o.edge > 0)
-    .sort((a, b) => b.evScore - a.evScore);
-
-  if (preferredWithEdge.length > 0) {
-    // Found preferred-tier options with positive edge — boost so they always win the sort
-    for (const opt of preferredWithEdge) {
-      opt.adjustedEvScore = opt.evScore * 10 + opt.edge * 50; // guaranteed top
-    }
-  } else if (preferredWithEV.length > 0) {
-    // Preferred tier has positive EV (rare but possible in extreme skew)
-    for (const opt of preferredWithEV) {
-      opt.adjustedEvScore = opt.evScore * 8;
-    }
-  } else {
-    // Fallback: any tier 1 or 2 option with positive EV (tier 0 remains blocked)
-    const anyPositive = rawOptions.filter((o) => o.expectedValue > 0 && o.tier !== 0);
-    if (anyPositive.length > 0) {
-      for (const opt of anyPositive) {
-        opt.adjustedEvScore = opt.evScore * 2;
-      }
-    }
   }
 
   return rawOptions.sort((a, b) => b.adjustedEvScore - a.adjustedEvScore);
@@ -307,22 +179,18 @@ function scoreAllBarriers(
 export interface DigitAnalysisResult {
   bestOption: BarrierOption | null;
   topOptions: BarrierOption[];
-  tier1Options: BarrierOption[];  // Tier 1 safe options (with or without positive EV)
-  tier2Options: BarrierOption[];  // Tier 2 recovery options
+  tier1Options: BarrierOption[];
+  tier2Options: BarrierOption[];
   windowSize: number;
   chiSquare: number;
   hasEdge: boolean;
   multinomialProbs: number[];
   markovProbs: number[];
   lastDigit: number;
-  inRecovery: boolean;
-  unrecoveredLoss: number;
 }
 
 export function analyzeDigitEdge(
   digitFeatures: DigitFeatures,
-  inRecovery: boolean = false,
-  unrecoveredLoss: number = 0,
 ): DigitAnalysisResult {
   const digits = digitFeatures.digits;
   if (digits.length < 30) {
@@ -331,7 +199,6 @@ export function analyzeDigitEdge(
       windowSize: 0, chiSquare: 0,
       hasEdge: false, multinomialProbs: Array(10).fill(0.1),
       markovProbs: Array(10).fill(0.1), lastDigit: digitFeatures.lastDigit,
-      inRecovery, unrecoveredLoss,
     };
   }
 
@@ -347,38 +214,19 @@ export function analyzeDigitEdge(
   const multinomialProbs = counts.map((c: number) => (c + 1) / (total + 10));
   const markovProbs = markovNextProbs(trans, lastDigit);
 
-  const allOptions = scoreAllBarriers(window, markovProbs, multinomialProbs, inRecovery);
+  const allOptions = scoreAllBarriers(window, markovProbs, multinomialProbs);
 
-  // Build tier views (all barriers, sorted by evScore within tier)
+  // Tier 1 only (OVER 2 / UNDER 7)
   const tier1Options = allOptions
     .filter((o) => o.tier === 1 && o.expectedValue > -0.1)
     .sort((a, b) => b.evScore - a.evScore);
-  const tier2Options = allOptions
-    .filter((o) => o.tier === 2 && o.expectedValue > -0.1)
-    .sort((a, b) => b.evScore - a.evScore);
+  const tier2Options: BarrierOption[] = []; // no tier 2 — always normal barriers
 
-  // Exclude hard-blocked barriers (OVER 7/8, UNDER 1/2) from eligible options.
-  const isHardBlockedOption = (o: BarrierOption) =>
-    o.contractType === "DIGITOVER" ? HARD_BLOCKED_OVER.has(o.barrier) : HARD_BLOCKED_UNDER.has(o.barrier);
+  // Pick best option: prefer positive edge, fall back to any option
+  const edgeOptions = allOptions.filter((o) => o.edge > 0).sort((a, b) => b.adjustedEvScore - a.adjustedEvScore);
+  const bestOption = edgeOptions[0] ?? allOptions[0] ?? null;
 
-  // Primary: preferred tier (tier 1 normal, tier 2 recovery) with positive EDGE.
-  // OVER 2 pays only 1.19x — positive EV requires an impossible 84% win rate, so
-  // we use EDGE (actual win rate > theoretical) as the signal instead.
-  const preferredTier = inRecovery ? 2 : 1;
-  const preferredEdgeOptions = allOptions
-    .filter((o) => o.tier === preferredTier && o.edge > 0 && !isHardBlockedOption(o))
-    .sort((a, b) => b.adjustedEvScore - a.adjustedEvScore);
-
-  // Fallback: any non-blocked option with strict positive EV
-  const positiveEV = allOptions.filter((o) => o.expectedValue > 0.003 && !isHardBlockedOption(o));
-
-  const bestOption = preferredEdgeOptions[0] ?? positiveEV[0] ?? null;
-
-  // topOptions = preferred-tier edge options UNION positive-EV options, deduplicated, best first
-  const topOptionSet = new Set<BarrierOption>([...preferredEdgeOptions, ...positiveEV]);
-  const topOptions = [...topOptionSet]
-    .sort((a, b) => b.adjustedEvScore - a.adjustedEvScore)
-    .slice(0, 8);
+  const topOptions = allOptions.slice(0, 8);
 
   return {
     bestOption,
@@ -387,13 +235,10 @@ export function analyzeDigitEdge(
     tier2Options,
     windowSize,
     chiSquare: chi2,
-    // hasEdge = true whenever the preferred-tier barrier has a positive deviation from theoretical
     hasEdge: bestOption !== null && bestOption.edge > 0,
     multinomialProbs,
     markovProbs,
     lastDigit,
-    inRecovery,
-    unrecoveredLoss,
   };
 }
 
@@ -401,7 +246,6 @@ export function analyzeDigitEdge(
 export function runDigitAgent(
   ctx: ScanContext,
   digitFeatures: DigitFeatures | null,
-  inRecovery: boolean = false,
 ): AgentOutput & { digitResult: DigitAnalysisResult | null } {
   const t0 = Date.now();
 
@@ -410,38 +254,27 @@ export function runDigitAgent(
       agentId: "digitDistribution",
       score: 0, confidence: 0, signal: "neutral",
       reasoning: "Insufficient digit data (need ≥30 ticks).",
-      data: { inRecovery, topOptions: [], tier1Options: [], tier2Options: [] },
+      data: { topOptions: [], tier1Options: [], tier2Options: [] },
       executionTimeMs: Date.now() - t0, digitResult: null,
     };
   }
 
-  const unrecoveredLoss = getDigitRecoveryAmount(ctx.symbol);
-  const result = analyzeDigitEdge(digitFeatures, inRecovery, unrecoveredLoss);
+  const result = analyzeDigitEdge(digitFeatures);
   const best = result.bestOption;
 
   let score = 0;
-  let reasoning = "No edge setup found for preferred digit barrier.";
+  let reasoning = "No edge setup found for OVER 2 / UNDER 7 barrier.";
 
   if (best) {
-    // Tier-1 barriers (OVER 2, UNDER 8) have low payouts by design — positive EV
-    // is mathematically impossible. Score them by edge quality (actual win rate
-    // above theoretical) rather than EV, so they don't drag down the consensus.
-    const isTier1 = best.tier === 1;
-    const primaryScore = isTier1
-      ? Math.min(100, 50 + best.edge * 600)   // edge-based: +1% edge → +6 pts
-      : Math.min(100, 50 + best.expectedValue * 400); // EV-based for tier 2+
+    // OVER 2 / UNDER 7 have low payouts by design — positive EV is very rare.
+    // Score by edge quality (actual win rate above theoretical) instead.
+    const primaryScore = Math.min(100, 50 + best.edge * 600);
     const edgeScore = Math.min(100, 50 + best.edge * 500);
     const chi2Bonus = Math.min(10, result.chiSquare * 0.5);
     score = Math.round((primaryScore * 0.6 + edgeScore * 0.3 + chi2Bonus * 0.1));
 
-    const tierLabel = best.tier === 1
-      ? "[TIER 1 — Safe compounding]"
-      : best.tier === 2
-        ? "[TIER 2 — Recovery mode]"
-        : "[HIGH-RISK — last resort]";
-
     reasoning = [
-      `${inRecovery ? "🔄 RECOVERY MODE" : "✅ NORMAL MODE"} ${tierLabel}`,
+      `✅ NORMAL MODE [OVER 2 / UNDER 7]`,
       `Best: ${best.contractType} barrier=${best.barrier}`,
       `WinP=${(best.winProbability * 100).toFixed(1)}%`,
       `(theoretical=${(best.theoreticalWinProb * 100).toFixed(0)}%)`,
@@ -450,10 +283,7 @@ export function runDigitAgent(
       `payout=${best.payout}x`,
       `chi²=${result.chiSquare.toFixed(1)}`,
       `window=${result.windowSize}`,
-      inRecovery ? `unrecovered=$${unrecoveredLoss.toFixed(2)}` : "",
-    ].filter(Boolean).join(", ");
-  } else if (inRecovery) {
-    reasoning = `🔄 Recovery mode active ($${unrecoveredLoss.toFixed(2)} to recover) — no positive-EV setup in Tier 2.`;
+    ].join(", ");
   }
 
   return {
@@ -467,8 +297,6 @@ export function runDigitAgent(
       topOptions: result.topOptions,
       tier1Options: result.tier1Options,
       tier2Options: result.tier2Options,
-      inRecovery,
-      unrecoveredLoss,
       windowSize: result.windowSize,
       chiSquare: result.chiSquare,
       lastDigit: result.lastDigit,

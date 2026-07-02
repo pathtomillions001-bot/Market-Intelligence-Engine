@@ -203,12 +203,7 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   // ── Gate 4: Weighted consensus score ─────────────────────────────────────
   // Use the lower of the user setting and 50 so the engine keeps trading even
   // if the user accidentally set a very high threshold.
-  // RECOVERY EXCEPTION: When the engine is in cross-market recovery mode the
-  // consensus gate is bypassed entirely.  The recovery decision is made by the
-  // global recovery system (unrecoveredAmount > 0), not by agent consensus;
-  // blocking recovery trades here would leave an open deficit forever.
-  // Gates 1 (risk hard-stop) and 3 (outlier tick) remain fully active.
-  if (!ctx.inRecovery) {
+  {
     const minScore = Math.min(settings.minConfidenceThreshold, 50);
     if (weightedScore < minScore) {
       rejectReasons.push(`Consensus score ${weightedScore.toFixed(0)} below threshold ${minScore}`);
