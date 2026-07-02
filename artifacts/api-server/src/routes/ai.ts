@@ -338,11 +338,11 @@ async function runAutonomousLoop() {
     tradesExecutedToday = closedToday.length;
 
     // ── Ground-truth consecutive-loss and daily P&L ──────────────────────────
-    // When a Deriv token is connected, the Deriv profit_table (journalManager) is
-    // ALWAYS the authoritative source of consecutive losses and daily P&L.
-    // The local DB can have stale "lost" records from timed-out contract checks
-    // that Deriv actually settled as wins — those cause false cooldown triggers.
-    // We only fall back to local DB when no Deriv data is available (paper mode).
+    // Consecutive losses: ALWAYS use local DB (written immediately when trades settle,
+    // before scheduleNext fires — always current). The Deriv profit_table can lag
+    // 15–60 s after forceRefresh, which caused missed cooldown triggers. Unknown-outcome
+    // failures are marked "error" (not "lost"), so local DB "lost" records are reliable.
+    // Daily P&L: prefer Deriv journal (authoritative net profit), fall back to local DB.
     const derivTxns = token ? journalManager.getCached() : [];
     const todayMidnightSec = today.getTime() / 1000; // Deriv uses Unix seconds
     const derivTodayTxns = derivTxns.filter(
@@ -352,28 +352,14 @@ async function runAutonomousLoop() {
     let journalConsecutiveLosses: number;
     let resolvedDailyProfit: number;
 
-    if (derivTodayTxns.length > 0) {
-      // Deriv profit_table is returned DESC (most recent first) — iterate to count
-      // consecutive losses at the head of the list.  A winning trade breaks the streak.
-      // IMPORTANT: only count losses that occurred AFTER the most recent cooldown ended
-      // so that a cooldown cannot be immediately re-triggered by the same streak that
-      // already served it (per spec: "Do NOT inspect previous loss streaks").
-      const cooldownEndedSec = cooldownEndedAt ? cooldownEndedAt.getTime() / 1000 : 0;
-      let consecLosses = 0;
-      for (const t of derivTodayTxns) {
-        const txnTime = Number(t.sell_time ?? t.purchase_time ?? 0);
-        // Stop counting when we reach a trade that predates the last cooldown end
-        if (cooldownEndedSec > 0 && txnTime <= cooldownEndedSec) break;
-        if (Number(t.profit ?? 0) < 0) consecLosses++;
-        else break;
-      }
-      journalConsecutiveLosses = consecLosses;
-      resolvedDailyProfit = derivTodayTxns.reduce(
-        (s: number, t: any) => s + Number(t.profit ?? 0), 0,
-      );
-    } else {
-      // No Deriv journal data yet (paper mode or token not connected) — use local DB.
-      // Apply the same cooldown-boundary filter: only count losses after cooldownEndedAt.
+    // ── Consecutive loss counting — always use local DB (source of truth) ────
+    // The local DB is written the moment each live trade settles (before scheduleNext
+    // fires), so it is always current. The Deriv profit_table can lag 15–60 s behind
+    // real settlements (even after forceRefresh) which caused the consecutive-loss
+    // check to miss recent losses and prevented cooldown from triggering on time.
+    // Trades timed-out by the engine are marked "error" (not "lost"), so false
+    // positives from stale records are not a concern here.
+    {
       const cooldownEndedMs = cooldownEndedAt ? cooldownEndedAt.getTime() : 0;
       const sortedByTime = [...closedToday].sort(
         (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
@@ -385,6 +371,17 @@ async function runAutonomousLoop() {
         if (t.status === "lost") journalConsecutiveLosses++;
         else break;
       }
+    }
+
+    // ── Daily P&L — prefer Deriv journal (authoritative net P&L), fall back to DB ──
+    // The Deriv profit_table has the correct net profit including payout multipliers.
+    // Local DB profit fields are set from Deriv's contractResult.profit on live trades
+    // so they should match, but the journal is used as a secondary accuracy check.
+    if (derivTodayTxns.length > 0) {
+      resolvedDailyProfit = derivTodayTxns.reduce(
+        (s: number, t: any) => s + Number(t.profit ?? 0), 0,
+      );
+    } else {
       resolvedDailyProfit = closedToday.reduce((s, t) => s + Number(t.profit ?? 0), 0);
     }
 

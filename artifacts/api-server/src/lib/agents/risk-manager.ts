@@ -75,9 +75,14 @@ export function computeRiskDecision(
   // Scale down stake when approaching limits
   let stakeMultiplier = 1.0;
 
-  // Reduce after consecutive losses
-  if (daily.consecutiveLosses === settings.consecutiveLossLimit - 1) stakeMultiplier *= 0.5;
-  else if (daily.consecutiveLosses >= Math.floor(settings.consecutiveLossLimit / 2)) stakeMultiplier *= 0.7;
+  // Reduce after consecutive losses — but NOT during recovery mode.
+  // Recovery specifically needs the stake to INCREASE (recoveryMultiplier × baseStake)
+  // to cover the unrecovered deficit. Halving the base stake before the recovery
+  // multiplier is applied negates the effect and prevents the engine from recovering.
+  if (!ctx.inRecovery) {
+    if (daily.consecutiveLosses === settings.consecutiveLossLimit - 1) stakeMultiplier *= 0.5;
+    else if (daily.consecutiveLosses >= Math.floor(settings.consecutiveLossLimit / 2)) stakeMultiplier *= 0.7;
+  }
 
   // Reduce when approaching daily loss limit (>50% of limit used)
   if (dailyLossRatio > 0.5) stakeMultiplier *= (1 - (dailyLossRatio - 0.5));

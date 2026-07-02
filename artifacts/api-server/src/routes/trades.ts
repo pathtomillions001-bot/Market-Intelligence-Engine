@@ -331,8 +331,11 @@ router.post("/", async (req, res): Promise<void> => {
     } catch (liveErr) {
       const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
       logger.warn({ liveErrMsg: errMsg, symbol, contractType, barrier }, "Live manual trade failed");
+      // Mark as "error" (not "lost") — outcome is unknown when execution throws.
+      // The consecutive-loss counter in the autonomous loop counts only "lost" records,
+      // so an unknown outcome must never pollute the streak or trigger false cooldowns.
       await db.update(tradesTable)
-        .set({ status: "lost", profit: String(-stake), payout: "0", closedAt: new Date(),
+        .set({ status: "error", profit: "0", payout: "0", closedAt: new Date(),
                agentReasoning: `[LIVE — FAILED: ${errMsg}] ${(analysis as any).reasoning ?? ""}` })
         .where(eq(tradesTable.id, openTrade.id));
       res.status(500).json({ error: `Trade execution failed: ${errMsg}` });

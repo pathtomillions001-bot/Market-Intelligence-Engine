@@ -14,3 +14,4 @@
 - [Journal manager + no-fallback policy](journal-manager.md) — DerivJournalManager in deriv.ts: persistent WS, ping every 25s, reconnect if no pong 60s, profit_table refresh every 60s; no local DB fallback anywhere in journal/stats/daily-summary routes.
 - [Continuous trading gates](continuous-trading-gates.md) — engine was freezing after 2 trades; EV gate, timing gate, drifting gate were all hard-blocking; fixed by widening MIN_POSITIVE_EV to -0.05 and making gates advisory except hard risk stops.
 - [Recovery gates](recovery-gates.md) — recovery trades were silently blocked by 4 stacked gates; fix: tournament fallback + shouldTrade bypass + consensus gate skip + UNDER barrier 7 not 8.
+- [Recovery & cooldown bugs](recovery-cooldown-bugs.md) — risk manager halved recovery stake; Deriv journal lag prevented cooldown; both fixed: skip stake reduction during inRecovery, use local DB for loss counting.
