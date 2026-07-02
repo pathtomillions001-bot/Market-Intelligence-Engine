@@ -587,15 +587,26 @@ async function runAutonomousLoop() {
     // losing the quality tournament to higher-scoring digit barriers.
     const tradeableWinners = groupWinners.filter(w => w.output.shouldTrade);
 
+    // RECOVERY FALLBACK: When recovery mode is active and no group won the
+    // shouldTrade gate (e.g. all OVER 4/UNDER 5 proposals were rejected by
+    // the consensus gate), we MUST still execute a trade to recover losses.
+    // Use the full groupWinners list so recovery candidates enter the tournament
+    // even when their shouldTrade flag is false.  The per-market fallback at
+    // line 531 already ensures the best market per group is selected; this
+    // fallback just lets that candidate reach the execution stage.
+    const tournamentCandidates = (tradeableWinners.length > 0 || !globalRecovery.isActive)
+      ? tradeableWinners
+      : groupWinners;  // recovery fallback: include non-shouldTrade winners
+
     // Determine which families actually have tradeable results this scan
-    const enabledFamiliesThisScan = new Set(tradeableWinners.map(w => w.family));
+    const enabledFamiliesThisScan = new Set(tournamentCandidates.map(w => w.family));
     const multipleFamily = enabledFamiliesThisScan.size > 1;
 
     // When multiple families are active, narrow the pool to the scheduled family
     // so each family gets executed roughly in turn.
-    let tournamentPool = tradeableWinners;
+    let tournamentPool = tournamentCandidates;
     if (multipleFamily && scheduledFamilyHint && enabledFamiliesThisScan.has(scheduledFamilyHint)) {
-      const hinted = tradeableWinners.filter(w => w.family === scheduledFamilyHint);
+      const hinted = tournamentCandidates.filter(w => w.family === scheduledFamilyHint);
       if (hinted.length > 0) tournamentPool = hinted;
     }
 
@@ -682,14 +693,35 @@ async function runAutonomousLoop() {
       consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
     });
 
-    if (!output.shouldTrade) {
+    // RECOVERY GATE BYPASS: When the global recovery is active the engine MUST
+    // place a trade to recover the open deficit — even if the master-decision
+    // agent rated conditions as "not favourable" (shouldTrade=false).  The only
+    // hard vetoes that are still respected during recovery are:
+    //   • Risk hard-stop (daily loss limit / drawdown)         — Gate 1
+    //   • Outlier-tick veto (extreme z-score at entry)         — Gate 3
+    // All other rejects (consensus below threshold, near-zero EV, timing
+    // advisory) are overridden during recovery so the deficit is not left open.
+    const riskHardStop  = output.rejectReason?.includes("Risk gate");
+    const outlierTick   = output.rejectReason?.includes("Outlier tick");
+    const hardVeto      = riskHardStop || outlierTick;
+
+    if (!output.shouldTrade && (!globalRecovery.isActive || hardVeto)) {
       logger.info({
         symbol: bestMarket.symbol,
         quality: output.qualityScore,
         reason: output.rejectReason,
+        recoveryOverride: globalRecovery.isActive && !hardVeto,
       }, "Conditions not favourable — scanning next");
       scheduleNext(false);
       return;
+    }
+
+    if (!output.shouldTrade && globalRecovery.isActive && !hardVeto) {
+      logger.info({
+        symbol: bestMarket.symbol,
+        reason: output.rejectReason,
+        unrecoveredAmount: globalRecovery.unrecoveredAmount,
+      }, "Recovery mode: overriding shouldTrade=false — must place recovery trade");
     }
 
     // ── Advance family rotation hint for the NEXT scan ───────────────────────
@@ -999,7 +1031,8 @@ async function runAutonomousLoop() {
       setGlobalDigitRecovery(true, globalRecovery.unrecoveredAmount);
 
       const nextOuMultiplier = Math.pow(recMultiplier, Math.min(globalRecovery.overunderRecoveryLossCount + 1, maxRecSteps));
-      const nextDirMultiplier = Math.pow(recMultiplier, Math.min(globalRecovery.directionRecoveryLossCount + 1, maxRecSteps));
+      // Rise/Fall and Even/Odd: FLAT multiplier per spec — no compounding
+      const nextDirMultiplier = recMultiplier;
       logger.info({
         symbol: bestMarket.symbol,
         family: lostFamily,

@@ -13,3 +13,4 @@
 - [Autonomous loop safety](autonomous-loop-safety.md) — isLoopRunning + open-trade DB guard + lastTradeCompletedAt (12s) + per-symbol cooldown (max 2 trades / 8min) prevent double execution; scheduleNext waits 15s after trade.
 - [Journal manager + no-fallback policy](journal-manager.md) — DerivJournalManager in deriv.ts: persistent WS, ping every 25s, reconnect if no pong 60s, profit_table refresh every 60s; no local DB fallback anywhere in journal/stats/daily-summary routes.
 - [Continuous trading gates](continuous-trading-gates.md) — engine was freezing after 2 trades; EV gate, timing gate, drifting gate were all hard-blocking; fixed by widening MIN_POSITIVE_EV to -0.05 and making gates advisory except hard risk stops.
+- [Recovery gates](recovery-gates.md) — recovery trades were silently blocked by 4 stacked gates; fix: tournament fallback + shouldTrade bypass + consensus gate skip + UNDER barrier 7 not 8.

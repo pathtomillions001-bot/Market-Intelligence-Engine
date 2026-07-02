@@ -155,11 +155,16 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     rejectReasons.push("No EV data — market data insufficient to evaluate");
   } else {
     const isDigitTier1 = (
+      // OVER 2  → ~70% theoretical win, 1.19x payout — positive EV impossible; gate on edge
       (bestEV.product === "DIGITOVER"  && bestEV.barrier === 2) ||
-      (bestEV.product === "DIGITUNDER" && bestEV.barrier === 8)
+      // UNDER 7 → ~70% theoretical win, 1.19x payout — mirrors OVER 2 (digit-probability.ts normal mode)
+      // NOTE: barrier 7 not 8; digit-probability.ts uses UNDER 7 as the normal-mode barrier
+      (bestEV.product === "DIGITUNDER" && bestEV.barrier === 7)
     );
     const isDigitTier2 = (
+      // OVER 4  → ~50% theoretical win, 1.50x payout — recovery mode barrier
       (bestEV.product === "DIGITOVER"  && bestEV.barrier === 4) ||
+      // UNDER 5 → ~50% theoretical win, 1.50x payout — recovery mode barrier
       (bestEV.product === "DIGITUNDER" && bestEV.barrier === 5)
     );
 
@@ -198,9 +203,16 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   // ── Gate 4: Weighted consensus score ─────────────────────────────────────
   // Use the lower of the user setting and 50 so the engine keeps trading even
   // if the user accidentally set a very high threshold.
-  const minScore = Math.min(settings.minConfidenceThreshold, 50);
-  if (weightedScore < minScore) {
-    rejectReasons.push(`Consensus score ${weightedScore.toFixed(0)} below threshold ${minScore}`);
+  // RECOVERY EXCEPTION: When the engine is in cross-market recovery mode the
+  // consensus gate is bypassed entirely.  The recovery decision is made by the
+  // global recovery system (unrecoveredAmount > 0), not by agent consensus;
+  // blocking recovery trades here would leave an open deficit forever.
+  // Gates 1 (risk hard-stop) and 3 (outlier tick) remain fully active.
+  if (!ctx.inRecovery) {
+    const minScore = Math.min(settings.minConfidenceThreshold, 50);
+    if (weightedScore < minScore) {
+      rejectReasons.push(`Consensus score ${weightedScore.toFixed(0)} below threshold ${minScore}`);
+    }
   }
 
   // ── Gate 5: Drifting strategy — advisory only ─────────────────────────────
