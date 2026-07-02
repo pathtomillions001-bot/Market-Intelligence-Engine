@@ -103,6 +103,9 @@ export interface ScanContext {
   daily: DailyStats;
   token: string | null;
   currency: string;
+  /** Recovery Mode override: forces the digit-probability agent to evaluate
+   *  these barriers instead of the normal OVER 2 / UNDER 7. */
+  recoveryBarrierOverride?: { DIGITOVER: number; DIGITUNDER: number };
 }
 
 // ── Full coordinator output ───────────────────────────────────────────────────

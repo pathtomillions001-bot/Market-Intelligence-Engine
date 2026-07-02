@@ -746,7 +746,21 @@ export const GetAiEngineStatusResponse = zod.object({
   "currentMarket": zod.string().nullable(),
   "nextScanIn": zod.number().nullable(),
   "stopReasons": zod.array(zod.string()),
-  "cooldownUntil": zod.string().nullish().describe('ISO timestamp when the cooldown ends and engine auto-resumes')
+  "cooldownUntil": zod.string().nullish().describe('ISO timestamp when the cooldown ends and engine auto-resumes'),
+  "recovery": zod.object({
+  "active": zod.boolean().optional().describe('True when at least one contract family is currently in Recovery Mode'),
+  "families": zod.array(zod.object({
+  "family": zod.enum(['overunder', 'risefall', 'evenodd']).optional(),
+  "inRecovery": zod.boolean().optional(),
+  "recoveryStep": zod.number().optional(),
+  "unrecoveredAmount": zod.number().optional().describe('Dollars still owed before this family returns to normal mode'),
+  "nextStakeMultiplier": zod.number().optional().describe('recoveryMultiplier ^ recoveryStep'),
+  "nextStake": zod.number().nullish().describe('The stake (USD) that will be used on this family\'s next recovery trade')
+})).optional(),
+  "activeFamilies": zod.array(zod.string()).optional(),
+  "totalUnrecovered": zod.number().optional().describe('Sum of unrecovered amounts (USD) across all families currently in recovery'),
+  "highestStep": zod.number().optional().describe('The highest recovery step among all families currently in recovery')
+}).optional()
 })
 
 
@@ -770,7 +784,21 @@ export const ToggleAutonomousEngineResponse = zod.object({
   "currentMarket": zod.string().nullable(),
   "nextScanIn": zod.number().nullable(),
   "stopReasons": zod.array(zod.string()),
-  "cooldownUntil": zod.string().nullish().describe('ISO timestamp when the cooldown ends and engine auto-resumes')
+  "cooldownUntil": zod.string().nullish().describe('ISO timestamp when the cooldown ends and engine auto-resumes'),
+  "recovery": zod.object({
+  "active": zod.boolean().optional().describe('True when at least one contract family is currently in Recovery Mode'),
+  "families": zod.array(zod.object({
+  "family": zod.enum(['overunder', 'risefall', 'evenodd']).optional(),
+  "inRecovery": zod.boolean().optional(),
+  "recoveryStep": zod.number().optional(),
+  "unrecoveredAmount": zod.number().optional().describe('Dollars still owed before this family returns to normal mode'),
+  "nextStakeMultiplier": zod.number().optional().describe('recoveryMultiplier ^ recoveryStep'),
+  "nextStake": zod.number().nullish().describe('The stake (USD) that will be used on this family\'s next recovery trade')
+})).optional(),
+  "activeFamilies": zod.array(zod.string()).optional(),
+  "totalUnrecovered": zod.number().optional().describe('Sum of unrecovered amounts (USD) across all families currently in recovery'),
+  "highestStep": zod.number().optional().describe('The highest recovery step among all families currently in recovery')
+}).optional()
 })
 
 

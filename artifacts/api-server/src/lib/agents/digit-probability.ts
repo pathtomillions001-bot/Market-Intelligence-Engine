@@ -182,7 +182,10 @@ const ALLOWED_BARRIERS: Record<"DIGITOVER" | "DIGITUNDER", number> = {
   DIGITUNDER: 7,
 };
 
-function buildBarrierOptions(analysis: ReturnType<typeof analyzeDigits>): BarrierOption[] {
+function buildBarrierOptions(
+  analysis: ReturnType<typeof analyzeDigits>,
+  allowedBarriers: Record<"DIGITOVER" | "DIGITUNDER", number> = ALLOWED_BARRIERS,
+): BarrierOption[] {
   const options: BarrierOption[] = [];
 
   for (const [ct, payoutMap] of Object.entries(DIGIT_PAYOUTS)) {
@@ -191,8 +194,9 @@ function buildBarrierOptions(analysis: ReturnType<typeof analyzeDigits>): Barrie
     for (const [bStr, payout] of Object.entries(payoutMap)) {
       const barrier = Number(bStr);
 
-      // STRICT: only allow the one permitted barrier — OVER 2 / UNDER 7
-      if (barrier !== ALLOWED_BARRIERS[contractType]) continue;
+      // STRICT: only allow the one permitted barrier — OVER 2 / UNDER 7 normally,
+      // or OVER 4 / UNDER 5 while this family is in Recovery Mode.
+      if (barrier !== allowedBarriers[contractType]) continue;
 
       const winP = winProbForBarrier(contractType, barrier, analysis);
       const ev = winP * (payout - 1) - (1 - winP);
@@ -309,7 +313,7 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
   }
 
   const analysis = analyzeDigits(digits);
-  const barrierOptions = buildBarrierOptions(analysis);
+  const barrierOptions = buildBarrierOptions(analysis, ctx.recoveryBarrierOverride);
   const evenAnalysis = analyzeEvenOdd(digits);
 
   // Sort by adjustedEvScore

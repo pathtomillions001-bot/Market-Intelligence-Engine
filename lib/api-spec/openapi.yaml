@@ -935,6 +935,49 @@ components:
         cooldownUntil:
           type: ["string", "null"]
           description: ISO timestamp when the cooldown ends and engine auto-resumes
+        recovery:
+          $ref: "#/components/schemas/RecoveryStatus"
+
+    RecoveryStatus:
+      type: object
+      properties:
+        active:
+          type: boolean
+          description: True when at least one contract family is currently in Recovery Mode
+        families:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecoveryFamilyState"
+        activeFamilies:
+          type: array
+          items:
+            type: string
+        totalUnrecovered:
+          type: number
+          description: Sum of unrecovered amounts (USD) across all families currently in recovery
+        highestStep:
+          type: integer
+          description: The highest recovery step among all families currently in recovery
+
+    RecoveryFamilyState:
+      type: object
+      properties:
+        family:
+          type: string
+          enum: [overunder, risefall, evenodd]
+        inRecovery:
+          type: boolean
+        recoveryStep:
+          type: integer
+        unrecoveredAmount:
+          type: number
+          description: Dollars still owed before this family returns to normal mode
+        nextStakeMultiplier:
+          type: number
+          description: recoveryMultiplier ^ recoveryStep
+        nextStake:
+          type: ["number", "null"]
+          description: The stake (USD) that will be used on this family's next recovery trade
 
     AgentStatus:
       type: object

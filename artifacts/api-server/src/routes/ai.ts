@@ -7,6 +7,8 @@ import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
+import { computeStake } from "../lib/agents/ev-calculator";
+import * as recoveryEngine from "../lib/agents/recovery-engine";
 import { broadcastSSE, addSSEClient, removeSSEClient } from "../lib/sse";
 
 const router = Router();
@@ -485,6 +487,12 @@ async function runAutonomousLoop() {
                         ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 48)
                         : baseCtx.settings.minConfidenceThreshold,
                     },
+                    // Recovery Mode: while the Over/Under family is recovering losses,
+                    // force barrier evaluation to OVER 4 / UNDER 5 instead of OVER 2 / UNDER 7.
+                    // The AI still picks whichever direction (over vs under) scores best.
+                    recoveryBarrierOverride: fam.name === "overunder"
+                      ? recoveryEngine.getBarrierOverride("overunder")
+                      : undefined,
                   };
                   const output = await withTimeout(runCoordinator(famCtx), SCAN_TIMEOUT_MS, null as any);
                   if (!output) return null;
@@ -562,16 +570,37 @@ async function runAutonomousLoop() {
     const enabledFamiliesThisScan = new Set(tradeableWinners.map(w => w.family));
     const multipleFamily = enabledFamiliesThisScan.size > 1;
 
+    // ── Recovery priority ─────────────────────────────────────────────────────
+    // If one or more contract families are currently in Recovery Mode, executing
+    // the recovery trade takes priority over normal rotation — and when multiple
+    // families are simultaneously in recovery, the one with the highest confidence
+    // score is executed first.
+    const recoveryFamilyKeys = new Set(
+      (["overunder", "risefall", "evenodd"] as const).filter((f) => recoveryEngine.isInRecovery(f))
+    );
+    const familyNameToRecoveryKey = (family: string): recoveryEngine.ContractFamily | null =>
+      family === "overunder" ? "overunder" : family === "direction" ? "risefall" : family === "evenodd" ? "evenodd" : null;
+    const recoveryWinners = tradeableWinners.filter((w) => {
+      const key = familyNameToRecoveryKey(w.family);
+      return key !== null && recoveryFamilyKeys.has(key);
+    });
+
     // When multiple families are active, narrow the pool to the scheduled family
-    // so each family gets executed roughly in turn.
+    // so each family gets executed roughly in turn — UNLESS a recovery trade is
+    // available, in which case recovery always takes priority.
     let tournamentPool = tradeableWinners;
-    if (multipleFamily && scheduledFamilyHint && enabledFamiliesThisScan.has(scheduledFamilyHint)) {
+    if (recoveryWinners.length > 0) {
+      tournamentPool = recoveryWinners;
+    } else if (multipleFamily && scheduledFamilyHint && enabledFamiliesThisScan.has(scheduledFamilyHint)) {
       const hinted = tradeableWinners.filter(w => w.family === scheduledFamilyHint);
       if (hinted.length > 0) tournamentPool = hinted;
     }
 
     const bestResult: (ScanResult & { groupName: string }) | null = tournamentPool.length > 0
-      ? tournamentPool.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
+      ? (recoveryWinners.length > 0
+          // Among active recovery families, execute the highest-confidence one.
+          ? tournamentPool.sort((a, b) => b.output.confidenceScore - a.output.confidenceScore)[0]
+          : tournamentPool.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0])
       : null;
 
     if (bestResult) {
@@ -682,8 +711,21 @@ async function runAutonomousLoop() {
       ? Math.max(5, rawDuration)
       : rawDuration;
 
-    // Stake comes directly from the AI recommendation — no recovery multiplier
+    // ── Recovery Mode stake override ─────────────────────────────────────────
+    // Normally the stake comes directly from the AI's risk-based recommendation.
+    // If this contract family is currently in Recovery Mode, override the stake
+    // using nextStake = baseStake * (recoveryMultiplier ^ recoveryStep) instead.
+    const recoveryFamily = recoveryEngine.contractTypeToFamily(effectiveContractType);
+    const recoveryMultiplierSetting = settings ? Number((settings as any).recoveryMultiplier) : 1.2;
     let stake = rec.stake;
+    if (recoveryFamily) {
+      stake = recoveryEngine.getNextStake(
+        recoveryFamily,
+        rec.stake,
+        recoveryMultiplierSetting,
+        tradingSettings.maxTradeStake,
+      );
+    }
 
     // Estimated payout for paper trades (live payout comes from Deriv result)
     const estimatedPayout = stake * rec.payoutMultiplier;
@@ -704,6 +746,9 @@ async function runAutonomousLoop() {
 
       // Paper trades: insert completed record immediately
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
+      if (recoveryFamily) {
+        recoveryEngine.recordOutcome(recoveryFamily, won, profit, stake, settings?.maxRecoverySteps ?? 3);
+      }
 
       await db.insert(tradesTable).values({
         symbol: bestMarket.symbol,
@@ -811,6 +856,9 @@ async function runAutonomousLoop() {
 
       // Update the open record to Deriv-confirmed final status
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
+      if (recoveryFamily) {
+        recoveryEngine.recordOutcome(recoveryFamily, won, profit, stake, settings?.maxRecoverySteps ?? 3);
+      }
 
       await db.update(tradesTable).set({
         status: won ? "won" : "lost",
@@ -1101,11 +1149,35 @@ router.get("/insights", async (_req, res): Promise<void> => {
   res.json(insights);
 });
 
+// ── Recovery dashboard payload ──────────────────────────────────────────────
+function buildRecoveryPayload(recoveryMultiplier: number) {
+  const states = recoveryEngine.getAllStates();
+  const active = states.filter((s) => s.inRecovery);
+  return {
+    active: active.length > 0,
+    families: states.map((s) => ({
+      family: s.family,
+      inRecovery: s.inRecovery,
+      recoveryStep: s.recoveryStep,
+      unrecoveredAmount: Math.round(s.unrecoveredAmount * 100) / 100,
+      nextStakeMultiplier: s.inRecovery ? Math.round(Math.pow(recoveryMultiplier, s.recoveryStep) * 100) / 100 : 1,
+      nextStake: s.inRecovery
+        ? Math.round(s.baseStake * Math.pow(recoveryMultiplier, s.recoveryStep) * 100) / 100
+        : null,
+    })),
+    // Convenience aggregates for the dashboard card
+    activeFamilies: active.map((s) => s.family),
+    totalUnrecovered: Math.round(active.reduce((sum, s) => sum + s.unrecoveredAmount, 0) * 100) / 100,
+    highestStep: active.reduce((max, s) => Math.max(max, s.recoveryStep), 0),
+  };
+}
+
 router.get("/engine/status", async (_req, res): Promise<void> => {
   const settings = await db.select().from(settingsTable).limit(1);
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
   const liveScores = await getComputedAgentScores();
+  const recoveryMultiplier = settings.length > 0 ? Number((settings[0] as any).recoveryMultiplier) : 1.2;
 
   res.json({
     isRunning: engineRunning, mode: engineRunning ? "autonomous" : "manual",
@@ -1131,6 +1203,7 @@ router.get("/engine/status", async (_req, res): Promise<void> => {
     sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: DERIV_MARKETS.length,
+    recovery: buildRecoveryPayload(recoveryMultiplier),
   });
 });
 
@@ -1152,6 +1225,8 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     cooldownEndedAt = new Date();
     engineRunning = true; autonomousMode = "autonomous"; stopReasons = []; nextScanIn = loopIntervalSec;
     exploitSymbol = null; exploitCount = 0;
+    // Fresh session — clear any leftover recovery state from a previous run
+    recoveryEngine.resetAll();
 
     // Reset group cursors → scanning restarts from V10 1s / V10 / JD10 / RDBULL
     groupCursors.fill(0);
@@ -1187,6 +1262,7 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: DERIV_MARKETS.length,
+    recovery: buildRecoveryPayload(settings.length > 0 ? Number((settings[0] as any).recoveryMultiplier) : 1.2),
   });
 });
 

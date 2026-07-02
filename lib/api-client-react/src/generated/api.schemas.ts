@@ -377,6 +377,41 @@ export interface AgentStatus {
   confidence: number;
 }
 
+export type RecoveryFamilyStateFamily = typeof RecoveryFamilyStateFamily[keyof typeof RecoveryFamilyStateFamily];
+
+
+export const RecoveryFamilyStateFamily = {
+  overunder: 'overunder',
+  risefall: 'risefall',
+  evenodd: 'evenodd',
+} as const;
+
+export interface RecoveryFamilyState {
+  family?: RecoveryFamilyStateFamily;
+  inRecovery?: boolean;
+  recoveryStep?: number;
+  /** Dollars still owed before this family returns to normal mode */
+  unrecoveredAmount?: number;
+  /** recoveryMultiplier ^ recoveryStep */
+  nextStakeMultiplier?: number;
+  /**
+     * The stake (USD) that will be used on this family's next recovery trade
+     * @nullable
+     */
+  nextStake?: number | null;
+}
+
+export interface RecoveryStatus {
+  /** True when at least one contract family is currently in Recovery Mode */
+  active?: boolean;
+  families?: RecoveryFamilyState[];
+  activeFamilies?: string[];
+  /** Sum of unrecovered amounts (USD) across all families currently in recovery */
+  totalUnrecovered?: number;
+  /** The highest recovery step among all families currently in recovery */
+  highestStep?: number;
+}
+
 export interface AiEngineStatus {
   isRunning: boolean;
   mode: AiEngineStatusMode;
@@ -392,6 +427,7 @@ export interface AiEngineStatus {
      * @nullable
      */
   cooldownUntil?: string | null;
+  recovery?: RecoveryStatus;
 }
 
 export interface EngineToggleInput {

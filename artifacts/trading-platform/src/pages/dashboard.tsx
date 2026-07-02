@@ -600,7 +600,7 @@ export default function Dashboard() {
       {/* Stat strip — displayStats applies pending optimistic updates instantly */}
       <div className="space-y-2">
         <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Performance</span>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           <Card className="bg-card">
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Win Rate</div>
@@ -632,6 +632,29 @@ export default function Dashboard() {
               <div className="text-xs text-muted-foreground mt-1">
                 {displayStats ? ((displayStats.currentStreak ?? 0) >= 0 ? "winning streak" : "losing streak") : "no data"}
               </div>
+            </CardContent>
+          </Card>
+          <Card className="bg-card">
+            <CardContent className="p-4">
+              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Recovery</div>
+              {engine?.recovery?.active ? (
+                <>
+                  <div className="text-2xl font-mono font-bold text-amber-500">
+                    x{(engine.recovery.families.find((f) => f.inRecovery)?.nextStakeMultiplier ?? 1).toFixed(2)}
+                  </div>
+                  <div className="text-xs text-muted-foreground -mt-1 mb-0.5">
+                    step {engine.recovery.highestStep}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    ${engine.recovery.totalUnrecovered.toFixed(2)} to recover · {engine.recovery.activeFamilies.join(", ")}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="text-2xl font-mono font-bold text-green-500">Normal</div>
+                  <div className="text-xs text-muted-foreground mt-1">no families in recovery</div>
+                </>
+              )}
             </CardContent>
           </Card>
           <Card className="bg-card">

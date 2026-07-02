@@ -7,6 +7,7 @@
  */
 import type { AgentStatus } from './agentStatus';
 import type { AiEngineStatusMode } from './aiEngineStatusMode';
+import type { RecoveryStatus } from './recoveryStatus';
 
 export interface AiEngineStatus {
   isRunning: boolean;
@@ -23,4 +24,5 @@ export interface AiEngineStatus {
      * @nullable
      */
   cooldownUntil?: string | null;
+  recovery?: RecoveryStatus;
 }
