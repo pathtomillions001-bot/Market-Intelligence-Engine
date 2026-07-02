@@ -13,9 +13,16 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
 import { Link } from "wouter";
-import { TrendingUp, Activity, AlertTriangle, Target, Clock, RefreshCw, TimerOff, Zap, ArrowRight, ShieldAlert } from "lucide-react";
+import { TrendingUp, Activity, AlertTriangle, Target, Clock, RefreshCw, TimerOff, Zap, ArrowRight, ShieldAlert, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { MarketOpportunityFlashCard } from "@/components/flash-card-3d";
+
+interface RecoveryProgress {
+  initialAmount: number;   // unrecoveredAmount at start of this recovery session
+  currentAmount: number;   // remaining unrecovered amount (decreases with each win)
+  lastSymbol: string;
+  lastProfit: number;
+}
 
 interface JournalStats {
   totalTrades: number;
@@ -378,6 +385,9 @@ export default function Dashboard() {
   const [tournamentWinner, setTournamentWinner] = useState<string | null>(null);
   // Last skip reason from scan_complete — shown in the status bar when no trade fires
   const [lastSkipReason, setLastSkipReason] = useState<string | null>(null);
+  // Recovery progress — driven by recovery_active / recovery_progress / recovery_complete SSE
+  const [recoveryProgress, setRecoveryProgress] = useState<RecoveryProgress | null>(null);
+  const [recoveryCompleteFlash, setRecoveryCompleteFlash] = useState<{ profit: number } | null>(null);
 
   // SSE: journal_refreshed syncs journal; trade_completed applies immediate stat delta
   const sseRef = useRef<EventSource | null>(null);
@@ -456,6 +466,45 @@ export default function Dashboard() {
       setGroupScans({});
       setIsScanningGroups(false);
       setTournamentWinner(null);
+    });
+
+    // Recovery progress events — drive the live progress bar in the recovery card
+    es.addEventListener("recovery_active", (e: MessageEvent) => {
+      try {
+        const p = JSON.parse(e.data);
+        const total: number = p.totalUnrecoveredAmount ?? p.lostAmount ?? 0;
+        setRecoveryCompleteFlash(null);
+        setRecoveryProgress(prev => ({
+          initialAmount: prev ? Math.max(prev.initialAmount, total) : total,
+          currentAmount: total,
+          lastSymbol: p.symbol ?? "",
+          lastProfit: 0,
+        }));
+      } catch {}
+    });
+
+    es.addEventListener("recovery_progress", (e: MessageEvent) => {
+      try {
+        const p = JSON.parse(e.data);
+        const remaining: number = p.remainingAmount ?? 0;
+        const profit: number = parseFloat(p.profit ?? "0");
+        setRecoveryProgress(prev => {
+          if (!prev) return null;
+          return { ...prev, currentAmount: remaining, lastSymbol: p.symbol ?? prev.lastSymbol, lastProfit: profit };
+        });
+      } catch {}
+    });
+
+    es.addEventListener("recovery_complete", (e: MessageEvent) => {
+      try {
+        const p = JSON.parse(e.data);
+        const profit: number = parseFloat(p.profit ?? "0");
+        // Show the green completion flash for 4 seconds, then clear both states
+        setRecoveryProgress(null);
+        setRecoveryCompleteFlash({ profit });
+        setTimeout(() => setRecoveryCompleteFlash(null), 4000);
+        queryClient.invalidateQueries({ queryKey: ["getAiEngineStatus"] });
+      } catch {}
     });
 
     return () => { es.close(); sseRef.current = null; };
@@ -559,6 +608,36 @@ export default function Dashboard() {
         </div>
       </header>
 
+      {/* Recovery complete flash — shown for 4s after recovery_complete SSE fires */}
+      <AnimatePresence>
+        {recoveryCompleteFlash && (
+          <motion.div
+            key="recovery-complete-flash"
+            initial={{ opacity: 0, scale: 0.97, y: -6 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.97, y: -6 }}
+            transition={{ duration: 0.3 }}
+            className="flex items-center gap-3 p-4 rounded-xl bg-green-500/10 border border-green-500/40"
+          >
+            <CheckCircle2 className="w-5 h-5 text-green-400 flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-semibold text-green-300">Recovery Complete</div>
+              <div className="text-xs text-green-400/70 mt-0.5 font-mono">
+                All losses covered · recovered +${recoveryCompleteFlash.profit.toFixed(2)} · returning to normal stakes
+              </div>
+            </div>
+            <div className="w-24 h-1.5 rounded-full bg-green-500/20 overflow-hidden">
+              <motion.div
+                className="h-full rounded-full bg-green-400"
+                initial={{ width: "100%" }}
+                animate={{ width: "0%" }}
+                transition={{ duration: 4, ease: "linear" }}
+              />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Recovery status card — shown when recovery mode is active */}
       <AnimatePresence>
         {(() => {
@@ -571,6 +650,13 @@ export default function Dashboard() {
           const nextDirMul: number = rec.nextDirMultiplier ?? 1;
           const nextEoMul: number = rec.nextEoMultiplier ?? 1;
           const maxSteps: number = rec.maxRecoverySteps ?? 3;
+
+          // Live progress bar — driven by SSE; falls back to static engine status values
+          const initialAmt = recoveryProgress?.initialAmount ?? rec.unrecoveredAmount;
+          const currentAmt = recoveryProgress?.currentAmount ?? rec.unrecoveredAmount;
+          const pct = initialAmt > 0 ? Math.max(0, Math.min(100, ((initialAmt - currentAmt) / initialAmt) * 100)) : 0;
+          const hasPartialRecovery = pct > 0;
+
           return (
             <motion.div
               key="recovery-card"
@@ -588,10 +674,38 @@ export default function Dashboard() {
                       {familyLabels[f] ?? f}
                     </Badge>
                   ))}
+                  {recoveryProgress?.lastProfit !== undefined && recoveryProgress.lastProfit > 0 && (
+                    <span className="text-[10px] font-mono text-green-400 bg-green-500/10 border border-green-500/25 px-1.5 py-0.5 rounded">
+                      +${recoveryProgress.lastProfit.toFixed(2)} recovered
+                    </span>
+                  )}
                 </div>
+
+                {/* Live progress bar */}
+                <div className="mt-2 space-y-1">
+                  <div className="flex items-center justify-between text-[10px] font-mono">
+                    <span className="text-orange-500/70">
+                      {hasPartialRecovery
+                        ? `Recovered $${(initialAmt - currentAmt).toFixed(2)} of $${initialAmt.toFixed(2)}`
+                        : `Recovering $${currentAmt.toFixed(2)}`}
+                    </span>
+                    <span className={hasPartialRecovery ? "text-orange-300" : "text-orange-500/50"}>
+                      {pct.toFixed(0)}%
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full rounded-full bg-orange-500/15 overflow-hidden">
+                    <motion.div
+                      className="h-full rounded-full bg-gradient-to-r from-orange-500 to-amber-400"
+                      initial={false}
+                      animate={{ width: `${pct}%` }}
+                      transition={{ duration: 0.6, ease: "easeOut" }}
+                    />
+                  </div>
+                </div>
+
                 <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-xs text-muted-foreground font-mono">
                   <span>
-                    To recover: <span className="text-orange-300 font-semibold">${rec.unrecoveredAmount.toFixed(2)}</span>
+                    Remaining: <span className="text-orange-300 font-semibold">${currentAmt.toFixed(2)}</span>
                   </span>
                   {families.includes("overunder") && (
                     <span>
