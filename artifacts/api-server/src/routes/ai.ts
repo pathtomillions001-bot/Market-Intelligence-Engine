@@ -133,17 +133,32 @@ function applyJournalSync(sorted: NormalisedTrade[]): void {
     }
 
     if (streakLosses === 0) {
-      // No active loss streak in journal
+      // No active loss streak in journal (most recent family trade was a win)
       if (currentState.inRecovery && familyTrades[0]?.won) {
-        // Most recent trade was a win — streak cleared by a trade the engine didn't see
-        recoveryEngine.seedFamilyState(family, {
-          inRecovery: false,
-          recoveryStep: 0,
-          unrecoveredAmount: 0,
-          baseStake: currentState.baseStake,
-          streakLossCount: 0,
-          streakStartAmount: 0,
-        });
+        if (currentState.unrecoveredAmount <= 0.01) {
+          // Fully recovered — reset to normal mode.
+          recoveryEngine.seedFamilyState(family, {
+            inRecovery: false,
+            recoveryStep: 0,
+            unrecoveredAmount: 0,
+            baseStake: currentState.baseStake,
+            streakLossCount: 0,
+            streakStartAmount: 0,
+          });
+        } else {
+          // Partial recovery: a win occurred but not enough to cover all losses.
+          // The engine uses exact Deriv profit in recordOutcome, which already reduced
+          // unrecoveredAmount correctly. Trust that figure — do NOT clear it here.
+          // BUT always clear streakLossCount when a win appears in the journal, since the
+          // consecutive streak is broken by any win. Leaving a stale high streakLossCount
+          // would cause the per-family cooldown gate to fire erroneously on resume.
+          if (currentState.streakLossCount > 0) {
+            recoveryEngine.seedFamilyState(family, {
+              ...currentState,
+              streakLossCount: 0,   // streak broken by win; debt still outstanding
+            });
+          }
+        }
       }
     } else if (!currentState.inRecovery) {
       // Journal shows a streak but engine thinks it's Normal → seed it
@@ -565,12 +580,33 @@ async function runAutonomousLoop() {
     const todayProfit = resolvedDailyProfit;
 
     // Hard stops — only triggered by Deriv-verified P&L and loss streak.
-    if (todayProfit <= -tradingSettings.dailyLossLimit) { stopEngine(`Daily loss limit $${tradingSettings.dailyLossLimit} reached`); return; }
-    if (todayProfit >= tradingSettings.dailyTarget) { stopEngine(`Daily target $${tradingSettings.dailyTarget} reached!`); return; }
+    if (todayProfit <= -tradingSettings.dailyLossLimit) { stopEngine(`Daily loss limit ${tradingSettings.dailyLossLimit} reached`); return; }
+    if (todayProfit >= tradingSettings.dailyTarget) { stopEngine(`Daily target ${tradingSettings.dailyTarget} reached!`); return; }
     if (daily.consecutiveLosses >= tradingSettings.consecutiveLossLimit) {
       const cooldownMins = settings?.cooldownMinutes ?? 30;
       stopEngine(`Journal shows ${daily.consecutiveLosses} consecutive losses — limit ${tradingSettings.consecutiveLossLimit} reached, cooling down ${cooldownMins}m`, cooldownMins);
       return;
+    }
+
+    // ── Per-family consecutive-loss check ────────────────────────────────────
+    // The global check above counts consecutive losses broken by wins from ANY family.
+    // During recovery, the engine rotates families — a win on EVEN/ODD between two
+    // OVER/UNDER recovery losses resets the global count to 0, masking the real streak.
+    // recoveryEngine.getState(f).streakLossCount tracks each family's streak independently
+    // (only resets when that family itself wins and fully recovers). This ensures the
+    // user-set loss-streak limit is respected even when different families interleave.
+    {
+      const cooldownMins = settings?.cooldownMinutes ?? 30;
+      for (const f of recoveryEngine.CONTRACT_FAMILIES) {
+        const familyStreak = recoveryEngine.getState(f).streakLossCount;
+        if (familyStreak >= tradingSettings.consecutiveLossLimit) {
+          stopEngine(
+            `${f} family: ${familyStreak} consecutive losses — limit ${tradingSettings.consecutiveLossLimit} reached, cooling down ${cooldownMins}m`,
+            cooldownMins,
+          );
+          return;
+        }
+      }
     }
 
     // ── Market selection: parallel tournament scanning ───────────────────────
@@ -1078,9 +1114,20 @@ async function runAutonomousLoop() {
     // ── Mark last-trade timestamp so journal-settle guard works correctly ─────
     lastTradeCompletedAt = symNow;
 
-    // Track consecutive losses — a win resets to 0; cooldown expiry also resets it
-    if (!won) sessionLossCount++;
-    else sessionLossCount = 0;
+    // Track consecutive losses.
+    // A loss always increments. A win resets to 0 ONLY when no recovery family is
+    // still in an active loss streak — a win on EVEN/ODD while OVER/UNDER is still
+    // recovering should not erase the loss-streak count the cooldown gate is watching.
+    if (!won) {
+      sessionLossCount++;
+    } else {
+      // Reset only if no recovery family has an active streak.
+      // If any family is still losing, the per-family gate above is the authoritative stop;
+      // don't let a cross-family win mask the ongoing streak for the global gate too.
+      if (!recoveryEngine.isAnyInRecovery()) {
+        sessionLossCount = 0;
+      }
+    }
 
     // ── Immediate post-loss cooldown gate ─────────────────────────────────────
     // Check the streak limit right after recording a loss so the engine NEVER

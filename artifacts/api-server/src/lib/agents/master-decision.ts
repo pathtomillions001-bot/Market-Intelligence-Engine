@@ -203,10 +203,15 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   // ── Gate 4: Weighted consensus score ─────────────────────────────────────
   // Use the lower of the user setting and 50 so the engine keeps trading even
   // if the user accidentally set a very high threshold.
+  // During a loss streak, raise the minimum threshold proportionally — each consecutive
+  // loss adds 3 points (max +15), demanding stronger multi-agent consensus before trading.
   {
-    const minScore = Math.min(settings.minConfidenceThreshold, 50);
+    const sessionLosses = ctx.daily.consecutiveLosses;
+    const lossStreakBoost = Math.min(sessionLosses * 3, 15);
+    const minScore = Math.min(settings.minConfidenceThreshold, 50) + lossStreakBoost;
     if (weightedScore < minScore) {
-      rejectReasons.push(`Consensus score ${weightedScore.toFixed(0)} below threshold ${minScore}`);
+      const streakNote = sessionLosses >= 2 ? ` (incl. +${lossStreakBoost}pt loss-streak guard)` : "";
+      rejectReasons.push(`Consensus score ${weightedScore.toFixed(0)} below threshold ${minScore}${streakNote}`);
     }
   }
 

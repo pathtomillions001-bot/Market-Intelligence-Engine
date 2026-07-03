@@ -69,14 +69,36 @@ export function runRecoveryIntelligenceAgent(ctx: ScanContext): AgentOutput & { 
   const t0 = Date.now();
   const state = getRecoveryState(ctx);
 
-  // Score is always positive — engine always in normal trading mode
-  const score = state.consecutiveWins >= 3 ? 80 : 70;
+  // Use the authoritative session consecutive-loss count from the daily context.
+  // This counts all losses (across all families) since the last win or cooldown,
+  // giving every downstream agent accurate loss-streak awareness.
+  const sessionLosses = ctx.daily.consecutiveLosses;
+
+  // Score reflects how cautious the AI should be. A loss streak demands that every
+  // other agent produces a much stronger signal before the engine takes the next trade.
+  // Each consecutive loss raises the evidence bar; at ≥4 losses only genuinely
+  // high-conviction setups (all other agents well above their thresholds) can fire.
+  const score =
+    sessionLosses >= 5 ? 18   // Severe streak — essentially veto all marginal setups
+    : sessionLosses >= 4 ? 28  // Strong caution — need near-consensus from all other agents
+    : sessionLosses >= 3 ? 38  // Warning — require positive EV AND strong timing
+    : sessionLosses >= 2 ? 48  // Elevated caution — tighten gates, demand real edge
+    : state.consecutiveWins >= 3 ? 80
+    : 70;
+
+  const cautionLabel =
+    sessionLosses >= 4 ? "SEVERE CAUTION"
+    : sessionLosses >= 3 ? "ELEVATED CAUTION"
+    : sessionLosses >= 2 ? "CAUTION"
+    : "NORMAL";
 
   const reasoning = [
-    `Mode: NORMAL.`,
-    `Consecutive losses: ${state.consecutiveLosses}. Consecutive wins: ${state.consecutiveWins}.`,
+    `Mode: ${cautionLabel}.`,
+    `Session consecutive losses: ${sessionLosses}. Consecutive wins: ${state.consecutiveWins}.`,
     `Session P&L: ${state.sessionPnl.toFixed(2)}. Trades: ${state.totalTrades}.`,
-    `Stake: base (no adjustment).`,
+    sessionLosses >= 2
+      ? `⚠ Raising bar for all agents — require stronger edge to trade (score=${score}).`
+      : `Stake: base (no adjustment).`,
   ].join(" ");
 
   return {

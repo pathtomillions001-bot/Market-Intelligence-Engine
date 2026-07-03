@@ -257,6 +257,16 @@ export function runRiseFallAgent(
   // cap the score at 58 so it never triggers a "buy" recommendation
   if (edgePct < 0.03) score = Math.min(score, 58);
 
+  // During a loss streak, demand stronger directional conviction.
+  // After 2+ consecutive losses the AI must have a real edge — not a coin flip.
+  // Each level of streak tightens the required edge and caps the score lower.
+  const sessionLosses = ctx.daily.consecutiveLosses;
+  if (sessionLosses >= 2) {
+    if (edgePct < 0.05) score = Math.min(score, 52); // < 55% probability → cap below buy threshold
+    if (sessionLosses >= 3 && edgePct < 0.07) score = Math.min(score, 46); // need ≥ 57% after 3 losses
+    if (sessionLosses >= 4 && edgePct < 0.09) score = Math.min(score, 40); // need ≥ 59% after 4 losses
+  }
+
   const dirLabel = result.direction === "up" ? "UP" : "DOWN";
 
   const reasoning = [

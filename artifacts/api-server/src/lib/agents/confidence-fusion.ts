@@ -88,15 +88,25 @@ export function runConfidenceFusionAgent(
   }
 
   // ── 2. EV gate ───────────────────────────────────────────────────────────────
-  const evGated = input.bestEVResult !== null && input.bestEVResult.expectedValue >= -0.05;
+  // During a loss streak the EV threshold tightens: we need real edge, not near-breakeven.
+  // 0 losses → allow EV ≥ -0.05 (existing tolerance)
+  // 2 losses → allow EV ≥ -0.02
+  // 3+ losses → require EV > 0 (positive expected value only)
+  const sessionLosses = ctx.daily.consecutiveLosses;
+  const minEV = sessionLosses >= 3 ? 0.001 : sessionLosses >= 2 ? -0.02 : -0.05; // 3+ losses: strictly positive EV
+  const evGated = input.bestEVResult !== null && input.bestEVResult.expectedValue >= minEV;
   if (!evGated && input.bestEVResult !== null) {
-    blockers.push(`EV gate: ${(input.bestEVResult.expectedValue * 100).toFixed(1)}% — below threshold`);
+    const reason = sessionLosses >= 2
+      ? `EV gate (recovery mode, ${sessionLosses} losses): ${(input.bestEVResult.expectedValue * 100).toFixed(1)}% < ${(minEV * 100).toFixed(0)}% required`
+      : `EV gate: ${(input.bestEVResult.expectedValue * 100).toFixed(1)}% — below threshold`;
+    blockers.push(reason);
   }
 
   // ── 3. Timing gate ───────────────────────────────────────────────────────────
-  const timingGated = input.executionTimingScore >= 38;
+  const minTimingScore = sessionLosses >= 3 ? 50 : sessionLosses >= 2 ? 44 : 38;
+  const timingGated = input.executionTimingScore >= minTimingScore;
   if (!timingGated) {
-    blockers.push(`Timing score ${input.executionTimingScore} < 38 — suboptimal entry`);
+    blockers.push(`Timing score ${input.executionTimingScore} < ${minTimingScore} — suboptimal entry`);
   }
 
   // ── 4. Weighted score aggregation ────────────────────────────────────────────
@@ -125,7 +135,10 @@ export function runConfidenceFusionAgent(
   // (EVEN/ODD, RISE/FALL at neutral markets) can still fire.
   const historyAdjust = (input.learningAgentScore - 50) * 0.1; // ±5 adjustment
   const baseThreshold = Math.min(ctx.settings.minConfidenceThreshold ?? 50, 50);
-  const effectiveThreshold = Math.max(44, Math.min(68, baseThreshold + historyAdjust));
+  // During a loss streak, raise the bar: each consecutive loss adds 3 points (max +15).
+  // This ensures recovery trades need genuine multi-agent consensus, not just one strong signal.
+  const lossStreakBoost = Math.min(sessionLosses * 3, 15);
+  const effectiveThreshold = Math.max(44, Math.min(75, baseThreshold + historyAdjust + lossStreakBoost));
 
   // ── 6. Enhancement signals ────────────────────────────────────────────────────
   if (input.patternDiscoveryScore > 70) enhancers.push("Pattern discovery: recognized profitable pattern");
@@ -162,7 +175,13 @@ export function runConfidenceFusionAgent(
   const overallConfidence = agentWeightedScore;
   const meetsThreshold = overallConfidence >= effectiveThreshold;
 
-  const shouldTrade = !hardBlocked && meetsThreshold && evGated && !!recommendedContractType;
+  // During a loss streak (≥2 consecutive losses) timing becomes a hard gate, not advisory.
+  // In normal conditions timing is advisory so the engine keeps trading; during recovery
+  // we want the most favourable entry, so we block poor-timing setups.
+  const timingRequired = sessionLosses >= 2;
+  const timingPass = !timingRequired || timingGated;
+
+  const shouldTrade = !hardBlocked && meetsThreshold && evGated && timingPass && !!recommendedContractType;
   const recommendedAction: FusionResult["recommendedAction"] = hardBlocked ? "skip"
     : !meetsThreshold ? "wait" : shouldTrade ? "buy" : "wait";
 

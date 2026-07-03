@@ -325,7 +325,20 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
   const edgeScore = bestBarrier
     ? Math.min(95, Math.round(50 + bestBarrier.edge * 300))
     : 50;
-  const score = Math.round(edgeScore * dataSufficiency + 50 * (1 - dataSufficiency));
+  let score = Math.round(edgeScore * dataSufficiency + 50 * (1 - dataSufficiency));
+
+  // During a loss streak, penalise zero or negative edge strongly.
+  // The AI should never repeat a trade with no statistical edge after consecutive losses.
+  const sessionLosses = ctx.daily.consecutiveLosses;
+  if (sessionLosses >= 2 && bestBarrier) {
+    if (bestBarrier.edge <= 0) {
+      // No edge at all — strong penalty: effectively blocks this barrier in recovery
+      score = Math.max(10, score - 20);
+    } else if (sessionLosses >= 3 && bestBarrier.edge < 0.02) {
+      // Weak edge during a deeper streak — require at least 2% edge
+      score = Math.max(10, score - 12);
+    }
+  }
 
   const isUniform = analysis.isUniform;
 
