@@ -22,7 +22,8 @@
 import type { AgentOutput, ProductType, ScanContext } from "./types";
 import { scoreToSignal } from "./types";
 import type { DirectionResult } from "./direction-agent";
-import type { BarrierOption } from "./digit-agent";
+import type { BarrierOption } from "./digit-probability";
+import { DIGIT_TIERS } from "./digit-probability";
 
 // ── Default payout table ──────────────────────────────────────────────────────
 // Updated to more realistic Deriv values for synthetic indices.
@@ -224,12 +225,13 @@ export function runEVCalculatorAgent(
 
   const bestEVResult = strictPositiveEV[0] ?? nearBreakevenAny[0] ?? anySorted[0] ?? null;
 
-  // For tier-1 digit barriers (OVER 2, UNDER 7), positive EV is impossible at
-  // Deriv's fixed payouts. Score by edge instead so these options don't drag
-  // the consensus into the floor.
-  const isDigitTier1Result = bestEVResult &&
-    ((bestEVResult.product === "DIGITOVER"  && bestEVResult.barrier === 2) ||
-     (bestEVResult.product === "DIGITUNDER" && bestEVResult.barrier === 7));
+  // For low-tier digit barriers (safest — lowest payout), positive EV is
+  // impossible at Deriv's fixed payouts. Score by edge instead so these
+  // options don't drag the consensus into the floor. Tier is looked up
+  // dynamically from DIGIT_TIERS so this works for ANY user-configured
+  // normal/recovery barrier, not just a hardcoded pair.
+  const isDigitTier1Result = !!bestEVResult && bestEVResult.barrier !== undefined &&
+    (DIGIT_TIERS[bestEVResult.product]?.[bestEVResult.barrier] ?? 2) <= 1;
 
   const score = bestEVResult
     ? isDigitTier1Result

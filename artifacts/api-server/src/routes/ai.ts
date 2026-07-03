@@ -27,7 +27,7 @@ export async function loadRecoveryStateFromDb(): Promise<void> {
       const summary = recoveryEngine.getLossStreakSummary();
       if (summary.active) {
         logger.info(
-          { totalUnrecovered: summary.totalUnrecovered, families: summary.families },
+          { totalUnrecovered: summary.totalUnrecovered, streakLosses: summary.totalStreakLosses },
           "Recovery state restored from DB — engine will resume in recovery mode",
         );
       }
@@ -102,86 +102,73 @@ function normaliseDbTrade(t: any): NormalisedTrade | null {
 }
 
 /**
- * Core sync logic — takes a list of already-normalised trades (sorted newest-first)
- * and updates the recovery engine state to match the journal ground truth.
+ * Core sync logic — takes a list of already-normalised trades (sorted newest-first,
+ * ACROSS ALL contract types — recovery is a single global state) and updates the
+ * recovery engine state to match the journal ground truth.
  *
- * Rules per contract family:
  *  – Consecutive losses at the TOP of the list (most recent first) = active loss streak.
  *  – If journal shows a streak AND engine is "Normal" → seed engine from journal.
  *  – If journal shows NO streak AND engine was "in recovery" but most-recent is a win
- *    → clear to normal (fully recovered via a trade outside the engine loop).
+ *    → clear to normal ONLY if the win fully covered the debt (per-item partial recovery).
  *  – If engine is already "in recovery" with remaining unrecovered amount, trust it
  *    (engine has more precise partial-recovery tracking than a raw journal snapshot).
  */
 function applyJournalSync(sorted: NormalisedTrade[]): void {
-  const families: recoveryEngine.ContractFamily[] = ["overunder", "risefall", "evenodd"];
+  if (sorted.length === 0) return;
+  const currentState = recoveryEngine.getState();
 
-  for (const family of families) {
-    const currentState = recoveryEngine.getState(family);
-
-    // Trades for this family, already sorted newest → oldest
-    const familyTrades = sorted.filter(t => recoveryEngine.contractTypeToFamily(t.contractType) === family);
-    if (familyTrades.length === 0) continue;
-
-    // Count consecutive losses starting from the most recent trade
-    let streakLosses = 0;
-    let totalAmountLost = 0;
-    for (const t of familyTrades) {
-      if (!t.won) {
-        streakLosses++;
-        totalAmountLost += t.amountLost;
-      } else {
-        break;
-      }
+  // Count consecutive losses starting from the most recent trade (any contract type)
+  let streakLosses = 0;
+  let totalAmountLost = 0;
+  for (const t of sorted) {
+    if (!t.won) {
+      streakLosses++;
+      totalAmountLost += t.amountLost;
+    } else {
+      break;
     }
-
-    if (streakLosses === 0) {
-      // No active loss streak in journal (most recent family trade was a win)
-      if (currentState.inRecovery && familyTrades[0]?.won) {
-        if (currentState.unrecoveredAmount <= 0.01) {
-          // Fully recovered — reset to normal mode.
-          recoveryEngine.seedFamilyState(family, {
-            inRecovery: false,
-            recoveryStep: 0,
-            unrecoveredAmount: 0,
-            baseStake: currentState.baseStake,
-            streakLossCount: 0,
-            streakStartAmount: 0,
-          });
-        } else {
-          // Partial recovery: a win occurred but not enough to cover all losses.
-          // The engine uses exact Deriv profit in recordOutcome, which already reduced
-          // unrecoveredAmount correctly. Trust that figure — do NOT clear it here.
-          // BUT always clear streakLossCount when a win appears in the journal, since the
-          // consecutive streak is broken by any win. Leaving a stale high streakLossCount
-          // would cause the per-family cooldown gate to fire erroneously on resume.
-          if (currentState.streakLossCount > 0) {
-            recoveryEngine.seedFamilyState(family, {
-              ...currentState,
-              streakLossCount: 0,   // streak broken by win; debt still outstanding
-            });
-          }
-        }
-      }
-    } else if (!currentState.inRecovery) {
-      // Journal shows a streak but engine thinks it's Normal → seed it
-      const oldestLossInStreak = familyTrades[streakLosses - 1];
-      const baseStake = oldestLossInStreak?.stake || (totalAmountLost / streakLosses);
-      recoveryEngine.seedFamilyState(family, {
-        inRecovery: true,
-        recoveryStep: Math.max(1, streakLosses),
-        unrecoveredAmount: totalAmountLost,
-        baseStake,
-        streakLossCount: streakLosses,
-        streakStartAmount: totalAmountLost,
-      });
-      logger.info(
-        { family, streakLosses, totalAmountLost: totalAmountLost.toFixed(2), baseStake: baseStake.toFixed(2) },
-        "Recovery engine seeded from journal — engine was Normal but journal shows loss streak",
-      );
-    }
-    // Engine already in recovery → trust engine (more precise partial-recovery tracking)
   }
+
+  if (streakLosses === 0) {
+    // No active loss streak in journal (most recent trade was a win)
+    if (currentState.inRecovery && sorted[0]?.won) {
+      if (currentState.unrecoveredAmount <= 0.01) {
+        // Fully recovered — reset to normal mode.
+        recoveryEngine.seedState({
+          inRecovery: false,
+          recoveryStep: 0,
+          unrecoveredAmount: 0,
+          baseStake: currentState.baseStake,
+          streakLossCount: 0,
+          streakStartAmount: 0,
+        });
+      } else if (currentState.streakLossCount > 0) {
+        // Partial recovery: a win occurred but not enough to cover all losses.
+        // recordOutcome already reduced unrecoveredAmount correctly — trust that
+        // figure and do NOT clear it here. Only clear streakLossCount, since the
+        // consecutive streak (the dashboard/cooldown counter) is broken by any win
+        // even though the recovery debt itself persists.
+        recoveryEngine.seedState({ ...currentState, streakLossCount: 0 });
+      }
+    }
+  } else if (!currentState.inRecovery) {
+    // Journal shows a streak but engine thinks it's Normal → seed it
+    const oldestLossInStreak = sorted[streakLosses - 1];
+    const baseStake = oldestLossInStreak?.stake || (totalAmountLost / streakLosses);
+    recoveryEngine.seedState({
+      inRecovery: true,
+      recoveryStep: Math.max(1, streakLosses),
+      unrecoveredAmount: totalAmountLost,
+      baseStake,
+      streakLossCount: streakLosses,
+      streakStartAmount: totalAmountLost,
+    });
+    logger.info(
+      { streakLosses, totalAmountLost: totalAmountLost.toFixed(2), baseStake: baseStake.toFixed(2) },
+      "Recovery engine seeded from journal — engine was Normal but journal shows loss streak",
+    );
+  }
+  // Engine already in recovery → trust engine (more precise partial-recovery tracking)
 }
 
 /**
@@ -231,7 +218,6 @@ let sessionLossCount = 0;
 // Tracks when the last cooldown ended (auto or manual). Consecutive-loss counting only
 // considers journal entries AFTER this timestamp so the engine never re-triggers cooldown
 // from the same streak that already served a cooldown.
-let cooldownEndedAt: Date | null = null;
 
 let exploitSymbol: string | null = null;
 let exploitCount = 0;
@@ -316,6 +302,10 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     maxDrawdown:            s ? Number(s.maxDrawdown ?? 20) : 20,
     requirePositiveEv:      s?.requirePositiveEv ?? true,
     paperTradeMode:         s?.paperTradeMode ?? false,
+    normalOverDigit:        s?.normalOverDigit ?? 2,
+    normalUnderDigit:       s?.normalUnderDigit ?? 7,
+    recoveryOverDigit:      s?.recoveryOverDigit ?? 4,
+    recoveryUnderDigit:     s?.recoveryUnderDigit ?? 5,
   };
 }
 
@@ -441,11 +431,11 @@ function stopEngine(reason: string, cooldownMinutes?: number) {
     cooldownResumeTimer = setTimeout(() => {
       cooldownUntil = null;
       cooldownResumeTimer = null;
-      // Mark when this cooldown ended so the next consecutive-loss evaluation only
-      // counts trades placed AFTER the cooldown — prevents immediate re-trigger from
-      // the same streak that already triggered this cooldown.
-      cooldownEndedAt = new Date();
-      // Reset session loss counter on cooldown expiry — the ONLY reset point
+      // Reset the global loss-streak counter on cooldown expiry — the ONLY reset
+      // point outside of a fully-covering win. This clears the counter that
+      // gates cooldown (recoveryEngine streakLossCount), NOT the recovery debt
+      // itself (unrecoveredAmount persists until a win fully covers it).
+      recoveryEngine.seedState({ ...recoveryEngine.getState(), streakLossCount: 0 });
       sessionLossCount = 0;
       // Auto-resume engine
       engineRunning = true;
@@ -496,6 +486,14 @@ async function runAutonomousLoop() {
     const marketRotationAfter = settings?.marketRotationAfter ?? 5;
     const paperTradeMode = tradingSettings.paperTradeMode;
 
+    // ── Over/Under digit barriers — settings-driven, no hardcoded fallback ────
+    // Recovery is a single global state now: whenever it's active, EVERY Over/Under
+    // scan uses the user-configured recovery pair; otherwise the normal pair.
+    // Computed once per loop iteration since recovery state doesn't change mid-scan.
+    const activeBarrierOverride: { DIGITOVER: number; DIGITUNDER: number } = recoveryEngine.isInRecovery()
+      ? { DIGITOVER: tradingSettings.recoveryOverDigit, DIGITUNDER: tradingSettings.recoveryUnderDigit }
+      : { DIGITOVER: tradingSettings.normalOverDigit, DIGITUNDER: tradingSettings.normalUnderDigit };
+
     const allowedMarketSymbols: string[] | null =
       (settings as any)?.allowedMarkets
         ? ((settings as any).allowedMarkets as string).split(",").filter(Boolean)
@@ -537,30 +535,7 @@ async function runAutonomousLoop() {
       (t: any) => Number(t.sell_time ?? t.purchase_time ?? 0) >= todayMidnightSec,
     );
 
-    let journalConsecutiveLosses: number;
     let resolvedDailyProfit: number;
-
-    // ── Consecutive loss counting — always use local DB (source of truth) ────
-    // The local DB is written the moment each live trade settles (before scheduleNext
-    // fires), so it is always current. The Deriv profit_table can lag 15–60 s behind
-    // real settlements (even after forceRefresh) which caused the consecutive-loss
-    // check to miss recent losses and prevented cooldown from triggering on time.
-    // Trades timed-out by the engine are marked "error" (not "lost"), so false
-    // positives from stale records are not a concern here.
-    {
-      const cooldownEndedMs = cooldownEndedAt ? cooldownEndedAt.getTime() : 0;
-      const sortedByTime = [...closedToday].sort(
-        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-      );
-      journalConsecutiveLosses = 0;
-      for (const t of sortedByTime) {
-        // Stop at any trade that predates the last cooldown end (already accounted for).
-        // Use strict less-than (<) so trades at exactly the cooldown boundary are included.
-        if (cooldownEndedMs > 0 && new Date(t.createdAt).getTime() < cooldownEndedMs) break;
-        if (t.status === "lost") journalConsecutiveLosses++;
-        else break;
-      }
-    }
 
     // ── Daily P&L — prefer Deriv journal (authoritative net P&L), fall back to DB ──
     // The Deriv profit_table has the correct net profit including payout multipliers.
@@ -574,10 +549,15 @@ async function runAutonomousLoop() {
       resolvedDailyProfit = closedToday.reduce((s, t) => s + Number(t.profit ?? 0), 0);
     }
 
-    // Mirror in-memory counter so the status endpoint always matches ground truth
-    sessionLossCount = journalConsecutiveLosses;
+    // ── Consecutive-loss streak — SINGLE authoritative source ────────────────
+    // The global Recovery Intelligence loss-streak counter (recoveryEngine.getState()
+    // .streakLossCount) is the exact same number shown on the dashboard's Recovery
+    // card. It is the ONLY signal that ever triggers a cooldown — no other path
+    // (daily-journal recount, per-family counters, etc.) is allowed to do so.
+    const globalStreakCount = recoveryEngine.getState().streakLossCount;
+    sessionLossCount = globalStreakCount;
 
-    const daily = buildDailyStats(closedToday, journalConsecutiveLosses);
+    const daily = buildDailyStats(closedToday, globalStreakCount);
     // Override daily.profit with the resolved value (Deriv journal when available)
     daily.profit = resolvedDailyProfit;
     const todayProfit = resolvedDailyProfit;
@@ -585,31 +565,15 @@ async function runAutonomousLoop() {
     // Hard stops — only triggered by Deriv-verified P&L and loss streak.
     if (todayProfit <= -tradingSettings.dailyLossLimit) { stopEngine(`Daily loss limit ${tradingSettings.dailyLossLimit} reached`); return; }
     if (todayProfit >= tradingSettings.dailyTarget) { stopEngine(`Daily target ${tradingSettings.dailyTarget} reached!`); return; }
-    if (daily.consecutiveLosses >= tradingSettings.consecutiveLossLimit) {
+    // Start-of-loop safety net: if the streak already sits at/above the limit
+    // (e.g. engine resumed mid-streak), stop immediately instead of trading first.
+    if (globalStreakCount >= tradingSettings.consecutiveLossLimit) {
       const cooldownMins = settings?.cooldownMinutes ?? 30;
-      stopEngine(`Journal shows ${daily.consecutiveLosses} consecutive losses — limit ${tradingSettings.consecutiveLossLimit} reached, cooling down ${cooldownMins}m`, cooldownMins);
+      stopEngine(
+        `${globalStreakCount} consecutive losses — limit ${tradingSettings.consecutiveLossLimit} reached, cooling down ${cooldownMins}m`,
+        cooldownMins,
+      );
       return;
-    }
-
-    // ── Per-family consecutive-loss check ────────────────────────────────────
-    // The global check above counts consecutive losses broken by wins from ANY family.
-    // During recovery, the engine rotates families — a win on EVEN/ODD between two
-    // OVER/UNDER recovery losses resets the global count to 0, masking the real streak.
-    // recoveryEngine.getState(f).streakLossCount tracks each family's streak independently
-    // (only resets when that family itself wins and fully recovers). This ensures the
-    // user-set loss-streak limit is respected even when different families interleave.
-    {
-      const cooldownMins = settings?.cooldownMinutes ?? 30;
-      for (const f of recoveryEngine.CONTRACT_FAMILIES) {
-        const familyStreak = recoveryEngine.getState(f).streakLossCount;
-        if (familyStreak >= tradingSettings.consecutiveLossLimit) {
-          stopEngine(
-            `${f} family: ${familyStreak} consecutive losses — limit ${tradingSettings.consecutiveLossLimit} reached, cooling down ${cooldownMins}m`,
-            cooldownMins,
-          );
-          return;
-        }
-      }
     }
 
     // ── Market selection: parallel tournament scanning ───────────────────────
@@ -706,52 +670,9 @@ async function runAutonomousLoop() {
 
               const familyResults = (await Promise.allSettled(
                 families.map(async (fam) => {
-                  // ── Recovery Intelligence gate (Over/Under family only) ──────────────
-                  // Evaluate all 8 candidates BEFORE running the coordinator. If no
-                  // candidate meets the confidence threshold, return null immediately —
-                  // the engine waits rather than falling back to normal barriers.
-                  let recoveryBarrierOverride: { DIGITOVER: number; DIGITUNDER: number } | undefined;
-                  if (fam.name === "overunder" && recoveryEngine.isInRecovery("overunder")) {
-                    const rcCtx: recoveryEngine.RecoveryContext = {
-                      symbol:                 m.symbol,
-                      digits:                 baseCtx.digits,
-                      prices:                 baseCtx.prices,
-                      balance,
-                      maxRiskPerTrade:        tradingSettings.maxRiskPerTrade,
-                      maxTradeStake:          tradingSettings.maxTradeStake,
-                      minConfidenceThreshold: tradingSettings.minConfidenceThreshold ?? 38,
-                      riskProfile:            tradingSettings.riskProfile,
-                      volatility:             (baseCtx as any).volatility,
-                      momentum:               (baseCtx as any).momentum,
-                      noiseScore:             (baseCtx as any).noiseScore,
-                      regime:                 (baseCtx as any).regime,
-                    };
-                    const evaluation = recoveryEngine.evaluateRecoveryCandidates(rcCtx, "overunder", m.symbol);
-                    if (!evaluation.shouldTrade) {
-                      // Hard gate: no viable candidate → skip this market/family entirely
-                      logger.info({
-                        symbol:   m.symbol,
-                        reason:   evaluation.rejectReason,
-                        topScore: evaluation.topCandidate?.recoveryScore ?? 0,
-                        threshold: tradingSettings.minConfidenceThreshold ?? 38,
-                      }, "Recovery Intelligence: no candidate meets threshold — family skipped");
-                      return null;   // ← hard skip; coordinator never runs
-                    }
-                    logger.info({
-                      symbol:      m.symbol,
-                      chosen:      evaluation.topCandidate?.label,
-                      score:       evaluation.topCandidate?.recoveryScore,
-                      stake:       evaluation.chosenStake,
-                      override:    evaluation.chosenBarrierOverride,
-                      unrecovered: evaluation.unrecoveredAmount,
-                      candidates:  evaluation.candidates.slice(0, 4).map(c => ({
-                        label: c.label, score: c.recoveryScore,
-                        winP: Math.round(c.blendedWinP * 100), ev: c.expectedValue.toFixed(3),
-                      })),
-                    }, "Recovery Intelligence: AI-selected recovery barrier");
-                    recoveryBarrierOverride = evaluation.chosenBarrierOverride;
-                  }
-
+                  // Over/Under always trades the EXACT settings-configured digit pair
+                  // (normal or recovery, chosen once per loop iteration above) — no
+                  // AI-driven candidate scanning, no hardcoded barriers.
                   const famCtx: ScanContext = {
                     ...baseCtx,
                     settings: {
@@ -766,7 +687,7 @@ async function runAutonomousLoop() {
                         ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 48)
                         : baseCtx.settings.minConfidenceThreshold,
                     },
-                    recoveryBarrierOverride,
+                    recoveryBarrierOverride: fam.name === "overunder" ? activeBarrierOverride : undefined,
                   };
                   const output = await withTimeout(runCoordinator(famCtx), SCAN_TIMEOUT_MS, null as any);
                   if (!output) return null;
@@ -845,34 +766,23 @@ async function runAutonomousLoop() {
     const multipleFamily = enabledFamiliesThisScan.size > 1;
 
     // ── Recovery priority ─────────────────────────────────────────────────────
-    // If one or more contract families are currently in Recovery Mode, executing
-    // the recovery trade takes priority over normal rotation — and when multiple
-    // families are simultaneously in recovery, the one with the highest confidence
-    // score is executed first.
-    const recoveryFamilyKeys = new Set(
-      (["overunder", "risefall", "evenodd"] as const).filter((f) => recoveryEngine.isInRecovery(f))
-    );
-    const familyNameToRecoveryKey = (family: string): recoveryEngine.ContractFamily | null =>
-      family === "overunder" ? "overunder" : family === "direction" ? "risefall" : family === "evenodd" ? "evenodd" : null;
-    const recoveryWinners = tradeableWinners.filter((w) => {
-      const key = familyNameToRecoveryKey(w.family);
-      return key !== null && recoveryFamilyKeys.has(key);
-    });
+    // Recovery is a SINGLE global state now, independent of contract type — when
+    // active, ANY tradeable contract type is eligible to execute the recovery
+    // trade (stake sizing via getDynamicRecoveryStake handles the rest), and the
+    // highest-confidence opportunity is chosen rather than the highest-quality one.
+    const inRecoveryNow = recoveryEngine.isInRecovery();
 
-    // When multiple families are active, narrow the pool to the scheduled family
-    // so each family gets executed roughly in turn — UNLESS a recovery trade is
-    // available, in which case recovery always takes priority.
+    // When multiple families are active and NOT in recovery, narrow the pool to
+    // the scheduled family so each family gets executed roughly in turn.
     let tournamentPool = tradeableWinners;
-    if (recoveryWinners.length > 0) {
-      tournamentPool = recoveryWinners;
-    } else if (multipleFamily && scheduledFamilyHint && enabledFamiliesThisScan.has(scheduledFamilyHint)) {
+    if (!inRecoveryNow && multipleFamily && scheduledFamilyHint && enabledFamiliesThisScan.has(scheduledFamilyHint)) {
       const hinted = tradeableWinners.filter(w => w.family === scheduledFamilyHint);
       if (hinted.length > 0) tournamentPool = hinted;
     }
 
     const bestResult: (ScanResult & { groupName: string }) | null = tournamentPool.length > 0
-      ? (recoveryWinners.length > 0
-          // Among active recovery families, execute the highest-confidence one.
+      ? (inRecoveryNow
+          // In recovery: execute the highest-confidence opportunity across ALL families.
           ? tournamentPool.sort((a, b) => b.output.confidenceScore - a.output.confidenceScore)[0]
           : tournamentPool.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0])
       : null;
@@ -999,32 +909,20 @@ async function runAutonomousLoop() {
       : rawDuration;
 
     // ── Recovery Mode stake override ─────────────────────────────────────────
-    // For Over/Under family: use the AI-evaluated dynamic stake from the
-    // Recovery Intelligence Engine (minimum stake needed to recover the
-    // accumulated loss, adjusted for payout and win probability).
-    // For other families: legacy multiplier formula as before.
-    const recoveryFamily = recoveryEngine.contractTypeToFamily(effectiveContractType);
+    // Single global recovery state — ANY tracked contract type uses the exact
+    // same dynamic-stake formula (minimum stake needed to recover the accumulated
+    // loss, adjusted for this trade's own payout and win probability).
+    const isTracked = recoveryEngine.isTrackedContract(effectiveContractType);
     let stake = rec.stake;
-    if (recoveryFamily) {
-      if (recoveryFamily === "overunder" && recoveryEngine.isInRecovery("overunder")) {
-        // Use dynamic stake from the recovery evaluation (already computed above)
-        stake = recoveryEngine.getDynamicRecoveryStake(
-          recoveryFamily,
-          rec.stake,
-          tradingSettings.maxTradeStake,
-          balance,
-          bestMarket.symbol,   // symbol-scoped so we get the right cached evaluation
-        );
-      } else {
-        // Rise/Fall and Even/Odd: legacy multiplier formula
-        const recoveryMultiplierSetting = settings ? Number((settings as any).recoveryMultiplier) : 1.2;
-        stake = recoveryEngine.getNextStake(
-          recoveryFamily,
-          rec.stake,
-          recoveryMultiplierSetting,
-          tradingSettings.maxTradeStake,
-        );
-      }
+    if (isTracked && recoveryEngine.isInRecovery()) {
+      stake = recoveryEngine.getDynamicRecoveryStake(
+        rec.stake,
+        tradingSettings.maxTradeStake,
+        balance,
+        rec.payoutMultiplier,
+        rec.winProbability / 100,
+        tradingSettings.riskProfile,
+      );
     }
 
     // Estimated payout for paper trades (live payout comes from Deriv result)
@@ -1046,8 +944,8 @@ async function runAutonomousLoop() {
 
       // Paper trades: insert completed record immediately
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
-      if (recoveryFamily) {
-        recoveryEngine.recordOutcome(recoveryFamily, won, profit, stake, settings?.maxRecoverySteps ?? 3);
+      if (isTracked) {
+        recoveryEngine.recordOutcome(won, profit, stake, settings?.maxRecoverySteps ?? 3);
         persistRecoveryState().catch(() => {});
       }
 
@@ -1171,8 +1069,8 @@ async function runAutonomousLoop() {
 
       // Update the open record to Deriv-confirmed final status
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
-      if (recoveryFamily) {
-        recoveryEngine.recordOutcome(recoveryFamily, won, profit, stake, settings?.maxRecoverySteps ?? 3);
+      if (isTracked) {
+        recoveryEngine.recordOutcome(won, profit, stake, settings?.maxRecoverySteps ?? 3);
         persistRecoveryState().catch(() => {});
       }
 
@@ -1210,26 +1108,18 @@ async function runAutonomousLoop() {
     // ── Mark last-trade timestamp so journal-settle guard works correctly ─────
     lastTradeCompletedAt = symNow;
 
-    // Track consecutive losses.
-    // A loss always increments. A win resets to 0 ONLY when no recovery family is
-    // still in an active loss streak — a win on EVEN/ODD while OVER/UNDER is still
-    // recovering should not erase the loss-streak count the cooldown gate is watching.
-    if (!won) {
-      sessionLossCount++;
-    } else {
-      // Reset only if no recovery family has an active streak.
-      // If any family is still losing, the per-family gate above is the authoritative stop;
-      // don't let a cross-family win mask the ongoing streak for the global gate too.
-      if (!recoveryEngine.isAnyInRecovery()) {
-        sessionLossCount = 0;
-      }
-    }
+    // ── Consecutive-loss streak — mirrors the single global source of truth ──
+    // recoveryEngine.recordOutcome() (called above) already updated
+    // getState().streakLossCount: +1 on loss, reset to 0 on ANY win (even a
+    // partial one — only the recovery debt itself persists on partial wins).
+    // sessionLossCount is kept only as a display mirror of that same number.
+    sessionLossCount = recoveryEngine.getState().streakLossCount;
 
-    // ── Immediate post-loss cooldown gate ─────────────────────────────────────
-    // Check the streak limit right after recording a loss so the engine NEVER
-    // opens the next trade without first knowing if it should enter cooldown.
-    // This is the authoritative gate — the start-of-loop check is a secondary
-    // safety net. Together they guarantee the limit is respected immediately.
+    // ── Immediate post-loss cooldown gate — THE single trigger path ─────────
+    // Checks the exact same counter shown on the dashboard's Recovery card
+    // right after every trade settles, so the engine never opens the next
+    // trade without first knowing if it should enter cooldown. The start-of-
+    // loop check is a secondary safety net using the identical counter.
     if (!won && engineRunning) {
       const freshSettingsForCooldown = await db.select().from(settingsTable).limit(1);
       const hardLimit = freshSettingsForCooldown[0]?.consecutiveLossLimit ?? 3;
@@ -1523,71 +1413,25 @@ router.get("/insights", async (_req, res): Promise<void> => {
   res.json(insights);
 });
 
-// ── Recovery dashboard payload — derived directly from Deriv journal ─────────
+// ── Recovery dashboard payload — single global recovery state ───────────────
 //
-// Uses the IDENTICAL win/loss formula as the Streak card (sell_price > buy_price),
-// so the streak count is always in perfect sync between both cards.
-// No in-memory state machine is involved for display purposes.
-//
-// auto-reset: when consecutive losses from newest = 0 (a win broke the streak),
-// the card returns to "Normal" automatically.
-function buildRecoveryPayloadFromJournal(
-  journalEntries: any[],  // raw Deriv profit_table entries — newest first (sort: DESC)
-  multiplierSetting: number,
-) {
-  // Map entries — exact same formula as /trades/stats and /trades/daily-summary
-  const mapped = journalEntries.map((e: any) => {
-    const buyPrice  = Number(e.buy_price ?? 0);
-    const sellPrice = Number(e.sell_price ?? 0);
-    const won = sellPrice > buyPrice;
-    let ct: string = (e.contract_type ?? "").toUpperCase();
-    if (ct === "RISE") ct = "CALL";
-    if (ct === "FALL") ct = "PUT";
-    let family: string | null = null;
-    if (ct === "DIGITOVER" || ct === "DIGITUNDER") family = "overunder";
-    else if (ct === "CALL" || ct === "PUT") family = "risefall";
-    else if (ct === "DIGITEVEN" || ct === "DIGITODD") family = "evenodd";
-    return { won, family, amountLost: won ? 0 : Math.max(0, buyPrice - sellPrice) };
-  });
-
-  // Count consecutive losses from newest (index 0) — stops at first win
-  let streakLosses = 0;
-  let totalAmountLost = 0;
-  const familiesInStreak = new Set<string>();
-
-  for (const t of mapped) {
-    if (!t.won) {
-      streakLosses++;
-      totalAmountLost += t.amountLost;
-      if (t.family) familiesInStreak.add(t.family);
-    } else {
-      break;
-    }
-  }
-
-  const active = streakLosses > 0;
-  const multiplier = active
-    ? Math.round(Math.pow(multiplierSetting, streakLosses) * 100) / 100
-    : 1;
-  const activeFamiliesArr = Array.from(familiesInStreak);
-
-  const allFamilies = ["overunder", "risefall", "evenodd"] as const;
-  const families = allFamilies.map((fam) => ({
-    family: fam,
-    inRecovery: familiesInStreak.has(fam),
-    recoveryStep: familiesInStreak.has(fam) ? streakLosses : 0,
-    nextStakeMultiplier: familiesInStreak.has(fam) ? multiplier : 1,
-    recoveryBarrier: fam === "overunder" ? { DIGITOVER: 2, DIGITUNDER: 7 } : null,
-  }));
-
+// Recovery is ONE state now, regardless of contract type. The loss-streak
+// count is the exact same counter that gates cooldown (see runAutonomousLoop).
+// The card only returns to "Normal" once a win FULLY covers unrecoveredAmount
+// — a partial win clears the streak count but leaves the debt (and `active`)
+// in place, per spec.
+function buildRecoveryPayload() {
+  const state = recoveryEngine.getState();
   return {
-    active,
-    families,
-    activeFamilies: activeFamiliesArr,
-    totalUnrecovered: Math.round(totalAmountLost * 100) / 100,
-    totalStreakLosses: streakLosses,
-    totalStreakAmount: Math.round(totalAmountLost * 100) / 100,
-    highestStep: active ? streakLosses : 0,
+    active: state.inRecovery,
+    inRecovery: state.inRecovery,
+    recoveryStep: state.recoveryStep,
+    baseStake: Math.round(state.baseStake * 100) / 100,
+    unrecoveredAmount: Math.round(state.unrecoveredAmount * 100) / 100,
+    totalUnrecovered: Math.round(state.unrecoveredAmount * 100) / 100,
+    totalStreakLosses: state.streakLossCount,
+    totalStreakAmount: Math.round(state.streakStartAmount * 100) / 100,
+    highestStep: state.inRecovery ? state.recoveryStep : 0,
   };
 }
 
@@ -1626,7 +1470,7 @@ router.get("/engine/status", async (_req, res): Promise<void> => {
     sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: DERIV_MARKETS.length,
-    recovery: buildRecoveryPayloadFromJournal(derivJournalForStatus, recoveryMultiplier),
+    recovery: buildRecoveryPayload(),
   });
 });
 
@@ -1639,15 +1483,13 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
   if (settings.length > 0 && settings[0].loopIntervalSec) loopIntervalSec = settings[0].loopIntervalSec;
 
   if (running) {
-    // Clear any active cooldown when manually starting
+    // Clear any active cooldown timer when manually starting. Note: the global
+    // loss-streak counter (recoveryEngine.getState().streakLossCount) is NOT reset
+    // here — it is the single source of truth for the cooldown gate and must keep
+    // reflecting reality (e.g. restarting mid-streak should not silently clear it).
     if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
     cooldownUntil = null;
-    // Reset the cooldown baseline so consecutive-loss counting starts fresh from NOW.
-    // This prevents the engine from immediately re-triggering cooldown from journal
-    // entries that predate this manual start (per spec: only the current streak counts).
-    cooldownEndedAt = new Date();
-    // Reset session loss counter so the new session starts from 0 consecutive losses.
-    sessionLossCount = 0;
+    sessionLossCount = recoveryEngine.getState().streakLossCount;
     engineRunning = true; autonomousMode = "autonomous"; stopReasons = []; nextScanIn = loopIntervalSec;
     exploitSymbol = null; exploitCount = 0;
     // NOTE: Do NOT call recoveryEngine.resetAll() here — any unrecovered loss amount
@@ -1689,7 +1531,7 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: DERIV_MARKETS.length,
-    recovery: buildRecoveryPayloadFromJournal(journalManager.getCached(), settings.length > 0 ? Number((settings[0] as any).recoveryMultiplier) : 1.2),
+    recovery: buildRecoveryPayload(),
   });
 });
 
@@ -1743,22 +1585,21 @@ router.get("/intelligence/thresholds", async (_req, res): Promise<void> => {
 
 /**
  * GET /api/ai/recovery/evaluation
- * Returns the last AI-evaluated recovery candidate table for the over/under family.
- * Shows all 8 candidates ranked by Recovery Confidence Score.
+ * Returns the single global recovery state — no per-family candidate scanning.
+ * Digit pairs used while trading are the user-configured settings
+ * (normalOverDigit/normalUnderDigit/recoveryOverDigit/recoveryUnderDigit), not
+ * a scanned/ranked candidate table.
  */
 router.get("/recovery/evaluation", async (_req, res): Promise<void> => {
   try {
-    const state       = recoveryEngine.getState("overunder");
-    const lastEval    = recoveryEngine.getLastEvaluation("overunder");
-    const streakSummary = recoveryEngine.getLossStreakSummary();
+    const state = recoveryEngine.getState();
 
     if (!state.inRecovery) {
       res.json({
-        inRecovery:       false,
+        inRecovery:        false,
         unrecoveredAmount: 0,
-        streakLosses:     0,
-        evaluation:       null,
-        message:          "Not in recovery mode",
+        streakLosses:      0,
+        message:           "Not in recovery mode",
       });
       return;
     }
@@ -1770,54 +1611,9 @@ router.get("/recovery/evaluation", async (_req, res): Promise<void> => {
       streakLosses:      state.streakLossCount,
       streakAmount:      state.streakStartAmount,
       recoveryStep:      state.recoveryStep,
-      chosenBarrier:     state.chosenOverBarrier != null
-        ? { DIGITOVER: state.chosenOverBarrier, DIGITUNDER: state.chosenUnderBarrier }
-        : null,
-      evaluation: lastEval ?? null,
-      streakSummary,
     });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch recovery evaluation" });
-  }
-});
-
-/**
- * GET /api/ai/recovery/candidates
- * Runs a fresh evaluation for the given symbol and returns the ranked candidate table.
- * Accepts ?symbol=R_10 query param.
- */
-router.get("/recovery/candidates", async (req, res): Promise<void> => {
-  try {
-    const symbol = String(req.query["symbol"] ?? "R_10");
-    const market = DERIV_MARKETS.find(m => m.symbol === symbol);
-    if (!market) {
-      res.status(400).json({ error: `Unknown symbol: ${symbol}` });
-      return;
-    }
-
-    const accounts = await db.select().from(accountsTable).limit(1);
-    const settings = await db.select().from(settingsTable).limit(1);
-    const balance  = accounts.length > 0 ? Number(accounts[0].balance) : 10000;
-    const s        = settings.length > 0 ? settings[0] : null;
-
-    const digits = market.digitEnabled ? tickManager.getDigits(symbol, 300) : [];
-    const prices = tickManager.getTicks(symbol, 100);
-
-    const rcCtx: recoveryEngine.RecoveryContext = {
-      symbol,
-      digits,
-      prices,
-      balance,
-      maxRiskPerTrade:        s ? Number(s.maxRiskPerTrade) : 2,
-      maxTradeStake:          s ? Number(s.maxTradeStake) : 500,
-      minConfidenceThreshold: s ? Number(s.minConfidenceThreshold) : 38,
-      riskProfile:            (s?.riskProfile ?? "moderate") as "conservative" | "moderate" | "aggressive",
-    };
-
-    const evaluation = recoveryEngine.evaluateRecoveryCandidates(rcCtx, "overunder");
-    res.json(evaluation);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to evaluate recovery candidates" });
   }
 });
 

@@ -827,7 +827,11 @@ export const GetSettingsResponse = zod.object({
   "maxTradeStake": zod.number(),
   "paperTradeMode": zod.boolean().optional().describe('Log trades without sending live orders to Deriv'),
   "requirePositiveEv": zod.boolean().optional().describe('Only execute when expected value is positive'),
-  "cooldownMinutes": zod.number().optional().describe('Minutes to wait before auto-resuming after consecutive loss stop')
+  "cooldownMinutes": zod.number().optional().describe('Minutes to wait before auto-resuming after consecutive loss stop'),
+  "normalOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades in normal (non-recovery) mode'),
+  "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
+  "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),
+  "recoveryUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades while in recovery mode')
 })
 
 
@@ -855,7 +859,11 @@ export const UpdateSettingsBody = zod.object({
   "maxTradeStake": zod.number().optional(),
   "paperTradeMode": zod.boolean().optional(),
   "requirePositiveEv": zod.boolean().optional(),
-  "cooldownMinutes": zod.number().optional()
+  "cooldownMinutes": zod.number().optional(),
+  "normalOverDigit": zod.number().optional(),
+  "normalUnderDigit": zod.number().optional(),
+  "recoveryOverDigit": zod.number().optional(),
+  "recoveryUnderDigit": zod.number().optional()
 })
 
 export const UpdateSettingsResponse = zod.object({
@@ -880,7 +888,11 @@ export const UpdateSettingsResponse = zod.object({
   "maxTradeStake": zod.number(),
   "paperTradeMode": zod.boolean().optional().describe('Log trades without sending live orders to Deriv'),
   "requirePositiveEv": zod.boolean().optional().describe('Only execute when expected value is positive'),
-  "cooldownMinutes": zod.number().optional().describe('Minutes to wait before auto-resuming after consecutive loss stop')
+  "cooldownMinutes": zod.number().optional().describe('Minutes to wait before auto-resuming after consecutive loss stop'),
+  "normalOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades in normal (non-recovery) mode'),
+  "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
+  "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),
+  "recoveryUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades while in recovery mode')
 })
 
 

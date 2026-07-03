@@ -81,6 +81,10 @@ export interface TradingSettings {
   maxDrawdown: number;
   requirePositiveEv: boolean;
   paperTradeMode: boolean;
+  normalOverDigit: number;
+  normalUnderDigit: number;
+  recoveryOverDigit: number;
+  recoveryUnderDigit: number;
 }
 
 export interface DailyStats {
@@ -103,8 +107,11 @@ export interface ScanContext {
   daily: DailyStats;
   token: string | null;
   currency: string;
-  /** Recovery Mode override: forces the digit-probability agent to evaluate
-   *  these barriers instead of the normal OVER 2 / UNDER 7. */
+  /** The exact Over/Under barriers to evaluate/trade — sourced from settings.
+   *  Normal mode uses settings.normalOverDigit/normalUnderDigit; recovery mode
+   *  uses settings.recoveryOverDigit/recoveryUnderDigit. Always set by the
+   *  caller (ai.ts) so the digit-probability agent never falls back to a
+   *  hardcoded default. */
   recoveryBarrierOverride?: { DIGITOVER: number; DIGITUNDER: number };
 }
 

@@ -31,6 +31,10 @@ function buildTradingSettingsForManual(s: any, preferredContractTypes: string[])
     maxDrawdown:            s ? Number(s.maxDrawdown ?? 20) : 20,
     requirePositiveEv:      s?.requirePositiveEv ?? true,
     paperTradeMode:         s?.paperTradeMode ?? false,
+    normalOverDigit:        s?.normalOverDigit ?? 2,
+    normalUnderDigit:       s?.normalUnderDigit ?? 7,
+    recoveryOverDigit:      s?.recoveryOverDigit ?? 4,
+    recoveryUnderDigit:     s?.recoveryUnderDigit ?? 5,
   };
 }
 
@@ -347,11 +351,12 @@ router.post("/", async (req, res): Promise<void> => {
 
     recordTradeOutcome(symbol, contractType, barrier ?? null, won, profit, stake);
 
-    // Update recovery engine — manual trades must be tracked just like autonomous ones
+    // Update recovery engine — manual trades must be tracked just like autonomous ones.
+    // Recovery is global now: any tracked contract type's outcome affects the single
+    // recovery state, regardless of which contract type caused the original loss.
     {
-      const rf = recoveryEngine.contractTypeToFamily(contractType);
       const maxSteps = settings.length > 0 ? (settings[0] as any).maxRecoverySteps ?? 3 : 3;
-      if (rf) recoveryEngine.recordOutcome(rf, won, profit, stake, maxSteps);
+      if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps);
     }
 
     // actualPayout = total returned to account when won (stake + net profit), 0 when lost
@@ -421,11 +426,10 @@ router.post("/", async (req, res): Promise<void> => {
 
   recordTradeOutcome(symbol, contractType, barrier ?? null, won, profit, stake);
 
-  // Update recovery engine for paper/demo manual trades too
+  // Update recovery engine for paper/demo manual trades too (global state)
   {
-    const rf = recoveryEngine.contractTypeToFamily(contractType);
     const maxSteps = settings.length > 0 ? (settings[0] as any).maxRecoverySteps ?? 3 : 3;
-    if (rf) recoveryEngine.recordOutcome(rf, won, profit, stake, maxSteps);
+    if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps);
   }
 
   const [trade] = await db.insert(tradesTable).values({

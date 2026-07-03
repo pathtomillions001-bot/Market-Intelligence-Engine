@@ -45,4 +45,12 @@ export interface TradingSettings {
   requirePositiveEv?: boolean;
   /** Minutes to wait before auto-resuming after consecutive loss stop */
   cooldownMinutes?: number;
+  /** Digit barrier used for DIGITOVER trades in normal (non-recovery) mode */
+  normalOverDigit?: number;
+  /** Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode */
+  normalUnderDigit?: number;
+  /** Digit barrier used for DIGITOVER trades while in recovery mode */
+  recoveryOverDigit?: number;
+  /** Digit barrier used for DIGITUNDER trades while in recovery mode */
+  recoveryUnderDigit?: number;
 }

@@ -86,6 +86,10 @@ export default function Settings() {
     recoveryMode: false,
     recoveryMultiplier: 1.2,
     maxRecoverySteps: 3,
+    normalOverDigit: 2,
+    normalUnderDigit: 7,
+    recoveryOverDigit: 4,
+    recoveryUnderDigit: 5,
     scanAllMarkets: true,
     paperTradeMode: false,
     requirePositiveEv: true,
@@ -111,6 +115,10 @@ export default function Settings() {
         recoveryMode: (settings as any).recoveryMode ?? false,
         recoveryMultiplier: (settings as any).recoveryMultiplier ?? 1.2,
         maxRecoverySteps: (settings as any).maxRecoverySteps ?? 3,
+        normalOverDigit: (settings as any).normalOverDigit ?? 2,
+        normalUnderDigit: (settings as any).normalUnderDigit ?? 7,
+        recoveryOverDigit: (settings as any).recoveryOverDigit ?? 4,
+        recoveryUnderDigit: (settings as any).recoveryUnderDigit ?? 5,
         scanAllMarkets: (settings as any).scanAllMarkets ?? true,
         paperTradeMode: (settings as any).paperTradeMode ?? false,
         requirePositiveEv: (settings as any).requirePositiveEv ?? true,
@@ -240,7 +248,7 @@ export default function Settings() {
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Recovery Mode</CardTitle>
           <CardDescription className="text-xs">
-            When enabled, after a loss the engine escalates stake size to recover the lost amount before returning to normal. Over/Under losses automatically switch to safer barriers (OVER 4 / UNDER 5) during recovery.
+            When enabled, after a loss the engine escalates stake size to recover the lost amount. Recovery is tracked as a single global state — it does not reset to normal until a win fully covers the accumulated unrecovered amount; partial wins leave the remainder active.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -272,11 +280,32 @@ export default function Settings() {
                   </div>
                 ))}
               </div>
-              <div className="text-[10px] text-muted-foreground mt-2">
-                Over/Under recovery: switches to OVER 4 / UNDER 5 barriers (higher win probability) until fully recovered.
-              </div>
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* Over/Under Digit Configuration */}
+      <Card className="bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Over/Under Digits</CardTitle>
+          <CardDescription className="text-xs">
+            The AI only ever trades these exact digit barriers — one pair for normal trading, one pair while recovery is active. No other digits are scanned or selected automatically.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <SettingRow label="Normal — OVER digit" description="Barrier used for DIGITOVER trades outside of recovery.">
+            <NumInput value={form.normalOverDigit} onChange={(v) => set("normalOverDigit", v)} min={0} max={9} />
+          </SettingRow>
+          <SettingRow label="Normal — UNDER digit" description="Barrier used for DIGITUNDER trades outside of recovery.">
+            <NumInput value={form.normalUnderDigit} onChange={(v) => set("normalUnderDigit", v)} min={0} max={9} />
+          </SettingRow>
+          <SettingRow label="Recovery — OVER digit" description="Barrier used for DIGITOVER trades while recovery is active.">
+            <NumInput value={form.recoveryOverDigit} onChange={(v) => set("recoveryOverDigit", v)} min={0} max={9} />
+          </SettingRow>
+          <SettingRow label="Recovery — UNDER digit" description="Barrier used for DIGITUNDER trades while recovery is active.">
+            <NumInput value={form.recoveryUnderDigit} onChange={(v) => set("recoveryUnderDigit", v)} min={0} max={9} />
+          </SettingRow>
         </CardContent>
       </Card>
 

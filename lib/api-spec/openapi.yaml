@@ -1067,6 +1067,18 @@ components:
         cooldownMinutes:
           type: integer
           description: Minutes to wait before auto-resuming after consecutive loss stop
+        normalOverDigit:
+          type: integer
+          description: Digit barrier used for DIGITOVER trades in normal (non-recovery) mode
+        normalUnderDigit:
+          type: integer
+          description: Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode
+        recoveryOverDigit:
+          type: integer
+          description: Digit barrier used for DIGITOVER trades while in recovery mode
+        recoveryUnderDigit:
+          type: integer
+          description: Digit barrier used for DIGITUNDER trades while in recovery mode
 
     TradingSettingsInput:
       type: object
@@ -1117,4 +1129,12 @@ components:
         requirePositiveEv:
           type: boolean
         cooldownMinutes:
+          type: integer
+        normalOverDigit:
+          type: integer
+        normalUnderDigit:
+          type: integer
+        recoveryOverDigit:
+          type: integer
+        recoveryUnderDigit:
           type: integer
