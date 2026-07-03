@@ -9,6 +9,9 @@ import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 import { computeStake } from "../lib/agents/ev-calculator";
 import * as recoveryEngine from "../lib/agents/recovery-engine";
+import { analyzeCompletedTrade, getRecentReports, getIntelligenceSummary } from "../lib/agents/trade-intelligence";
+import { trackRejectedTrade, getMissedOpportunitySummary, getRecentMissed } from "../lib/agents/missed-opportunity";
+import { getStatus as getDynamicConfidenceStatus, loadFromDb as loadDynamicConfidence } from "../lib/agents/dynamic-confidence";
 import { broadcastSSE, addSSEClient, removeSSEClient } from "../lib/sse";
 
 const router = Router();
@@ -912,6 +915,19 @@ async function runAutonomousLoop() {
         quality: output.qualityScore,
         reason: output.rejectReason,
       }, "Conditions not favourable — scanning next");
+
+      // Track the rejected trade so the Missed Opportunity Agent can evaluate it
+      const rejectedRec = output.recommendation;
+      trackRejectedTrade({
+        symbol:       bestMarket.symbol,
+        contractType: rejectedRec.product,
+        barrier:      rejectedRec.barrier ?? null,
+        rejectReason: output.rejectReason,
+        output,
+        duration:     rejectedRec.duration ?? 5,
+        stake:        rejectedRec.stake,
+      });
+
       scheduleNext(false);
       return;
     }
@@ -981,7 +997,7 @@ async function runAutonomousLoop() {
         persistRecoveryState().catch(() => {});
       }
 
-      await db.insert(tradesTable).values({
+      const [paperTrade] = await db.insert(tradesTable).values({
         symbol: bestMarket.symbol,
         displayName: bestMarket.displayName,
         contractType: effectiveContractType,
@@ -1000,7 +1016,21 @@ async function runAutonomousLoop() {
         duration,
         durationUnit: "t",
         closedAt: new Date(),
-      });
+      }).returning();
+
+      // Fire-and-forget: Trade Intelligence analysis (does not block loop)
+      if (paperTrade) {
+        analyzeCompletedTrade({
+          tradeId: paperTrade.id,
+          symbol: bestMarket.symbol,
+          contractType: effectiveContractType,
+          barrier: effectiveBarrier ?? null,
+          stake,
+          won,
+          profit,
+          output,
+        }).catch(() => {});
+      }
     } else {
       // ── Live trade: insert "open" FIRST so journal shows it immediately ──
       const [openTrade] = await db.insert(tradesTable).values({
@@ -1102,6 +1132,18 @@ async function runAutonomousLoop() {
         exitPrice: String(exitPrice),
         closedAt: new Date(),
       }).where(eq(tradesTable.id, openTrade.id));
+
+      // Fire-and-forget: Trade Intelligence analysis (does not block loop)
+      analyzeCompletedTrade({
+        tradeId: openTrade.id,
+        symbol: bestMarket.symbol,
+        contractType: effectiveContractType,
+        barrier: effectiveBarrier ?? null,
+        stake,
+        won,
+        profit,
+        output,
+      }).catch(() => {});
     }
 
     // ── Record trade in per-symbol cooldown map ──────────────────────────────
@@ -1595,6 +1637,52 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     marketsScanned: DERIV_MARKETS.length,
     recovery: buildRecoveryPayloadFromJournal(journalManager.getCached(), settings.length > 0 ? Number((settings[0] as any).recoveryMultiplier) : 1.2),
   });
+});
+
+// ── Trade Intelligence endpoints ──────────────────────────────────────────────
+
+router.get("/intelligence/summary", async (_req, res): Promise<void> => {
+  try {
+    const [summary, missedSummary, dynamicStatus] = await Promise.all([
+      getIntelligenceSummary(),
+      getMissedOpportunitySummary(),
+      Promise.resolve(getDynamicConfidenceStatus()),
+    ]);
+    res.json({ summary, missedSummary, dynamicStatus });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch intelligence summary" });
+  }
+});
+
+router.get("/intelligence/reports", async (_req, res): Promise<void> => {
+  try {
+    const rawLimit = Number(_req.query["limit"]);
+    const limit = Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 20, 50);
+    const reports = await getRecentReports(limit);
+    res.json(reports);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch intelligence reports" });
+  }
+});
+
+router.get("/intelligence/missed", async (_req, res): Promise<void> => {
+  try {
+    const rawLimit = Number(_req.query["limit"]);
+    const limit = Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 20, 50);
+    const missed = await getRecentMissed(limit);
+    res.json(missed);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch missed opportunities" });
+  }
+});
+
+router.get("/intelligence/thresholds", async (_req, res): Promise<void> => {
+  try {
+    const status = getDynamicConfidenceStatus();
+    res.json(status);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch adaptive thresholds" });
+  }
 });
 
 export default router;

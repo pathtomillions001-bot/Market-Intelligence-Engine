@@ -1,7 +1,7 @@
 import { ReactNode, useState, useEffect } from "react";
 import { Link, useLocation } from "wouter";
 import { useGetAiEngineStatus, useToggleAutonomousEngine } from "@workspace/api-client-react";
-import { Activity, BarChart2, Briefcase, LayoutDashboard, Settings as SettingsIcon, Link as LinkIcon, Menu, X } from "lucide-react";
+import { Activity, BarChart2, Briefcase, LayoutDashboard, Settings as SettingsIcon, Link as LinkIcon, Brain, Menu, X } from "lucide-react";
 import { Switch } from "./ui/switch";
 import { Label } from "./ui/label";
 import { motion, AnimatePresence } from "framer-motion";
@@ -11,6 +11,7 @@ const navItems = [
   { href: "/markets", label: "Markets", icon: BarChart2 },
   { href: "/trades", label: "Journal", icon: Briefcase },
   { href: "/analytics", label: "Analytics", icon: Activity },
+  { href: "/intelligence", label: "Intelligence", icon: Brain },
   { href: "/settings", label: "Settings", icon: SettingsIcon },
   { href: "/connect", label: "Connect", icon: LinkIcon },
 ];

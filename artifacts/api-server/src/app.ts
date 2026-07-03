@@ -10,15 +10,23 @@ import { tickManager, DERIV_MARKETS, APP_ID } from "./lib/deriv";
 import { loadWinRatesFromDb } from "./lib/win-rate-store";
 import { loadCalibrationCache } from "./lib/calibration";
 import { loadRecoveryStateFromDb } from "./routes/ai";
+import { loadFromDb as loadDynamicConfidence } from "./lib/agents/dynamic-confidence";
 import { pool } from "@workspace/db";
 
 /** Ensure DB schema is applied — runs drizzle-kit push if tables are missing. */
 async function bootstrapDb() {
   try {
+    // Check for both the original 'settings' table AND the newer 'adaptive_thresholds'
+    // table so that existing deployments that already have 'settings' but are missing
+    // the new intelligence tables also get the schema push applied automatically.
     const { rows } = await pool.query(
-      `SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'settings'`
+      `SELECT
+        (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'settings') AS settings_exists,
+        (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'adaptive_thresholds') AS adaptive_exists`
     );
-    if (Number(rows[0].n) > 0) return; // schema already applied
+    const settingsExists = Number(rows[0].settings_exists) > 0;
+    const adaptiveExists = Number(rows[0].adaptive_exists) > 0;
+    if (settingsExists && adaptiveExists) return; // all required tables present
     logger.warn("DB schema missing — running schema push");
     const root = resolve(import.meta.dirname, "../../../../");
     execSync("pnpm --filter @workspace/db run push", { cwd: root, stdio: "inherit" });
@@ -56,6 +64,7 @@ bootstrapDb().then(() => {
   loadWinRatesFromDb().catch((err) => logger.warn({ err }, "Win rate load on startup failed"));
   loadCalibrationCache().catch((err) => logger.warn({ err }, "Calibration load on startup failed"));
   loadRecoveryStateFromDb().catch((err) => logger.warn({ err }, "Recovery state load on startup failed"));
+  loadDynamicConfidence().catch((err) => logger.warn({ err }, "Dynamic confidence load on startup failed"));
 });
 
 // Start persistent Deriv tick subscription for all synthetic markets

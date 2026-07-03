@@ -14,6 +14,7 @@ import Trades from "./pages/trades";
 import Analytics from "./pages/analytics";
 import Connect from "./pages/connect";
 import Settings from "./pages/settings";
+import Intelligence from "./pages/intelligence";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30000 } },
@@ -63,6 +64,7 @@ function Router() {
         <Route path="/markets/:symbol" component={MarketDetail} />
         <Route path="/trades" component={Trades} />
         <Route path="/analytics" component={Analytics} />
+        <Route path="/intelligence" component={Intelligence} />
         <Route path="/settings" component={Settings} />
         <Route path="/connect" component={Connect} />
         <Route component={NotFound} />

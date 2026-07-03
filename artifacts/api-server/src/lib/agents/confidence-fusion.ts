@@ -12,6 +12,7 @@ import { scoreToSignal } from "./types";
 import type { DirectionResult } from "./rise-fall-agent";
 import type { BarrierOption } from "./digit-probability";
 import type { EVResult } from "./ev-calculator";
+import { getDynamicWeights, getAdaptiveConfidenceThreshold, getAdaptiveEvThreshold, getAdaptiveTimingThreshold } from "./dynamic-confidence";
 
 export interface FusionInput {
   marketScannerScore: number;
@@ -48,9 +49,10 @@ export interface FusionResult {
   timingGated: boolean;
 }
 
-// Per-agent weights — higher weight = more influence on final decision
-// Weights reflect institutional importance of each signal
-const AGENT_WEIGHTS: Record<string, number> = {
+// Base per-agent weights — used when dynamic-confidence hasn't accumulated
+// enough data yet. Once ≥5 trades per agent are recorded, getDynamicWeights()
+// blends these with accuracy-driven multipliers automatically.
+const BASE_AGENT_WEIGHTS: Record<string, number> = {
   marketScanner:       1.5,  // hard gate — ineligible market kills the trade
   tickIntelligence:    0.8,
   digitProbability:    1.2,  // direct EV predictor for digit contracts
@@ -63,8 +65,6 @@ const AGENT_WEIGHTS: Record<string, number> = {
   learningAgent:       0.9,
   patternDiscovery:    0.5,  // enhancement only
 };
-
-const TOTAL_WEIGHT = Object.values(AGENT_WEIGHTS).reduce((a, b) => a + b, 0);
 
 export function runConfidenceFusionAgent(
   ctx: ScanContext,
@@ -87,13 +87,18 @@ export function runConfidenceFusionAgent(
     blockers.push("Portfolio manager: position limit reached");
   }
 
+  // ── Resolve dynamic weights (accuracy-driven, falls back to base) ────────────
+  const AGENT_WEIGHTS = getDynamicWeights();
+  const TOTAL_WEIGHT = Object.values(AGENT_WEIGHTS).reduce((a, b) => a + b, 0);
+
   // ── 2. EV gate ───────────────────────────────────────────────────────────────
   // During a loss streak the EV threshold tightens: we need real edge, not near-breakeven.
-  // 0 losses → allow EV ≥ -0.05 (existing tolerance)
+  // 0 losses → allow EV ≥ adaptive threshold (dynamic-confidence engine)
   // 2 losses → allow EV ≥ -0.02
   // 3+ losses → require EV > 0 (positive expected value only)
   const sessionLosses = ctx.daily.consecutiveLosses;
-  const minEV = sessionLosses >= 3 ? 0.001 : sessionLosses >= 2 ? -0.02 : -0.05; // 3+ losses: strictly positive EV
+  const adaptiveMinEV = getAdaptiveEvThreshold();
+  const minEV = sessionLosses >= 3 ? 0.001 : sessionLosses >= 2 ? -0.02 : adaptiveMinEV; // 3+ losses: strictly positive EV
   const evGated = input.bestEVResult !== null && input.bestEVResult.expectedValue >= minEV;
   if (!evGated && input.bestEVResult !== null) {
     const reason = sessionLosses >= 2
@@ -103,7 +108,8 @@ export function runConfidenceFusionAgent(
   }
 
   // ── 3. Timing gate ───────────────────────────────────────────────────────────
-  const minTimingScore = sessionLosses >= 3 ? 50 : sessionLosses >= 2 ? 44 : 38;
+  const adaptiveTimingThreshold = getAdaptiveTimingThreshold();
+  const minTimingScore = sessionLosses >= 3 ? 50 : sessionLosses >= 2 ? 44 : adaptiveTimingThreshold;
   const timingGated = input.executionTimingScore >= minTimingScore;
   if (!timingGated) {
     blockers.push(`Timing score ${input.executionTimingScore} < ${minTimingScore} — suboptimal entry`);
@@ -131,14 +137,14 @@ export function runConfidenceFusionAgent(
   const agentWeightedScore = Math.round(weightedSum / TOTAL_WEIGHT);
 
   // ── 5. Per-market adaptive threshold ─────────────────────────────────────────
-  // Cap base threshold at 50 (matching master-decision) so near-breakeven contracts
-  // (EVEN/ODD, RISE/FALL at neutral markets) can still fire.
+  // Uses the Dynamic Confidence Engine's learned threshold (calibrated from historical
+  // outcomes) instead of a fixed value. The learning engine adjusts this ±0.5 per trade
+  // based on recent win-rate, keeping it within [MIN_THRESHOLD, MAX_THRESHOLD].
   const historyAdjust = (input.learningAgentScore - 50) * 0.1; // ±5 adjustment
-  const baseThreshold = Math.min(ctx.settings.minConfidenceThreshold ?? 50, 50);
+  const adaptiveBase = getAdaptiveConfidenceThreshold(ctx.settings.minConfidenceThreshold ?? 50);
   // During a loss streak, raise the bar: each consecutive loss adds 3 points (max +15).
-  // This ensures recovery trades need genuine multi-agent consensus, not just one strong signal.
   const lossStreakBoost = Math.min(sessionLosses * 3, 15);
-  const effectiveThreshold = Math.max(44, Math.min(75, baseThreshold + historyAdjust + lossStreakBoost));
+  const effectiveThreshold = Math.max(44, Math.min(75, adaptiveBase + historyAdjust + lossStreakBoost));
 
   // ── 6. Enhancement signals ────────────────────────────────────────────────────
   if (input.patternDiscoveryScore > 70) enhancers.push("Pattern discovery: recognized profitable pattern");
