@@ -15,3 +15,4 @@
 - [Continuous trading gates](continuous-trading-gates.md) — engine was freezing after 2 trades; EV gate, timing gate, drifting gate were all hard-blocking; fixed by widening MIN_POSITIVE_EV to -0.05 and making gates advisory except hard risk stops.
 - [No recovery mode](no-recovery-mode.md) — recovery logic fully removed; after any loss engine continues normally; stake never multiplied; no globalRecovery state; recovery-intelligence still runs as informational agent only.
 - [Deriv journal win/loss formula](deriv-journal-winloss.md) — use sell_price > buy_price (NOT profit > 0) for win/loss from profit_table; local trades DB is EMPTY — journalManager.getCached() is the only authoritative source for recovery sync.
+- [Recovery Intelligence v2](recovery-intelligence-v2.md) — evaluates all 8 OVER/UNDER candidates per market; symbol-scoped cache (family|symbol); hard gate skips coordinator when below threshold.

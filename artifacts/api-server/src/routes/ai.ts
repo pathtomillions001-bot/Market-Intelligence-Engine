@@ -706,6 +706,52 @@ async function runAutonomousLoop() {
 
               const familyResults = (await Promise.allSettled(
                 families.map(async (fam) => {
+                  // ── Recovery Intelligence gate (Over/Under family only) ──────────────
+                  // Evaluate all 8 candidates BEFORE running the coordinator. If no
+                  // candidate meets the confidence threshold, return null immediately —
+                  // the engine waits rather than falling back to normal barriers.
+                  let recoveryBarrierOverride: { DIGITOVER: number; DIGITUNDER: number } | undefined;
+                  if (fam.name === "overunder" && recoveryEngine.isInRecovery("overunder")) {
+                    const rcCtx: recoveryEngine.RecoveryContext = {
+                      symbol:                 m.symbol,
+                      digits:                 baseCtx.digits,
+                      prices:                 baseCtx.prices,
+                      balance,
+                      maxRiskPerTrade:        tradingSettings.maxRiskPerTrade,
+                      maxTradeStake:          tradingSettings.maxTradeStake,
+                      minConfidenceThreshold: tradingSettings.minConfidenceThreshold ?? 38,
+                      riskProfile:            tradingSettings.riskProfile,
+                      volatility:             (baseCtx as any).volatility,
+                      momentum:               (baseCtx as any).momentum,
+                      noiseScore:             (baseCtx as any).noiseScore,
+                      regime:                 (baseCtx as any).regime,
+                    };
+                    const evaluation = recoveryEngine.evaluateRecoveryCandidates(rcCtx, "overunder", m.symbol);
+                    if (!evaluation.shouldTrade) {
+                      // Hard gate: no viable candidate → skip this market/family entirely
+                      logger.info({
+                        symbol:   m.symbol,
+                        reason:   evaluation.rejectReason,
+                        topScore: evaluation.topCandidate?.recoveryScore ?? 0,
+                        threshold: tradingSettings.minConfidenceThreshold ?? 38,
+                      }, "Recovery Intelligence: no candidate meets threshold — family skipped");
+                      return null;   // ← hard skip; coordinator never runs
+                    }
+                    logger.info({
+                      symbol:      m.symbol,
+                      chosen:      evaluation.topCandidate?.label,
+                      score:       evaluation.topCandidate?.recoveryScore,
+                      stake:       evaluation.chosenStake,
+                      override:    evaluation.chosenBarrierOverride,
+                      unrecovered: evaluation.unrecoveredAmount,
+                      candidates:  evaluation.candidates.slice(0, 4).map(c => ({
+                        label: c.label, score: c.recoveryScore,
+                        winP: Math.round(c.blendedWinP * 100), ev: c.expectedValue.toFixed(3),
+                      })),
+                    }, "Recovery Intelligence: AI-selected recovery barrier");
+                    recoveryBarrierOverride = evaluation.chosenBarrierOverride;
+                  }
+
                   const famCtx: ScanContext = {
                     ...baseCtx,
                     settings: {
@@ -720,12 +766,7 @@ async function runAutonomousLoop() {
                         ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 48)
                         : baseCtx.settings.minConfidenceThreshold,
                     },
-                    // Recovery Mode: while the Over/Under family is recovering losses,
-                    // force barrier evaluation to OVER 4 / UNDER 5 instead of OVER 2 / UNDER 7.
-                    // The AI still picks whichever direction (over vs under) scores best.
-                    recoveryBarrierOverride: fam.name === "overunder"
-                      ? recoveryEngine.getBarrierOverride("overunder")
-                      : undefined,
+                    recoveryBarrierOverride,
                   };
                   const output = await withTimeout(runCoordinator(famCtx), SCAN_TIMEOUT_MS, null as any);
                   if (!output) return null;
@@ -958,19 +999,32 @@ async function runAutonomousLoop() {
       : rawDuration;
 
     // ── Recovery Mode stake override ─────────────────────────────────────────
-    // Normally the stake comes directly from the AI's risk-based recommendation.
-    // If this contract family is currently in Recovery Mode, override the stake
-    // using nextStake = baseStake * (recoveryMultiplier ^ recoveryStep) instead.
+    // For Over/Under family: use the AI-evaluated dynamic stake from the
+    // Recovery Intelligence Engine (minimum stake needed to recover the
+    // accumulated loss, adjusted for payout and win probability).
+    // For other families: legacy multiplier formula as before.
     const recoveryFamily = recoveryEngine.contractTypeToFamily(effectiveContractType);
-    const recoveryMultiplierSetting = settings ? Number((settings as any).recoveryMultiplier) : 1.2;
     let stake = rec.stake;
     if (recoveryFamily) {
-      stake = recoveryEngine.getNextStake(
-        recoveryFamily,
-        rec.stake,
-        recoveryMultiplierSetting,
-        tradingSettings.maxTradeStake,
-      );
+      if (recoveryFamily === "overunder" && recoveryEngine.isInRecovery("overunder")) {
+        // Use dynamic stake from the recovery evaluation (already computed above)
+        stake = recoveryEngine.getDynamicRecoveryStake(
+          recoveryFamily,
+          rec.stake,
+          tradingSettings.maxTradeStake,
+          balance,
+          bestMarket.symbol,   // symbol-scoped so we get the right cached evaluation
+        );
+      } else {
+        // Rise/Fall and Even/Odd: legacy multiplier formula
+        const recoveryMultiplierSetting = settings ? Number((settings as any).recoveryMultiplier) : 1.2;
+        stake = recoveryEngine.getNextStake(
+          recoveryFamily,
+          rec.stake,
+          recoveryMultiplierSetting,
+          tradingSettings.maxTradeStake,
+        );
+      }
     }
 
     // Estimated payout for paper trades (live payout comes from Deriv result)
@@ -1682,6 +1736,88 @@ router.get("/intelligence/thresholds", async (_req, res): Promise<void> => {
     res.json(status);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch adaptive thresholds" });
+  }
+});
+
+// ── Recovery Intelligence endpoints ───────────────────────────────────────────
+
+/**
+ * GET /api/ai/recovery/evaluation
+ * Returns the last AI-evaluated recovery candidate table for the over/under family.
+ * Shows all 8 candidates ranked by Recovery Confidence Score.
+ */
+router.get("/recovery/evaluation", async (_req, res): Promise<void> => {
+  try {
+    const state       = recoveryEngine.getState("overunder");
+    const lastEval    = recoveryEngine.getLastEvaluation("overunder");
+    const streakSummary = recoveryEngine.getLossStreakSummary();
+
+    if (!state.inRecovery) {
+      res.json({
+        inRecovery:       false,
+        unrecoveredAmount: 0,
+        streakLosses:     0,
+        evaluation:       null,
+        message:          "Not in recovery mode",
+      });
+      return;
+    }
+
+    res.json({
+      inRecovery:        true,
+      unrecoveredAmount: state.unrecoveredAmount,
+      baseStake:         state.baseStake,
+      streakLosses:      state.streakLossCount,
+      streakAmount:      state.streakStartAmount,
+      recoveryStep:      state.recoveryStep,
+      chosenBarrier:     state.chosenOverBarrier != null
+        ? { DIGITOVER: state.chosenOverBarrier, DIGITUNDER: state.chosenUnderBarrier }
+        : null,
+      evaluation: lastEval ?? null,
+      streakSummary,
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch recovery evaluation" });
+  }
+});
+
+/**
+ * GET /api/ai/recovery/candidates
+ * Runs a fresh evaluation for the given symbol and returns the ranked candidate table.
+ * Accepts ?symbol=R_10 query param.
+ */
+router.get("/recovery/candidates", async (req, res): Promise<void> => {
+  try {
+    const symbol = String(req.query["symbol"] ?? "R_10");
+    const market = DERIV_MARKETS.find(m => m.symbol === symbol);
+    if (!market) {
+      res.status(400).json({ error: `Unknown symbol: ${symbol}` });
+      return;
+    }
+
+    const accounts = await db.select().from(accountsTable).limit(1);
+    const settings = await db.select().from(settingsTable).limit(1);
+    const balance  = accounts.length > 0 ? Number(accounts[0].balance) : 10000;
+    const s        = settings.length > 0 ? settings[0] : null;
+
+    const digits = market.digitEnabled ? tickManager.getDigits(symbol, 300) : [];
+    const prices = tickManager.getTicks(symbol, 100);
+
+    const rcCtx: recoveryEngine.RecoveryContext = {
+      symbol,
+      digits,
+      prices,
+      balance,
+      maxRiskPerTrade:        s ? Number(s.maxRiskPerTrade) : 2,
+      maxTradeStake:          s ? Number(s.maxTradeStake) : 500,
+      minConfidenceThreshold: s ? Number(s.minConfidenceThreshold) : 38,
+      riskProfile:            (s?.riskProfile ?? "moderate") as "conservative" | "moderate" | "aggressive",
+    };
+
+    const evaluation = recoveryEngine.evaluateRecoveryCandidates(rcCtx, "overunder");
+    res.json(evaluation);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to evaluate recovery candidates" });
   }
 });
 

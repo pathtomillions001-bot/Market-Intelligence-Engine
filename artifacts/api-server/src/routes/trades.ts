@@ -6,6 +6,7 @@ import { ExecuteTradeBody, GetTradesQueryParams, GetTradeParams } from "@workspa
 import { tickManager, DERIV_MARKETS, getCachedToken, executeLiveTrade, waitForContractResult, getLiveBalance, fetchDerivProfitTable, journalManager } from "../lib/deriv";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
 import * as recoveryEngine from "../lib/agents/recovery-engine";
+import { analyzeCompletedTrade } from "../lib/agents/trade-intelligence";
 import { logger } from "../lib/logger";
 import { broadcastSSE } from "../lib/sse";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
@@ -252,9 +253,10 @@ router.post("/", async (req, res): Promise<void> => {
   };
 
   let analysis;
+  let savedCoordinatorOutput: Awaited<ReturnType<typeof runCoordinator>> | null = null;
   try {
-    const coordinatorOutput = await runCoordinator(ctx);
-    analysis = buildLegacyAnalysis(coordinatorOutput);
+    savedCoordinatorOutput = await runCoordinator(ctx);
+    analysis = buildLegacyAnalysis(savedCoordinatorOutput);
   } catch (err) {
     logger.warn({ err, symbol }, "Coordinator failed for manual trade — using defaults");
     analysis = {
@@ -388,6 +390,21 @@ router.post("/", async (req, res): Promise<void> => {
       broadcastSSE("journal_refreshed", { ts: Date.now() });
     });
     journalManager.forceRefresh();
+
+    // Fire-and-forget: Trade Intelligence analysis — stores why this trade won/lost in DB
+    if (savedCoordinatorOutput) {
+      analyzeCompletedTrade({
+        tradeId:      closedTrade.id,
+        symbol,
+        contractType,
+        barrier:      barrier ?? null,
+        stake,
+        won,
+        profit,
+        output:       savedCoordinatorOutput,
+      }).catch(() => {});
+    }
+
     res.status(201).json(formatTrade(closedTrade));
     return;
   }
@@ -451,6 +468,21 @@ router.post("/", async (req, res): Promise<void> => {
       aiConfidence: winProbability, isAutonomous: isAutonomous ?? false, source: "paper",
     }
   });
+
+  // Fire-and-forget: Trade Intelligence analysis — stores why this trade won/lost in DB
+  if (savedCoordinatorOutput) {
+    analyzeCompletedTrade({
+      tradeId:      trade.id,
+      symbol,
+      contractType,
+      barrier:      barrier ?? null,
+      stake,
+      won,
+      profit,
+      output:       savedCoordinatorOutput,
+    }).catch(() => {});
+  }
+
   res.status(201).json(formatTrade(trade));
 });
 
