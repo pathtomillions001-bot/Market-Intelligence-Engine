@@ -523,7 +523,7 @@ class DerivTickManager extends EventEmitter {
     }
 
     try {
-      this.ws = new WebSocket(DERIV_WS_URL);
+      this.ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
     } catch (err) {
       logger.warn({ err }, "TickManager: failed to create WebSocket, will retry");
       this.scheduleReconnect();
@@ -811,7 +811,7 @@ export async function getTickHistory(symbol: string, count = 50): Promise<number
   // Direct WS fetch as fallback when tick manager hasn't buffered enough
   return new Promise((resolve) => {
     try {
-      const ws = new WebSocket(DERIV_WS_URL);
+      const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
       const timeout = setTimeout(() => {
         ws.close();
         resolve(generateSimulatedPrices(symbol, count));
@@ -953,7 +953,7 @@ class DerivJournalManager extends EventEmitter {
     if (!this.token) return;
 
     try {
-      this.ws = new WebSocket(DERIV_WS_URL);
+      this.ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
     } catch (err) {
       logger.warn({ err }, "JournalManager: failed to create WS, will retry");
       this.scheduleReconnect();
@@ -1075,7 +1075,7 @@ export async function getContractProposal(
 ): Promise<ContractProposal | null> {
   return new Promise((resolve) => {
     try {
-      const ws = new WebSocket(DERIV_WS_URL);
+      const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
       const timeout = setTimeout(() => { ws.close(); resolve(null); }, 12000);
       let authorized = !token;
 
@@ -1143,7 +1143,7 @@ export async function authorizeWithDeriv(token: string): Promise<DerivAccountInf
   }
 
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(DERIV_WS_URL);
+    const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
     const timeout = setTimeout(() => { ws.close(); reject(new Error("Connection timeout")); }, 15000);
 
     ws.on("open", () => { ws.send(JSON.stringify({ authorize: token })); });
@@ -1181,7 +1181,7 @@ export async function getLiveBalance(token: string): Promise<number | null> {
 
   return new Promise((resolve) => {
     try {
-      const ws = new WebSocket(DERIV_WS_URL);
+      const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
       const timeout = setTimeout(() => { ws.close(); resolve(null); }, 8000);
       ws.on("open", () => { ws.send(JSON.stringify({ authorize: token })); });
       ws.on("message", (data) => {
@@ -1213,15 +1213,27 @@ export async function executeLiveTrade(token: string, params: {
   barrier?: number | string;
 }): Promise<LiveTradeResult> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(DERIV_WS_URL);
+    const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
     const timeout = setTimeout(() => { ws.close(); reject(new Error("Trade execution timeout")); }, 20000);
     let authorized = false;
+    let sentBuyPayload: Record<string, unknown> | null = null;
 
     ws.on("open", () => { ws.send(JSON.stringify({ authorize: token })); });
     ws.on("message", (data) => {
       try {
         const msg = JSON.parse(data.toString());
-        if (msg.error) { clearTimeout(timeout); ws.close(); reject(new Error(msg.error.message)); return; }
+        logger.info({ rawMsg: msg }, "executeLiveTrade: received message");
+        if (msg.error) {
+          clearTimeout(timeout);
+          ws.close();
+          logger.error({
+            derivError: msg.error,
+            echoReq: msg.echo_req,
+            sentBuyPayload,
+          }, "Deriv rejected live trade request — full diagnostic");
+          reject(new Error(msg.error.message));
+          return;
+        }
 
         if (msg.msg_type === "authorize" && !authorized) {
           authorized = true;
@@ -1235,7 +1247,9 @@ export async function executeLiveTrade(token: string, params: {
             symbol: params.symbol,
           };
           if (params.barrier !== undefined) buyParams.barrier = String(params.barrier);
-          ws.send(JSON.stringify({ buy: 1, price: params.stake, parameters: buyParams }));
+          sentBuyPayload = { buy: 1, price: params.stake, parameters: buyParams };
+          logger.info({ sentBuyPayload }, "Sending live buy request to Deriv");
+          ws.send(JSON.stringify(sentBuyPayload));
         }
 
         if (msg.msg_type === "buy" && msg.buy) {
@@ -1257,7 +1271,7 @@ export async function executeLiveTrade(token: string, params: {
 export async function fetchDerivProfitTable(token: string, limit = 50): Promise<any[]> {
   return new Promise((resolve) => {
     try {
-      const ws = new WebSocket(DERIV_WS_URL);
+      const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
       const timeout = setTimeout(() => { ws.close(); resolve([]); }, 12000);
       let authorized = false;
       ws.on("open", () => { ws.send(JSON.stringify({ authorize: token })); });
@@ -1283,7 +1297,7 @@ export async function fetchDerivProfitTable(token: string, limit = 50): Promise<
 
 export async function waitForContractResult(token: string, contractId: number, timeoutMs = 30000): Promise<ContractResult> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(DERIV_WS_URL);
+    const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
     const timeout = setTimeout(() => { ws.close(); reject(new Error("Contract result timeout")); }, timeoutMs + 10000);
     let authorized = false;
 
@@ -1291,11 +1305,14 @@ export async function waitForContractResult(token: string, contractId: number, t
     ws.on("message", (data) => {
       try {
         const msg = JSON.parse(data.toString());
+        logger.info({ rawMsg: msg }, "waitForContractResult: received message");
         if (msg.error) { clearTimeout(timeout); ws.close(); reject(new Error(msg.error.message)); return; }
 
         if (msg.msg_type === "authorize" && !authorized) {
           authorized = true;
-          ws.send(JSON.stringify({ proposal_open_contracts: 1, contract_id: contractId, subscribe: 1 }));
+          const pocPayload = { proposal_open_contracts: 1, contract_id: contractId, subscribe: 1 };
+          logger.info({ pocPayload }, "waitForContractResult: sending proposal_open_contracts");
+          ws.send(JSON.stringify(pocPayload));
         }
 
         if (msg.msg_type === "proposal_open_contracts" && msg.proposal_open_contracts) {
