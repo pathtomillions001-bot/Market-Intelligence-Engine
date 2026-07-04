@@ -37,15 +37,10 @@ export async function loadRecoveryStateFromDb(): Promise<void> {
   }
 }
 
-/** Persist current recovery state to DB after each trade outcome. */
-async function persistRecoveryState(): Promise<void> {
-  try {
-    const json = recoveryEngine.serializeState();
-    await db.update(settingsTable).set({ recoveryStateJson: json, updatedAt: new Date() });
-  } catch (err) {
-    logger.warn({ err }, "Could not persist recovery state to DB");
-  }
-}
+// Persistence of recovery state to DB now happens automatically inside
+// recoveryEngine.recordOutcome() itself (see recovery-engine.ts) — every caller
+// (manual trades in trades.ts, autonomous trades below) gets it for free and it
+// can no longer be forgotten at a call site.
 
 /**
  * Recovery state is now tracked ONLY by `recoveryEngine.recordOutcome()`, called
@@ -804,7 +799,6 @@ async function runAutonomousLoop() {
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
       if (isTracked) {
         recoveryEngine.recordOutcome(won, profit, stake, settings?.maxRecoverySteps ?? 3);
-        persistRecoveryState().catch(() => {});
       }
 
       const [paperTrade] = await db.insert(tradesTable).values({
@@ -929,7 +923,6 @@ async function runAutonomousLoop() {
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
       if (isTracked) {
         recoveryEngine.recordOutcome(won, profit, stake, settings?.maxRecoverySteps ?? 3);
-        persistRecoveryState().catch(() => {});
       }
 
       await db.update(tradesTable).set({

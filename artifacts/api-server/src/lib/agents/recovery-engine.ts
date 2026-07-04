@@ -44,6 +44,27 @@ function freshState(): RecoveryState {
 
 let state: RecoveryState = freshState();
 
+// ── DB persistence (auto, on every outcome) ────────────────────────────────────
+// Persistence is triggered automatically inside recordOutcome() so it can never be
+// forgotten by a call site (manual trade route, autonomous loop, etc). Lazily import
+// the db module to avoid a hard circular/startup dependency on the db package for
+// pure in-memory consumers/tests of this module.
+let persistFn: (() => Promise<void>) | null = null;
+
+async function persistToDb(): Promise<void> {
+  try {
+    if (!persistFn) {
+      const { db, settingsTable } = await import("@workspace/db");
+      persistFn = async () => {
+        await db.update(settingsTable).set({ recoveryStateJson: JSON.stringify(state), updatedAt: new Date() });
+      };
+    }
+    await persistFn();
+  } catch {
+    /* best-effort — in-memory state remains authoritative for the running process */
+  }
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /** Contract types the recovery engine tracks outcomes for. */
@@ -172,6 +193,11 @@ export function recordOutcome(
       state.streakStartAmount += stakeUsed;
     }
   }
+
+  // Persist on EVERY outcome (win or loss, manual or autonomous) — fire-and-forget so
+  // callers never block on DB latency, but the call itself can never be forgotten since
+  // it lives here rather than at each call site.
+  persistToDb().catch(() => {});
 
   return state;
 }
