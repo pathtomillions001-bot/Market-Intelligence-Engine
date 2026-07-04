@@ -99,11 +99,18 @@ export function runConfidenceFusionAgent(
   const sessionLosses = ctx.daily.consecutiveLosses;
   const adaptiveMinEV = getAdaptiveEvThreshold();
   const minEV = sessionLosses >= 3 ? 0.001 : sessionLosses >= 2 ? -0.02 : adaptiveMinEV; // 3+ losses: strictly positive EV
-  const evGated = input.bestEVResult !== null && input.bestEVResult.expectedValue >= minEV;
-  if (!evGated && input.bestEVResult !== null) {
+  const evPasses = input.bestEVResult !== null && input.bestEVResult.expectedValue >= minEV;
+  // EV gate is a HARD block only when the user opted into requiring positive/adaptive EV
+  // (settings.requirePositiveEv) or during an active loss streak (recovery needs real edge).
+  // Otherwise it's advisory — most digit/barrier contracts on Deriv carry a small structural
+  // negative EV from the house edge, so hard-gating on it here made the engine perpetually
+  // find "no qualifying opportunity" and never execute a trade.
+  const evIsHardGate = ctx.settings.requirePositiveEv || sessionLosses >= 2;
+  const evGated = evPasses || !evIsHardGate;
+  if (!evPasses && input.bestEVResult !== null) {
     const reason = sessionLosses >= 2
       ? `EV gate (recovery mode, ${sessionLosses} losses): ${(input.bestEVResult.expectedValue * 100).toFixed(1)}% < ${(minEV * 100).toFixed(0)}% required`
-      : `EV gate: ${(input.bestEVResult.expectedValue * 100).toFixed(1)}% — below threshold`;
+      : `EV gate: ${(input.bestEVResult.expectedValue * 100).toFixed(1)}% — below threshold${evIsHardGate ? "" : " (advisory)"}`;
     blockers.push(reason);
   }
 
