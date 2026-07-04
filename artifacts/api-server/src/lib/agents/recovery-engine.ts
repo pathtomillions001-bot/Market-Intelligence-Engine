@@ -29,6 +29,14 @@ export interface RecoveryState {
   baseStake:           number;       // normal stake the engine recovers back to
   streakLossCount:     number;       // consecutive losses in the current streak (drives dashboard + cooldown gate)
   streakStartAmount:   number;       // total lost in this streak (display)
+  resetDate:           string;       // local YYYY-MM-DD this state belongs to — drives the daily auto-reset
+}
+
+/** Local calendar date (server time) in YYYY-MM-DD, matching how "today" is computed elsewhere (daily P&L, daily stats). */
+function todayKey(): string {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.toISOString().slice(0, 10);
 }
 
 function freshState(): RecoveryState {
@@ -39,10 +47,27 @@ function freshState(): RecoveryState {
     baseStake:           0,
     streakLossCount:     0,
     streakStartAmount:   0,
+    resetDate:           todayKey(),
   };
 }
 
 let state: RecoveryState = freshState();
+
+/**
+ * Every day starts on a clean slate — no unrecovered debt, streak, or recovery
+ * mode carries over from a previous day, regardless of whether it was fully
+ * covered or not. Called at the top of every read/write entry point so the
+ * rollover is detected the instant the calendar day changes (no separate
+ * cron/timer needed), whether the engine is idle, mid-recovery, or mid-loop.
+ */
+function ensureFreshDay(): void {
+  const today = todayKey();
+  if (state.resetDate !== today) {
+    const hadCarryOver = state.inRecovery || state.unrecoveredAmount > 0 || state.streakLossCount > 0;
+    state = freshState();
+    if (hadCarryOver) persistToDb().catch(() => {});
+  }
+}
 
 // ── DB persistence (auto, on every outcome) ────────────────────────────────────
 // Persistence is triggered automatically inside recordOutcome() so it can never be
@@ -77,10 +102,12 @@ export function isTrackedContract(contractType: string): boolean {
 }
 
 export function getState(): RecoveryState {
+  ensureFreshDay();
   return state;
 }
 
 export function isInRecovery(): boolean {
+  ensureFreshDay();
   return state.inRecovery;
 }
 
@@ -134,6 +161,7 @@ export function getDynamicRecoveryStake(
   winProbability01: number,
   riskProfile: "conservative" | "moderate" | "aggressive",
 ): number {
+  ensureFreshDay();
   if (!state.inRecovery) {
     if (baseStakeFromAI > 0 && isFinite(baseStakeFromAI)) state.baseStake = baseStakeFromAI;
     return baseStakeFromAI;
@@ -164,6 +192,7 @@ export function recordOutcome(
   stakeUsed: number,
   maxRecoverySteps: number,
 ): RecoveryState {
+  ensureFreshDay();
   if (won) {
     if (state.inRecovery) {
       const recovered = Math.max(0, profit);
@@ -232,8 +261,11 @@ export function loadState(json: string): void {
         baseStake:         Math.max(0, ...parsed.map((s: any) => Number(s?.baseStake) || 0)),
         streakLossCount:   parsed.reduce((sum: number, s: any) => sum + (Number(s?.streakLossCount) || 0), 0),
         streakStartAmount: parsed.reduce((sum: number, s: any) => sum + (Number(s?.streakStartAmount) || 0), 0),
+        // Legacy per-family rows predate this feature — always treat as "not today".
+        resetDate:         "",
       };
       if (!inRecovery) state = freshState();
+      ensureFreshDay();
       return;
     }
 
@@ -244,10 +276,17 @@ export function loadState(json: string): void {
       baseStake:           Number(parsed.baseStake)          || 0,
       streakLossCount:     Number(parsed.streakLossCount)    || 0,
       streakStartAmount:   Number(parsed.streakStartAmount)  || 0,
+      // Older/legacy saved rows never had resetDate — treat as "not today" so a
+      // pre-existing carry-over debt from before this feature existed is cleared
+      // immediately on load rather than silently resurrected.
+      resetDate:           typeof parsed.resetDate === "string" ? parsed.resetDate : "",
     };
   } catch {
     /* ignore malformed state — start fresh */
   }
+  // Collapse anything loaded from a previous calendar day back to a clean slate —
+  // covers server restarts/deploys that happen to land after midnight.
+  ensureFreshDay();
 }
 
 export function getLossStreakSummary(): {
@@ -256,6 +295,7 @@ export function getLossStreakSummary(): {
   totalStreakLosses: number;
   totalStreakAmount: number;
 } {
+  ensureFreshDay();
   return {
     active:            state.inRecovery,
     totalUnrecovered:  state.unrecoveredAmount,
