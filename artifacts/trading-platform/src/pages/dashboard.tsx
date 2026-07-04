@@ -417,7 +417,14 @@ export default function Dashboard() {
     refetchInterval: 10000,
     staleTime: 5000,
   });
-  const stats: JournalStats | undefined = (journalData as any)?.stats;
+  // Dashboard shows a clean slate every day — pull the day-scoped `todayStats`
+  // (win rate, streak, totals) rather than the all-time numbers. Full history
+  // still lives in Analytics for anyone who wants deeper detail.
+  const stats: JournalStats | undefined = useMemo(() => {
+    const today = (journalData as any)?.stats?.todayStats;
+    if (!today) return undefined;
+    return { ...today, todayProfit: today.totalProfit };
+  }, [journalData]);
 
   // Optimistic trade results — applied immediately when trade_completed SSE fires
   const [pendingResults, setPendingResults] = useState<PendingResult[]>([]);
@@ -663,12 +670,12 @@ export default function Dashboard() {
           </Card>
           <Card className="bg-card">
             <CardContent className="p-4">
-              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Total Profit</div>
+              <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Today's Profit</div>
               <div className={`text-2xl font-mono font-bold ${(displayStats?.totalProfit ?? 0) >= 0 ? "text-green-500" : "text-red-500"}`}>
                 {displayStats ? `${displayStats.totalProfit >= 0 ? "+" : ""}${displayStats.totalProfit.toFixed(2)}` : "—"}
               </div>
               <div className="text-xs text-muted-foreground mt-1">
-                today: {displayStats ? `${displayStats.todayProfit >= 0 ? "+" : ""}${displayStats.todayProfit.toFixed(2)}` : "—"}
+                resets daily · see Analytics for all-time
               </div>
             </CardContent>
           </Card>

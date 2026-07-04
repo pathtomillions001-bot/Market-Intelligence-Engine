@@ -490,15 +490,13 @@ router.post("/", async (req, res): Promise<void> => {
   res.status(201).json(formatTrade(trade));
 });
 
-// ── Shared: compute stats from a trade list ────────────────────────────────────
-// NOTE: trades must be sorted newest-first (Deriv profit_table default: sort:"DESC")
-function computeJournalStats(trades: any[]) {
+// ── Shared: compute the core stat shape from a trade list ───────────────────────
+// NOTE: trades should be sorted newest-first (Deriv profit_table default: sort:"DESC")
+// for the streak/longest-streak calculations to be correct.
+function computeStatsCore(trades: any[]) {
   const won = trades.filter((t) => t.won);
   const lost = trades.filter((t) => !t.won);
   const totalProfit = trades.reduce((s, t) => s + (t.profit ?? 0), 0);
-
-  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-  const today = trades.filter((t) => new Date(t.createdAt) >= todayStart);
 
   // Streak: iterate newest-first (trades[0] is most recent) — correct consecutive count
   let currentStreak = 0;
@@ -529,13 +527,33 @@ function computeJournalStats(trades: any[]) {
     avgProfit: trades.length > 0 ? Math.round((totalProfit / trades.length) * 100) / 100 : 0,
     bestTrade: won.length > 0 ? Math.max(...won.map((t) => t.profit ?? 0)) : 0,
     worstTrade: lost.length > 0 ? Math.min(...lost.map((t) => t.profit ?? 0)) : 0,
-    todayProfit: Math.round(today.reduce((s, t) => s + (t.profit ?? 0), 0) * 100) / 100,
-    todayTrades: today.length,
-    todayWon: today.filter((t) => t.won).length,
-    todayLost: today.filter((t) => !t.won).length,
     currentStreak,
     longestWinStreak: longestWin,
     longestLoseStreak: longestLoss,
+  };
+}
+
+// ── Shared: compute stats from a trade list ────────────────────────────────────
+// Returns BOTH the all-time stats (used by Analytics, which shows full historical
+// detail) and a `todayStats` sub-object scoped to the current calendar day (used by
+// the Dashboard and Journal header cards, which start on a clean slate every day —
+// no trades/win-rate/streak carried over from yesterday). `today*` scalar fields are
+// kept for backward compatibility with existing consumers.
+function computeJournalStats(trades: any[]) {
+  const allTime = computeStatsCore(trades);
+
+  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+  const today = trades.filter((t) => new Date(t.createdAt) >= todayStart);
+  const todayStats = computeStatsCore(today);
+
+  return {
+    ...allTime,
+    todayProfit: todayStats.totalProfit,
+    todayTrades: todayStats.totalTrades,
+    todayWon: todayStats.wonTrades,
+    todayLost: todayStats.lostTrades,
+    // Clean-slate view for Dashboard/Journal — everything scoped to "today" only.
+    todayStats,
   };
 }
 

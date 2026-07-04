@@ -43,6 +43,19 @@ interface JournalStats {
   currentStreak: number;
   longestWinStreak: number;
   longestLoseStreak: number;
+  todayStats?: {
+    totalTrades: number;
+    wonTrades: number;
+    lostTrades: number;
+    winRate: number;
+    totalProfit: number;
+    avgProfit: number;
+    bestTrade: number;
+    worstTrade: number;
+    currentStreak: number;
+    longestWinStreak: number;
+    longestLoseStreak: number;
+  };
 }
 
 function formatContractLabel(contractType: string, barrier: number | null): string {
@@ -129,7 +142,13 @@ export default function Trades() {
     ...journalTrades,
   ];
 
-  const stats = data?.stats;
+  // Journal header cards show a clean slate every day — pull the day-scoped
+  // `todayStats` rather than all-time numbers. Full history (and the trade list
+  // below) still shows everything; Analytics is the place for all-time detail.
+  const allTimeStats = data?.stats;
+  const stats = allTimeStats?.todayStats
+    ? { ...allTimeStats.todayStats, todayProfit: allTimeStats.todayStats.totalProfit, todayWon: allTimeStats.todayStats.wonTrades, todayLost: allTimeStats.todayStats.lostTrades }
+    : undefined;
   const isDerivSource = data?.source === "deriv";
 
   return (
@@ -174,7 +193,7 @@ export default function Trades() {
           </Card>
           <Card className="bg-card">
             <CardContent className="p-3">
-              <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Total Profit</div>
+              <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Today's Profit</div>
               <div className={`text-xl font-mono font-bold ${stats.totalProfit >= 0 ? "text-green-500" : "text-red-500"}`}>
                 {stats.totalProfit >= 0 ? "+" : ""}{stats.totalProfit.toFixed(2)}
               </div>
@@ -183,10 +202,8 @@ export default function Trades() {
           </Card>
           <Card className="bg-card">
             <CardContent className="p-3">
-              <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Today</div>
-              <div className={`text-xl font-mono font-bold ${stats.todayProfit >= 0 ? "text-green-500" : "text-red-500"}`}>
-                {stats.todayProfit >= 0 ? "+" : ""}{stats.todayProfit.toFixed(2)}
-              </div>
+              <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Today's Trades</div>
+              <div className="text-xl font-mono font-bold">{stats.totalTrades}</div>
               <div className="text-[10px] text-muted-foreground">{stats.todayWon}W / {stats.todayLost}L today</div>
             </CardContent>
           </Card>
@@ -197,7 +214,7 @@ export default function Trades() {
                 {stats.currentStreak >= 0 ? "+" : ""}{stats.currentStreak}
               </div>
               <div className="text-[10px] text-muted-foreground">
-                best win: {stats.longestWinStreak} / loss: {stats.longestLoseStreak}
+                best win: {stats.longestWinStreak} / loss: {stats.longestLoseStreak} (today)
               </div>
             </CardContent>
           </Card>
@@ -210,6 +227,9 @@ export default function Trades() {
           </Card>
         </div>
       )}
+      <div className="text-[10px] text-zinc-600 -mt-2">
+        Stats above reset daily. Full trade history and all-time performance are in Analytics.
+      </div>
 
       {/* Trade list */}
       <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">

@@ -15,3 +15,4 @@
 - [Continuous trading gates](continuous-trading-gates.md) — engine was freezing after 2 trades; EV gate, timing gate, drifting gate were all hard-blocking; fixed by widening MIN_POSITIVE_EV to -0.05 and making gates advisory except hard risk stops.
 - [Recovery state single source of truth](recovery-state-authority.md) — recordOutcome() is the sole writer of recovery state; never re-derive it from the (stale, cached) Deriv journal or DB — causes revert/flicker races.
 - [Recovery Intelligence v2](recovery-intelligence-v2.md) — evaluates all 8 OVER/UNDER candidates per market; symbol-scoped cache (family|symbol); hard gate skips coordinator when below threshold.
+- [Recovery epsilon + daily reset scope](recovery-epsilon-and-daily-reset.md) — recovery clearing needs a half-cent epsilon not exact float compare; Dashboard/Journal cards reset daily, Analytics stays all-time.

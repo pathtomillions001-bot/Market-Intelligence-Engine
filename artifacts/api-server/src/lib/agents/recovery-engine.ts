@@ -196,11 +196,17 @@ export function recordOutcome(
   if (won) {
     if (state.inRecovery) {
       const recovered = Math.max(0, profit);
-      if (recovered >= state.unrecoveredAmount) {
-        // Fully recovered — return to normal.
+      const remaining = state.unrecoveredAmount - recovered;
+      // Use a half-cent epsilon so floating-point accumulation across many partial
+      // recovery steps (e.g. 0.1 + 0.2 style drift) can never leave a phantom few
+      // cents of "debt" that rounds to $0.00 on screen but keeps the card stuck in
+      // recovery mode forever. Anything under half a cent counts as fully cleared.
+      if (remaining <= 0.005) {
+        // Fully recovered — return to normal immediately, regardless of whether the
+        // winning trade was placed manually or by the AI engine.
         state = freshState();
       } else {
-        state.unrecoveredAmount -= recovered;
+        state.unrecoveredAmount = remaining;
         // Streak is broken by a win, but the debt (and recovery mode) persists
         // until it is fully covered.
         state.streakLossCount = 0;
