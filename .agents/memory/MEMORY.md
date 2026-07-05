@@ -9,7 +9,8 @@
 - [Live trade P&L fix](live-trade-pnl.md) — failed live trades must use profit=String(-stake) not "0"; flash-card label should use formatContractLabel() to show "OVER 5" not "DIGITOVER".
 - [Multi-agent system](multi-agent-system.md) — 13-agent architecture in agent-coordinator.ts; old files kept for backward compat with master-decision.ts; Math.erfc not in Node.js — use inline Abramowitz & Stegun polyfill.
 - [Deriv contract settlement status](deriv-settlement-status.md) — waitForContractResult must check status "won"/"lost"/"expired" not just "sold"; is_sold can be 1 not true; profit sign determines won when status is ambiguous.
-- [Digit barriers fixed](digit-barriers-fixed.md) — engine always uses OVER 2 / UNDER 7 only; no tier-2 recovery barriers; ev-calculator tier-1 check is barrier===2 or barrier===7.
+- [Digit barriers — normal/recovery pair](digit-barriers-fixed.md) — settings-driven via recoveryEngine.isInRecovery(); only the autonomous loop applies the override, not manual trades.
+- [Live trade settlement fix](live-trade-settlement-poc-fix.md) — proposal_open_contracts rejected by Deriv for this account/app_id; waitForContractResult now polls portfolio+profit_table instead.
 - [Autonomous loop safety](autonomous-loop-safety.md) — isLoopRunning + open-trade DB guard + lastTradeCompletedAt (12s) + per-symbol cooldown (max 2 trades / 8min) prevent double execution; scheduleNext waits 15s after trade.
 - [Journal manager + no-fallback policy](journal-manager.md) — DerivJournalManager in deriv.ts: persistent WS, ping every 25s, reconnect if no pong 60s, profit_table refresh every 60s; no local DB fallback anywhere in journal/stats/daily-summary routes.
 - [Continuous trading gates](continuous-trading-gates.md) — engine was freezing after 2 trades; EV gate, timing gate, drifting gate were all hard-blocking; fixed by widening MIN_POSITIVE_EV to -0.05 and making gates advisory except hard risk stops.

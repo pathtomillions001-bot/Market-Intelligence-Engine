@@ -1,15 +1,13 @@
 ---
-name: Digit barriers fixed (OVER 2 / UNDER 7)
-description: The engine now always uses OVER 2 and UNDER 7 barriers only; all tier-2 recovery barriers have been removed.
+name: Digit barriers — settings-driven normal/recovery pair
+description: How OVER/UNDER barriers are selected today; supersedes the old "always OVER 2/UNDER 7, no recovery" rule.
 ---
 
 ## Rule
-The digit engine always uses OVER 2 / UNDER 7 as the only allowed barriers. No tier-2 (OVER 4 / UNDER 5) recovery barriers exist in the codebase.
+Recovery-digit switching was reintroduced (user-requested) and is settings-driven, not hardcoded. `recoveryEngine.isInRecovery()` in the autonomous loop (`ai.ts`) selects `{normalOverDigit, normalUnderDigit}` vs `{recoveryOverDigit, recoveryUnderDigit}` from Settings, passed as `ScanContext.recoveryBarrierOverride` and consumed by `buildBarrierOptions()` in `digit-probability.ts`. Manual (non-autonomous) trades do NOT apply this override — only the autonomous loop's per-market scan does.
 
-**Why:** User requested removal of all recovery logic. Tier-1 safe barriers give ~70% win rates; tier-2 barriers existed only for post-loss recovery and have been eliminated.
+**Why:** An earlier iteration removed all recovery barriers per a since-superseded user request; a later request restored settings-configurable normal/recovery pairs. Always check the current `digit-probability.ts` / `ai.ts` code rather than trusting a memory that a barrier set is "hardcoded" — this has flip-flopped before.
 
 **How to apply:**
-- `digit-agent.ts` — `ALLOWED_OVER = Set([2])`, `ALLOWED_UNDER = Set([7])`; `scoreAllBarriers()` only iterates these sets
-- `digit-probability.ts` — `ALLOWED_BARRIERS` also matches OVER 2 / UNDER 7
-- `ev-calculator.ts` — `isDigitTier1Result` check uses `barrier === 2` or `barrier === 7` (not 8)
-- Do NOT add OVER 4 / UNDER 5 back without also restoring the full recovery system
+- Before assuming barriers are fixed/hardcoded, grep for `ALLOWED_BARRIERS` default and `recoveryBarrierOverride` usage to see the current behavior.
+- If recovery-digit switching appears "not working," first verify trades are actually settling as won/lost (not erroring) — `recoveryEngine.recordOutcome()` only fires on real settlement. See [live trade settlement via portfolio+profit_table](live-trade-settlement-poc-fix.md).

@@ -1295,62 +1295,88 @@ export async function fetchDerivProfitTable(token: string, limit = 50): Promise<
   });
 }
 
+// NOTE: `proposal_open_contracts` is rejected outright ("UnrecognisedRequest") for this
+// account/app_id combination — verified independently outside the app (raw WS script,
+// with and without contract_id/subscribe, always errors). `portfolio` and `profit_table`
+// work fine, so we poll those instead: portfolio tells us when the contract has left the
+// open-contracts list, then profit_table gives us the ground-truth settled buy/sell price.
 export async function waitForContractResult(token: string, contractId: number, timeoutMs = 30000): Promise<ContractResult> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
-    const timeout = setTimeout(() => { ws.close(); reject(new Error("Contract result timeout")); }, timeoutMs + 10000);
     let authorized = false;
+    let settled = false;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+
+    const overallTimeout = setTimeout(() => finishError(new Error("Contract result timeout")), timeoutMs + 10000);
+
+    const cleanup = () => {
+      clearTimeout(overallTimeout);
+      if (pollInterval) clearInterval(pollInterval);
+      try { ws.close(); } catch { /* ignore */ }
+    };
+
+    const finishOk = (result: ContractResult) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+
+    const finishError = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
 
     ws.on("open", () => { ws.send(JSON.stringify({ authorize: token })); });
     ws.on("message", (data) => {
       try {
         const msg = JSON.parse(data.toString());
-        logger.info({ rawMsg: msg }, "waitForContractResult: received message");
-        if (msg.error) { clearTimeout(timeout); ws.close(); reject(new Error(msg.error.message)); return; }
+        if (msg.error) {
+          if (!authorized) { finishError(new Error(msg.error.message)); }
+          // ignore transient poll errors after authorization — just keep polling
+          return;
+        }
 
         if (msg.msg_type === "authorize" && !authorized) {
           authorized = true;
-          const pocPayload = { proposal_open_contracts: 1, contract_id: contractId, subscribe: 1 };
-          logger.info({ pocPayload }, "waitForContractResult: sending proposal_open_contracts");
-          ws.send(JSON.stringify(pocPayload));
+          const poll = () => { if (!settled) ws.send(JSON.stringify({ portfolio: 1 })); };
+          poll();
+          pollInterval = setInterval(poll, 1000);
         }
 
-        if (msg.msg_type === "proposal_open_contracts" && msg.proposal_open_contracts) {
-          const contract = msg.proposal_open_contracts;
-          // Deriv can return: is_sold=1, status="sold"|"won"|"lost"|"expired"
-          const settled =
-            contract.is_sold ||
-            Number(contract.is_sold) === 1 ||
-            contract.status === "sold" ||
-            contract.status === "won" ||
-            contract.status === "lost" ||
-            contract.status === "expired";
-          if (settled) {
-            clearTimeout(timeout);
-            ws.close();
-            // profit = net profit (positive for win, negative for loss)
-            // Prefer 'profit' field; fall back to sell_price - buy_price
-            const rawProfit = Number(contract.profit ?? 0);
-            const sellPrice = Number(contract.sell_price ?? 0);
-            const buyPrice = Number(contract.buy_price ?? contract.purchase_price ?? 0);
-            const profit = rawProfit !== 0 ? rawProfit : sellPrice - buyPrice;
-            // Determine win from status first, then profit sign
-            const won =
-              contract.status === "won" ? true :
-              contract.status === "lost" ? false :
-              profit > 0;
-            resolve({
+        if (msg.msg_type === "portfolio") {
+          const contracts: any[] = msg.portfolio?.contracts ?? [];
+          const stillOpen = contracts.some((c) => Number(c.contract_id) === contractId);
+          if (stillOpen) { return; }
+          // Contract no longer (or not yet) in the open-contracts list. Check
+          // profit_table for a settled record; if not found yet we simply keep
+          // polling on the next tick (handles both "not registered yet" and
+          // "already settled" without a race).
+          ws.send(JSON.stringify({ profit_table: 1, limit: 10, sort: "DESC" }));
+        }
+
+        if (msg.msg_type === "profit_table") {
+          const txs: any[] = msg.profit_table?.transactions ?? [];
+          const tx = txs.find((t) => Number(t.contract_id) === contractId);
+          if (tx) {
+            const buyPrice = Number(tx.buy_price ?? 0);
+            const sellPrice = Number(tx.sell_price ?? 0);
+            const profit = sellPrice - buyPrice;
+            finishOk({
               contractId,
-              won,
+              won: profit > 0,
               profit,
-              exitSpot: Number(contract.exit_tick ?? contract.current_spot ?? 0),
+              exitSpot: 0,
               sellPrice,
-              entrySpot: Number(contract.entry_tick ?? contract.entry_spot ?? 0),
+              entrySpot: 0,
             });
           }
+          // Not found yet — Deriv hasn't recorded it in profit_table yet, keep polling.
         }
-      } catch { /* ignore */ }
+      } catch { /* ignore parse errors */ }
     });
-    ws.on("error", (err) => { clearTimeout(timeout); reject(err); });
+    ws.on("error", (err) => { finishError(err); });
   });
 }

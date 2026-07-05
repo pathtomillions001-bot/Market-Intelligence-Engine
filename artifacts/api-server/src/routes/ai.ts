@@ -886,8 +886,9 @@ async function runAutonomousLoop() {
         profit = contractResult.profit;
         // Actual payout = stake returned + net profit (only when won; 0 when lost)
         actualPayout = won ? stake + profit : 0;
-        exitPrice = contractResult.exitSpot;
         entryPrice = contractResult.entrySpot || liveResult.buyPrice;
+        // profit_table doesn't expose tick-level exit spot; fall back to entry price for display
+        exitPrice = contractResult.exitSpot || entryPrice;
         await syncLiveBalance(token);
       } catch (liveErr) {
         const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);

@@ -333,8 +333,9 @@ router.post("/", async (req, res): Promise<void> => {
       won = contractResult.won;
       // Use Deriv's exact profit — ground truth for the journal
       profit = contractResult.profit;
-      exitPrice = contractResult.exitSpot;
       entryPrice = contractResult.entrySpot || liveResult.buyPrice;
+      // profit_table doesn't expose tick-level exit spot; fall back to entry price for display
+      exitPrice = contractResult.exitSpot || entryPrice;
     } catch (liveErr) {
       const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
       logger.warn({ liveErrMsg: errMsg, symbol, contractType, barrier }, "Live manual trade failed");
