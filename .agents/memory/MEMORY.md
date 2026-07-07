@@ -18,3 +18,4 @@
 - [Recovery Intelligence v2](recovery-intelligence-v2.md) — evaluates all 8 OVER/UNDER candidates per market; symbol-scoped cache (family|symbol); hard gate skips coordinator when below threshold.
 - [Recovery epsilon + daily reset scope](recovery-epsilon-and-daily-reset.md) — recovery clearing needs a half-cent epsilon not exact float compare; Dashboard/Journal cards reset daily, Analytics stays all-time.
 - [Risk engine bug fixes](risk-engine-fixes.md) — risk-intelligence used ctx.dailyPnl (undefined) + wrong maxDrawdown scale; recovery stake was inflated by conservativeFactor; recovery-intelligence not a hard gate in fusion.
+- [Digit barrier scoring](digit-barrier-scoring.md) — relative-favorability scoring (not absolute edge); user's barrier respected exactly; EV gate generalized from hardcoded 2/7/4/5 to theoretical win-rate tiers; OVER 9 / UNDER 0 rejected.

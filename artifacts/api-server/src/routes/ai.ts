@@ -168,10 +168,14 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     maxDrawdown:            s ? Number(s.maxDrawdown ?? 20) : 20,
     requirePositiveEv:      s?.requirePositiveEv ?? true,
     paperTradeMode:         s?.paperTradeMode ?? false,
-    normalOverDigit:        s?.normalOverDigit ?? 2,
-    normalUnderDigit:       s?.normalUnderDigit ?? 7,
-    recoveryOverDigit:      s?.recoveryOverDigit ?? 4,
-    recoveryUnderDigit:     s?.recoveryUnderDigit ?? 5,
+    // Clamp barriers to valid ranges as a safety net (validation is enforced in the
+    // settings route on write, but old DB rows or direct edits could bypass it).
+    // DIGITOVER barrier: 0–8  (OVER 9 = 0% win probability — impossible)
+    // DIGITUNDER barrier: 1–9 (UNDER 0 = 0% win probability — impossible)
+    normalOverDigit:        Math.min(8,  Math.max(0, s?.normalOverDigit  ?? 2)),
+    normalUnderDigit:       Math.min(9,  Math.max(1, s?.normalUnderDigit ?? 7)),
+    recoveryOverDigit:      Math.min(8,  Math.max(0, s?.recoveryOverDigit  ?? 4)),
+    recoveryUnderDigit:     Math.min(9,  Math.max(1, s?.recoveryUnderDigit ?? 5)),
   };
 }
 

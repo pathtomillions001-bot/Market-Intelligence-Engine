@@ -146,47 +146,65 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     rejectReasons.push(`Risk gate: ${riskDecision.hardStopReason}`);
   }
 
-  // ── Gate 2: EV gate (product-aware) ──────────────────────────────────────
-  // For tier-1 digit barriers (OVER 2, UNDER 8), positive EV is mathematically
-  // impossible: OVER 2 payout is 1.19x → breakeven win rate is 84% — unreachable.
-  // The real signal is EDGE: actual win rate > theoretical 70%.
-  // For all other products, require EV > -0.06.
+  // ── Gate 2: EV gate (barrier-characteristic-aware) ───────────────────────
+  // The user may configure ANY valid barrier (OVER 0–8, UNDER 1–9).
+  // We must NOT gate on specific hardcoded barrier values (2, 7, 4, 5) because
+  // those would silently ignore every other valid barrier the user might choose.
+  //
+  // Instead, gate on the THEORETICAL WIN RATE of the chosen barrier:
+  //
+  //   High win-rate barriers (theoretical ≥ 60%):
+  //     e.g. OVER 0/1/2/3, UNDER 7/8/9
+  //     Positive EV is mathematically impossible (payout doesn't compensate for
+  //     high win expectation). Gate on EDGE > 0 — actual win rate must exceed
+  //     the theoretical baseline, confirming a favourable market skew.
+  //
+  //   Mid-range barriers (theoretical 40–60%):
+  //     e.g. OVER 4/5, UNDER 4/5
+  //     These pay higher (1.63×–1.96×) but still rarely yield positive EV.
+  //     Allow EV ≥ -0.15 (wide gate — rely on relative-favourability scoring).
+  //
+  //   Low win-rate barriers (theoretical < 40%):
+  //     e.g. OVER 6/7/8, UNDER 1/2/3
+  //     High payout (2.45×–4.90×). Gate at EV ≥ -0.06 — closer to breakeven.
+  //
+  //   Direction products (CALL/PUT): EV ≥ -0.008 when consensus is high, else -0.06.
   if (!bestEV) {
     rejectReasons.push("No EV data — market data insufficient to evaluate");
   } else {
-    const isDigitTier1 = (
-      // OVER 2  → ~70% theoretical win, 1.19x payout — positive EV impossible; gate on edge
-      (bestEV.product === "DIGITOVER"  && bestEV.barrier === 2) ||
-      // UNDER 7 → ~70% theoretical win, 1.19x payout — mirrors OVER 2 (digit-probability.ts normal mode)
-      // NOTE: barrier 7 not 8; digit-probability.ts uses UNDER 7 as the normal-mode barrier
-      (bestEV.product === "DIGITUNDER" && bestEV.barrier === 7)
-    );
-    const isDigitTier2 = (
-      // OVER 4  → ~50% theoretical win, 1.50x payout — recovery mode barrier
-      (bestEV.product === "DIGITOVER"  && bestEV.barrier === 4) ||
-      // UNDER 5 → ~50% theoretical win, 1.50x payout — recovery mode barrier
-      (bestEV.product === "DIGITUNDER" && bestEV.barrier === 5)
-    );
+    const isDigitProduct = bestEV.product === "DIGITOVER" || bestEV.product === "DIGITUNDER";
 
-    if (isDigitTier1) {
-      // Tier-1: only require positive edge (win rate above theoretical).
-      // edge = winProbability - 1/payout. For OVER 2: theoretical win rate = 70%,
-      // so edge > 0 means the market has ≥70% digits in range 3-9 right now.
-      if (bestEV.edge <= 0) {
-        rejectReasons.push(
-          `No edge on ${bestEV.product} barrier=${bestEV.barrier}: ` +
-          `win rate ${(bestEV.winProbability * 100).toFixed(1)}% not above theoretical ` +
-          `${(bestEV.breakevenWinRate * 100).toFixed(0)}%`
-        );
+    if (isDigitProduct && bestEV.barrier !== undefined) {
+      // Derive the theoretical win rate for the user's chosen barrier
+      const theoreticalWinRate = bestEV.product === "DIGITOVER"
+        ? Math.max(0, (9 - bestEV.barrier) / 10)   // OVER N: wins when digit > N
+        : Math.max(0, bestEV.barrier / 10);          // UNDER N: wins when digit < N
+
+      if (theoreticalWinRate >= 0.60) {
+        // High win-rate barrier — positive EV impossible; gate on edge > 0
+        if (bestEV.edge <= 0) {
+          rejectReasons.push(
+            `No edge on ${bestEV.product} barrier=${bestEV.barrier}: ` +
+            `P(win)=${(bestEV.winProbability * 100).toFixed(1)}% not above ` +
+            `theoretical ${(theoreticalWinRate * 100).toFixed(0)}% baseline`
+          );
+        }
+      } else if (theoreticalWinRate >= 0.40) {
+        // Mid-range barrier — allow wider EV tolerance; scoring handles selection
+        if (bestEV.expectedValue < -0.15) {
+          rejectReasons.push(`Mid-range barrier EV too negative: ${(bestEV.expectedValue * 100).toFixed(1)}% on ${bestEV.product} ${bestEV.barrier}`);
+        }
+      } else {
+        // Low win-rate (high payout) barrier — require closer to breakeven
+        if (bestEV.expectedValue < -0.06) {
+          rejectReasons.push(`High-payout barrier EV too negative: ${(bestEV.expectedValue * 100).toFixed(1)}% on ${bestEV.product} ${bestEV.barrier}`);
+        }
       }
-    } else if (isDigitTier2) {
-      // Tier-2 (recovery): slightly wider EV gate — these pay more (1.50x) so bar is lower
-      if (bestEV.expectedValue < -0.15) {
-        rejectReasons.push(`Recovery barrier EV too negative: ${(bestEV.expectedValue * 100).toFixed(1)}%`);
+    } else if (!isDigitProduct) {
+      // Direction products (CALL/PUT/RISE/FALL)
+      if (bestEV.expectedValue < -0.06) {
+        rejectReasons.push(`EV too negative: ${(bestEV.expectedValue * 100).toFixed(1)}% — no tradeable opportunity`);
       }
-    } else if (bestEV.expectedValue < -0.06) {
-      // All other products: hard-block when EV is genuinely terrible
-      rejectReasons.push(`EV too negative: ${(bestEV.expectedValue * 100).toFixed(1)}% — no tradeable opportunity`);
     }
   }
   // requirePositiveEv is now advisory only (logged as a warning, not a blocker)

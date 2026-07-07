@@ -143,6 +143,30 @@ export function analyzeDigits(digits: number[]): {
   };
 }
 
+// ── Theoretical (random) win probability for any barrier ──────────────────────
+// This is the house's long-run expectation under a uniform digit distribution.
+// OVER N wins when last digit > N  → (9 - N) / 10 winning digits
+// UNDER N wins when last digit < N → N / 10 winning digits
+// Used as the baseline for relative-favorability scoring.
+
+export function theoreticalWinP(contractType: "DIGITOVER" | "DIGITUNDER", barrier: number): number {
+  if (contractType === "DIGITOVER") return Math.max(0, (9 - barrier) / 10);
+  return Math.max(0, barrier / 10);
+}
+
+// Validate a user-specified barrier. Returns an error string when invalid.
+// Invalid: DIGITOVER 9 (0 digits > 9, can never win)
+//          DIGITUNDER 0 (0 digits < 0, can never win)
+export function validateBarrier(contractType: "DIGITOVER" | "DIGITUNDER", barrier: number): string | null {
+  if (!Number.isInteger(barrier)) return `Barrier must be a whole number, got ${barrier}`;
+  if (contractType === "DIGITOVER") {
+    if (barrier < 0 || barrier > 8) return `DIGITOVER barrier must be 0–8; got ${barrier}. (OVER 9 is impossible — no digit exceeds 9.)`;
+  } else {
+    if (barrier < 1 || barrier > 9) return `DIGITUNDER barrier must be 1–9; got ${barrier}. (UNDER 0 is impossible — no digit is below 0.)`;
+  }
+  return null;
+}
+
 // ── Win probability for barriers using Markov + Bayesian ensemble ─────────────
 
 function winProbForBarrier(
@@ -172,40 +196,66 @@ function winProbForBarrier(
 
 // ── Barrier option builder ─────────────────────────────────────────────────────
 //
-// STRICT BARRIER POLICY:
-//   Always → ONLY OVER 2  and UNDER 7  (safe, consistent barriers)
+// USER-CONFIGURED BARRIER POLICY:
+//   Always trade EXACTLY the barrier the user configured in Settings.
+//   For normal mode: normalOverDigit / normalUnderDigit.
+//   For recovery mode: recoveryOverDigit / recoveryUnderDigit.
 //
-// All other barriers are excluded regardless of edge or EV score.
+// Invalid barriers (OVER 9, UNDER 0) are rejected — they can never win.
+// The AI does NOT pick a "better" barrier; it analyses market conditions
+// to find the optimal TIMING to enter the user's chosen barrier.
+//
+// Scoring is RELATIVE-FAVORABILITY based:
+//   theoreticalWinP  = long-run uniform-distribution probability for this barrier
+//   actualWinP       = Bayesian + Markov ensemble from live digit buffer
+//   relativeEdge     = actualWinP − theoreticalWinP
+//   score            = 50 + relativeEdge × 400   (clamped 10–95)
+//
+// This means a score of 50 = neutral (market is at the statistical baseline for
+// this barrier), > 50 = currently favourable, < 50 = currently unfavourable.
+// The engine will wait until the score clears the confidence threshold before
+// executing, so the AI always looks for the best moment to trade the user's digit.
 
-const ALLOWED_BARRIERS: Record<"DIGITOVER" | "DIGITUNDER", number> = {
+const DEFAULT_BARRIERS: Record<"DIGITOVER" | "DIGITUNDER", number> = {
   DIGITOVER:  2,
   DIGITUNDER: 7,
 };
 
 function buildBarrierOptions(
   analysis: ReturnType<typeof analyzeDigits>,
-  allowedBarriers: Record<"DIGITOVER" | "DIGITUNDER", number> = ALLOWED_BARRIERS,
+  allowedBarriers: Record<"DIGITOVER" | "DIGITUNDER", number> = DEFAULT_BARRIERS,
 ): BarrierOption[] {
   const options: BarrierOption[] = [];
 
   for (const [ct, payoutMap] of Object.entries(DIGIT_PAYOUTS)) {
     const contractType = ct as "DIGITOVER" | "DIGITUNDER";
+    const barrier = allowedBarriers[contractType];
 
-    for (const [bStr, payout] of Object.entries(payoutMap)) {
-      const barrier = Number(bStr);
-
-      // STRICT: only allow the one permitted barrier — OVER 2 / UNDER 7 normally,
-      // or OVER 4 / UNDER 5 while this family is in Recovery Mode.
-      if (barrier !== allowedBarriers[contractType]) continue;
-
-      const winP = winProbForBarrier(contractType, barrier, analysis);
-      const ev = winP * (payout - 1) - (1 - winP);
-      const edge = winP - (1 / payout);
-      const tier = DIGIT_TIERS[contractType]?.[barrier] ?? 2;
-      const adjustedEvScore = edge > 0 ? ev * 10 : ev;
-
-      options.push({ contractType, barrier, winProbability: winP, payout, expectedValue: ev, edge, tier, adjustedEvScore });
+    // Reject invalid barriers before touching any analysis
+    const validationError = validateBarrier(contractType, barrier);
+    if (validationError) {
+      // Skip this contract type — the engine will see an empty barrierOptions
+      // and score 50 (neutral), effectively pausing until settings are corrected.
+      continue;
     }
+
+    const payout = payoutMap[barrier as keyof typeof payoutMap];
+    if (!payout) continue; // barrier not in payout table (shouldn't happen after validation)
+
+    const winP = winProbForBarrier(contractType, barrier, analysis);
+    const ev   = winP * (payout - 1) - (1 - winP);
+    const edge = winP - (1 / payout);
+    const tier = DIGIT_TIERS[contractType]?.[barrier] ?? 2;
+
+    // Relative favorability: how much better (or worse) is the current market
+    // probability vs the long-run theoretical probability for this barrier.
+    const baselineWinP    = theoreticalWinP(contractType, barrier);
+    const relativeEdge    = winP - baselineWinP;  // positive = favourable conditions
+    // adjustedEvScore is used for ranking when both OVER and UNDER are analysed;
+    // use relative edge so both can score fairly regardless of payout tier.
+    const adjustedEvScore = relativeEdge;
+
+    options.push({ contractType, barrier, winProbability: winP, payout, expectedValue: ev, edge, tier, adjustedEvScore });
   }
 
   return options;
@@ -316,28 +366,52 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
   const barrierOptions = buildBarrierOptions(analysis, ctx.recoveryBarrierOverride);
   const evenAnalysis = analyzeEvenOdd(digits);
 
-  // Sort by adjustedEvScore
+  // Sort by relative edge (best conditions for user's chosen barrier first)
   const sorted = [...barrierOptions].sort((a, b) => b.adjustedEvScore - a.adjustedEvScore);
   const bestBarrier = sorted[0] ?? null;
 
-  // Score based on best barrier edge and data quality
+  // ── Relative-favorability scoring ─────────────────────────────────────────
+  // Score = 50 + (actualWinP − theoreticalWinP) × 400, scaled by data quality.
+  //
+  // Why relative rather than absolute edge:
+  //   The user explicitly chose their barrier (e.g. OVER 4). The AI's job is to
+  //   find the best TIMING to trade it, not to second-guess the choice. Absolute
+  //   edge is always negative for mid-range barriers (the house edge), which used
+  //   to make the score collapse to ~16 even during perfectly neutral conditions,
+  //   so the engine would never fire.
+  //
+  //   Relative edge compares today's actual probability to the barrier's baseline
+  //   (what you'd expect from a uniform distribution). A score > 50 means current
+  //   market conditions are more favourable than average for this barrier.
   const dataSufficiency = Math.min(1, digits.length / 100);
-  const edgeScore = bestBarrier
-    ? Math.min(95, Math.round(50 + bestBarrier.edge * 300))
-    : 50;
-  let score = Math.round(edgeScore * dataSufficiency + 50 * (1 - dataSufficiency));
 
-  // During a loss streak, penalise zero or negative edge strongly.
-  // The AI should never repeat a trade with no statistical edge after consecutive losses.
-  const sessionLosses = ctx.daily.consecutiveLosses;
-  if (sessionLosses >= 2 && bestBarrier) {
-    if (bestBarrier.edge <= 0) {
-      // No edge at all — strong penalty: effectively blocks this barrier in recovery
-      score = Math.max(10, score - 20);
-    } else if (sessionLosses >= 3 && bestBarrier.edge < 0.02) {
-      // Weak edge during a deeper streak — require at least 2% edge
-      score = Math.max(10, score - 12);
-    }
+  let score: number;
+  if (!bestBarrier) {
+    // No valid barrier configured (e.g. user set OVER 9 — impossible win).
+    // Score 30 so the trade is rejected but the engine doesn't hard-block.
+    score = 30;
+  } else {
+    const baselineWinP = theoreticalWinP(bestBarrier.contractType, bestBarrier.barrier);
+    const relativeEdge = bestBarrier.winProbability - baselineWinP;
+
+    // 400 sensitivity: +0.10 above baseline → score 90, −0.10 → score 10.
+    const relativeScore = Math.round(50 + relativeEdge * 400);
+
+    // Hot/cold digit bonus: if the winning digits for this barrier are currently
+    // "hot" (appearing more than 15% above average), add a small boost.
+    // Must enumerate ALL winning digits, not just a fixed window of 5:
+    //   OVER N wins when digit > N  → digits N+1 … 9 (up to 9 digits for OVER 0)
+    //   UNDER N wins when digit < N → digits 0 … N-1 (up to 9 digits for UNDER 9)
+    const ct = bestBarrier.contractType as "DIGITOVER" | "DIGITUNDER";
+    const winningDigits: number[] = ct === "DIGITOVER"
+      ? Array.from({ length: 9 - bestBarrier.barrier }, (_, i) => bestBarrier.barrier + 1 + i)
+      : Array.from({ length: bestBarrier.barrier }, (_, i) => i);
+    const hotBonus = winningDigits.filter(d => analysis.hotDigits.includes(d)).length * 2;
+    const coldPenalty = winningDigits.filter(d => analysis.coldDigits.includes(d)).length * 2;
+
+    // Blend: relative score (primary) + data quality dampener + hot/cold nudge
+    const rawScore = relativeScore + hotBonus - coldPenalty;
+    score = Math.round(rawScore * dataSufficiency + 50 * (1 - dataSufficiency));
   }
 
   const isUniform = analysis.isUniform;
@@ -346,8 +420,13 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
     `${digits.length} digits. Chi-sq p=${analysis.chiSquarePValue.toFixed(3)} (${isUniform ? "uniform" : "skewed"}).`,
     `Hot: [${analysis.hotDigits.join(",")}]. Cold: [${analysis.coldDigits.join(",")}].`,
     bestBarrier
-      ? `Best barrier: ${bestBarrier.contractType} ${bestBarrier.barrier} | P(win)=${(bestBarrier.winProbability * 100).toFixed(1)}% | EV=${(bestBarrier.expectedValue * 100).toFixed(1)}%.`
-      : "No suitable barrier found.",
+      ? (() => {
+          const bct = bestBarrier.contractType as "DIGITOVER" | "DIGITUNDER";
+          const baseline = theoreticalWinP(bct, bestBarrier.barrier);
+          const rel = ((bestBarrier.winProbability - baseline) * 100).toFixed(1);
+          return `User barrier: ${bestBarrier.contractType} ${bestBarrier.barrier} | P(win)=${(bestBarrier.winProbability * 100).toFixed(1)}% (baseline ${(baseline * 100).toFixed(0)}%, ${Number(rel) >= 0 ? "+" : ""}${rel}pp) | EV=${(bestBarrier.expectedValue * 100).toFixed(1)}%.`;
+        })()
+      : "No valid barrier — check settings (OVER must be 0–8, UNDER must be 1–9).",
     `Even prob: ${(analysis.evenProbability * 100).toFixed(1)}% | Markov recommendation: ${evenAnalysis.recommendation}.`,
   ].join(" ");
 
