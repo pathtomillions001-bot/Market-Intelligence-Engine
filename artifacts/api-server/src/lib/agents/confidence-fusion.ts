@@ -52,18 +52,19 @@ export interface FusionResult {
 // Base per-agent weights — used when dynamic-confidence hasn't accumulated
 // enough data yet. Once ≥5 trades per agent are recorded, getDynamicWeights()
 // blends these with accuracy-driven multipliers automatically.
+// NOTE: Keep in sync with dynamic-confidence.ts BASE_WEIGHTS.
 const BASE_AGENT_WEIGHTS: Record<string, number> = {
-  marketScanner:       1.5,  // hard gate — ineligible market kills the trade
-  tickIntelligence:    0.8,
-  digitProbability:    1.2,  // direct EV predictor for digit contracts
-  riseFallAgent:       1.2,  // direct EV predictor for direction contracts
-  marketRegime:        1.0,
-  executionTiming:     0.7,  // advisory
-  recoveryIntelligence: 0.6,
-  riskIntelligence:    1.3,  // hard-stop authority
-  portfolioManager:    1.1,
-  learningAgent:       0.9,
-  patternDiscovery:    0.5,  // enhancement only
+  marketScanner:        1.5,  // hard gate — ineligible market kills the trade
+  tickIntelligence:     0.8,
+  digitProbability:     1.2,  // direct EV predictor for digit contracts
+  riseFallAgent:        1.2,  // direct EV predictor for direction contracts
+  marketRegime:         1.0,
+  executionTiming:      0.7,  // advisory
+  recoveryIntelligence: 1.2,  // raised: must carry real veto weight during loss streaks
+  riskIntelligence:     1.3,  // hard-stop authority
+  portfolioManager:     1.1,
+  learningAgent:        1.1,  // raised: historical calibration steers trade selection
+  patternDiscovery:     0.5,  // enhancement only
 };
 
 export function runConfidenceFusionAgent(
@@ -85,6 +86,12 @@ export function runConfidenceFusionAgent(
   }
   if (input.portfolioManagerScore < 20) {
     blockers.push("Portfolio manager: position limit reached");
+  }
+  // Recovery intelligence hard-gate: at ≥4 consecutive losses the recovery agent
+  // drops to score 15, triggering this explicit block (weighted averaging alone
+  // is not enough — we need a guaranteed veto to protect capital during severe streaks).
+  if (input.recoveryIntelligenceScore < 20) {
+    blockers.push("Recovery intelligence: consecutive loss limit — mandatory pause before next trade");
   }
 
   // ── Resolve dynamic weights (accuracy-driven, falls back to base) ────────────
@@ -149,9 +156,11 @@ export function runConfidenceFusionAgent(
   // based on recent win-rate, keeping it within [MIN_THRESHOLD, MAX_THRESHOLD].
   const historyAdjust = (input.learningAgentScore - 50) * 0.1; // ±5 adjustment
   const adaptiveBase = getAdaptiveConfidenceThreshold(ctx.settings.minConfidenceThreshold ?? 50);
-  // During a loss streak, raise the bar: each consecutive loss adds 3 points (max +15).
-  const lossStreakBoost = Math.min(sessionLosses * 3, 15);
-  const effectiveThreshold = Math.max(44, Math.min(75, adaptiveBase + historyAdjust + lossStreakBoost));
+  // During a loss streak, raise the bar aggressively: each consecutive loss adds 6 points
+  // (was 3), capped at +30 (was +15). This forces near-consensus from all agents before
+  // the engine takes another trade after repeated losses — critical for protecting capital.
+  const lossStreakBoost = Math.min(sessionLosses * 6, 30);
+  const effectiveThreshold = Math.max(44, Math.min(82, adaptiveBase + historyAdjust + lossStreakBoost));
 
   // ── 6. Enhancement signals ────────────────────────────────────────────────────
   if (input.patternDiscoveryScore > 70) enhancers.push("Pattern discovery: recognized profitable pattern");

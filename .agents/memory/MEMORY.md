@@ -17,3 +17,4 @@
 - [Recovery state single source of truth](recovery-state-authority.md) — recordOutcome() is the sole writer of recovery state; never re-derive it from the (stale, cached) Deriv journal or DB — causes revert/flicker races.
 - [Recovery Intelligence v2](recovery-intelligence-v2.md) — evaluates all 8 OVER/UNDER candidates per market; symbol-scoped cache (family|symbol); hard gate skips coordinator when below threshold.
 - [Recovery epsilon + daily reset scope](recovery-epsilon-and-daily-reset.md) — recovery clearing needs a half-cent epsilon not exact float compare; Dashboard/Journal cards reset daily, Analytics stays all-time.
+- [Risk engine bug fixes](risk-engine-fixes.md) — risk-intelligence used ctx.dailyPnl (undefined) + wrong maxDrawdown scale; recovery stake was inflated by conservativeFactor; recovery-intelligence not a hard gate in fusion.

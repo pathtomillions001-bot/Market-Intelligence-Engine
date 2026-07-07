@@ -8,10 +8,11 @@ import { logger } from "./lib/logger";
 import { loadPersistedToken } from "./routes/auth";
 import { tickManager, DERIV_MARKETS, APP_ID } from "./lib/deriv";
 import { loadWinRatesFromDb } from "./lib/win-rate-store";
+import { seedFromDb as seedLearningAgent } from "./lib/agents/learning-agent";
 import { loadCalibrationCache } from "./lib/calibration";
 import { loadRecoveryStateFromDb } from "./routes/ai";
 import { loadFromDb as loadDynamicConfidence } from "./lib/agents/dynamic-confidence";
-import { pool } from "@workspace/db";
+import { pool, db, marketWinRatesTable } from "@workspace/db";
 
 /** Ensure DB schema is applied — runs drizzle-kit push if tables are missing. */
 async function bootstrapDb() {
@@ -65,6 +66,19 @@ bootstrapDb().then(() => {
   loadCalibrationCache().catch((err) => logger.warn({ err }, "Calibration load on startup failed"));
   loadRecoveryStateFromDb().catch((err) => logger.warn({ err }, "Recovery state load on startup failed"));
   loadDynamicConfidence().catch((err) => logger.warn({ err }, "Dynamic confidence load on startup failed"));
+  // Seed the learning agent's in-memory win-rate store from the database so the
+  // AI has historical context immediately after a server restart rather than
+  // starting from scratch and having to re-learn which markets/contracts perform well.
+  db.select().from(marketWinRatesTable).then((rows: typeof marketWinRatesTable.$inferSelect[]) => {
+    seedLearningAgent(rows.map((r: typeof marketWinRatesTable.$inferSelect) => ({
+      symbol:       r.symbol,
+      contractType: r.contractType,
+      barrier:      r.barrier,
+      winRate:      Number(r.winRate),
+      tradeCount:   r.tradeCount,
+    })));
+    logger.info({ count: rows.length }, "Learning agent seeded from historical win rates");
+  }).catch((err: unknown) => logger.warn({ err }, "Learning agent seed from DB failed"));
 });
 
 // Start persistent Deriv tick subscription for all synthetic markets

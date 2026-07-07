@@ -114,14 +114,20 @@ export function isInRecovery(): boolean {
 // ── Stake calculation ─────────────────────────────────────────────────────────
 
 /**
- * Compute the minimum stake required to recover `unrecoveredAmount` in a single
- * winning trade, then risk-adjust for win probability. Always cap at maxTradeStake
- * and never go below $0.35.
+ * Compute the MINIMUM stake required to recover `unrecoveredAmount` in a single
+ * winning trade. We use the exact mathematical minimum (unrecovered / netPayout)
+ * plus a tiny 2% rounding buffer — no inflation by win probability, which was
+ * inflating stakes well above what was needed and unnecessarily exposing capital.
+ *
+ * Example: lost $17.78 on a trade paying 1.63×
+ *   netPayout = 0.63
+ *   minRecovery = 17.78 / 0.63 = 28.22  →  with 2% buffer = $28.78
+ *   That stake at 1.63× yields profit of $18.13 — just enough to cover the loss.
  */
 function computeDynamicStake(
   unrecoveredAmount: number,
   payout: number,
-  blendedWinP: number,
+  _blendedWinP: number,   // intentionally unused — see note above
   balance: number,
   maxTradeStake: number,
   riskProfile: "conservative" | "moderate" | "aggressive",
@@ -129,21 +135,18 @@ function computeDynamicStake(
   const netPayout = payout - 1;
   if (netPayout <= 0) return 0.35;
 
-  // Minimum stake to fully recover in one win:
-  const minRecovery = unrecoveredAmount / netPayout;
+  // Exact minimum stake to fully recover in one winning trade,
+  // plus a 2% buffer to absorb Deriv's 2-decimal-place rounding.
+  const minRecovery = (unrecoveredAmount / netPayout) * 1.02;
 
-  // Risk-adjusted: account for the probability of winning — use conservative sizing
-  // so we don't over-expose. Conservative factor: divide by (0.7 * winP + 0.3)
-  const conservativeFactor = 0.7 * Math.max(0.4, blendedWinP) + 0.3;
-  const riskAdjusted = minRecovery / conservativeFactor;
-
-  // Profile-based max exposure (% of balance)
+  // Profile-based safety cap: never risk more than this fraction of balance
+  // on a single recovery trade, regardless of the unrecovered amount.
   const maxExposurePct = riskProfile === "conservative" ? 0.08
     : riskProfile === "aggressive" ? 0.20
     : 0.12;   // moderate
   const maxExposure = Math.min(balance * maxExposurePct, maxTradeStake);
 
-  return Math.max(0.35, Math.min(riskAdjusted, maxExposure));
+  return Math.max(0.35, Math.min(minRecovery, maxExposure));
 }
 
 /**

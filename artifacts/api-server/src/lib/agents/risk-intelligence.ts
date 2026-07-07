@@ -57,7 +57,9 @@ export function runRiskIntelligenceAgent(
   currentDrawdown = 0, // as fraction 0-1
 ): AgentOutput & { riskAssessment: RiskAssessment } {
   const t0 = Date.now();
-  const { balance, dailyPnl, settings } = ctx;
+  const { balance, daily, settings } = ctx;
+  // daily.profit is the authoritative daily P&L (negative = loss)
+  const dailyPnl = daily?.profit ?? 0;
 
   const blockers: string[] = [];
   const warnings: string[] = [];
@@ -68,13 +70,15 @@ export function runRiskIntelligenceAgent(
   const dailyLossRemaining = Math.max(0, dailyLossLimit - dailyLoss);
 
   if (dailyLoss >= dailyLossLimit) {
-    blockers.push(`Daily loss limit reached ($${dailyLoss.toFixed(2)} / $${dailyLossLimit.toFixed(2)})`);
+    blockers.push(`Daily loss limit reached (${dailyLoss.toFixed(2)} / ${dailyLossLimit.toFixed(2)})`);
   } else if (dailyLoss >= dailyLossLimit * 0.8) {
-    warnings.push(`Near daily loss limit: $${dailyLossRemaining.toFixed(2)} remaining`);
+    warnings.push(`Near daily loss limit: ${dailyLossRemaining.toFixed(2)} remaining`);
   }
 
   // ── 2. Max drawdown check ──────────────────────────────────────────────────
-  const maxDrawdown = settings.maxDrawdown ?? 0.1;
+  // settings.maxDrawdown is stored as a PERCENTAGE (e.g. 20 = 20%), but
+  // currentDrawdown is a fraction (0–1). Convert to fraction for comparison.
+  const maxDrawdown = (settings.maxDrawdown ?? 20) / 100;
   const drawdownBuffer = maxDrawdown - currentDrawdown;
 
   if (currentDrawdown >= maxDrawdown) {

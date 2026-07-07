@@ -23,6 +23,11 @@ import { adaptiveThresholdsTable } from "@workspace/db";
 import { logger } from "../logger";
 
 // ── Base weights (same as confidence-fusion.ts) ────────────────────────────────
+// recoveryIntelligence raised from 0.6 → 1.2 so its streak-based score penalty
+// has real pull in the weighted sum (it drops to 15-25 during a loss streak, which
+// drags the fusion score well below any reasonable threshold).
+// learningAgent raised from 0.9 → 1.1 so historical win-rate calibration has
+// meaningful influence on whether a trade is taken.
 const BASE_WEIGHTS: Record<string, number> = {
   marketScanner:        1.5,
   tickIntelligence:     0.8,
@@ -30,10 +35,10 @@ const BASE_WEIGHTS: Record<string, number> = {
   riseFallAgent:        1.2,
   marketRegime:         1.0,
   executionTiming:      0.7,
-  recoveryIntelligence: 0.6,
+  recoveryIntelligence: 1.2,   // raised: must carry real veto weight during loss streaks
   riskIntelligence:     1.3,
   portfolioManager:     1.1,
-  learningAgent:        0.9,
+  learningAgent:        1.1,   // raised: historical calibration should steer trade selection
   patternDiscovery:     0.5,
 };
 

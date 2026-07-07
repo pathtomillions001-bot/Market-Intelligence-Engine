@@ -76,20 +76,24 @@ export function runRecoveryIntelligenceAgent(ctx: ScanContext): AgentOutput & { 
 
   // Score reflects how cautious the AI should be. A loss streak demands that every
   // other agent produces a much stronger signal before the engine takes the next trade.
-  // Each consecutive loss raises the evidence bar; at ≥4 losses only genuinely
-  // high-conviction setups (all other agents well above their thresholds) can fire.
+  // Thresholds are deliberately aggressive:
+  //   score < 20 → confidence-fusion hard-blocks the trade entirely
+  //   score 20-44 → heavy weight penalty in the fusion sum, typically pushes below threshold
+  // At ≥4 consecutive losses the hard-block fires, forcing a full wait for the
+  // mandatory consecutive-loss cooldown to activate via the loop-level check.
   const score =
-    sessionLosses >= 5 ? 18   // Severe streak — essentially veto all marginal setups
-    : sessionLosses >= 4 ? 28  // Strong caution — need near-consensus from all other agents
-    : sessionLosses >= 3 ? 38  // Warning — require positive EV AND strong timing
-    : sessionLosses >= 2 ? 48  // Elevated caution — tighten gates, demand real edge
-    : state.consecutiveWins >= 3 ? 80
-    : 70;
+    sessionLosses >= 4 ? 15   // Hard-block: 4 losses → confidence-fusion vetoes trade
+    : sessionLosses >= 3 ? 25  // Near-veto: only very high conviction all-agent consensus passes
+    : sessionLosses >= 2 ? 40  // Strong caution — tighten gates, demand real edge
+    : sessionLosses >= 1 ? 58  // Mild caution — slightly below normal
+    : state.consecutiveWins >= 3 ? 82
+    : 72;
 
   const cautionLabel =
-    sessionLosses >= 4 ? "SEVERE CAUTION"
-    : sessionLosses >= 3 ? "ELEVATED CAUTION"
-    : sessionLosses >= 2 ? "CAUTION"
+    sessionLosses >= 4 ? "HARD STOP (recovery intelligence veto)"
+    : sessionLosses >= 3 ? "SEVERE CAUTION"
+    : sessionLosses >= 2 ? "ELEVATED CAUTION"
+    : sessionLosses >= 1 ? "CAUTION"
     : "NORMAL";
 
   const reasoning = [
