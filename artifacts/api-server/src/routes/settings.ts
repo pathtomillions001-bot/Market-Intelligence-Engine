@@ -95,31 +95,6 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).paperTradeMode !== undefined) updateData.paperTradeMode = (updates as any).paperTradeMode;
   if ((updates as any).requirePositiveEv !== undefined) updateData.requirePositiveEv = (updates as any).requirePositiveEv;
   if ((updates as any).cooldownMinutes !== undefined) updateData.cooldownMinutes = (updates as any).cooldownMinutes;
-  // ── Digit barrier validation ───────────────────────────────────────────────
-  // DIGITOVER barrier: valid range 0–8  (OVER 9 is impossible — no digit > 9)
-  // DIGITUNDER barrier: valid range 1–9 (UNDER 0 is impossible — no digit < 0)
-  const overBarrierFields: Array<[string, "DIGITOVER"]> = [["normalOverDigit", "DIGITOVER"], ["recoveryOverDigit", "DIGITOVER"]];
-  const underBarrierFields: Array<[string, "DIGITUNDER"]> = [["normalUnderDigit", "DIGITUNDER"], ["recoveryUnderDigit", "DIGITUNDER"]];
-  for (const [field] of overBarrierFields) {
-    const v = (updates as any)[field];
-    if (v !== undefined) {
-      const n = Number(v);
-      if (!Number.isInteger(n) || n < 0 || n > 8) {
-        res.status(400).json({ error: `Invalid ${field}: must be 0–8. OVER 9 can never win (no digit exceeds 9).` });
-        return;
-      }
-    }
-  }
-  for (const [field] of underBarrierFields) {
-    const v = (updates as any)[field];
-    if (v !== undefined) {
-      const n = Number(v);
-      if (!Number.isInteger(n) || n < 1 || n > 9) {
-        res.status(400).json({ error: `Invalid ${field}: must be 1–9. UNDER 0 can never win (no digit is below 0).` });
-        return;
-      }
-    }
-  }
   if ((updates as any).normalOverDigit !== undefined) updateData.normalOverDigit = (updates as any).normalOverDigit;
   if ((updates as any).normalUnderDigit !== undefined) updateData.normalUnderDigit = (updates as any).normalUnderDigit;
   if ((updates as any).recoveryOverDigit !== undefined) updateData.recoveryOverDigit = (updates as any).recoveryOverDigit;
