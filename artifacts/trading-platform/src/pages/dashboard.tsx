@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   useGetTopMarket,
   useGetAiEngineStatus,
@@ -74,6 +74,23 @@ function formatCooldown(secs: number): string {
 // engine's own recovery state; it does NOT show a scanned candidate table.
 function RecoveryStatCard({ engine }: { engine: any }) {
   const active = engine?.recovery?.active;
+  const queryClient = useQueryClient();
+
+  const clearDebt = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/ai/recovery/clear-debt", { method: "POST" });
+      if (!res.ok) throw new Error((await res.json()).error ?? "Failed to clear debt");
+      return res.json();
+    },
+    onSuccess: () => {
+      toast.success("Recovery debt cleared — engine back to normal stake");
+      // Use the generated query key so the engine-status card refreshes immediately.
+      queryClient.invalidateQueries({ queryKey: ["/api/ai/engine/status"] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.message ?? "Failed to clear recovery debt");
+    },
+  });
 
   return (
     <Card className={`${active ? "bg-amber-500/5 border-amber-500/20" : "bg-card"}`}>
@@ -103,6 +120,13 @@ function RecoveryStatCard({ engine }: { engine: any }) {
                 <span>Partial win applied — debt remains until fully recovered</span>
               )}
             </div>
+            <button
+              onClick={() => clearDebt.mutate()}
+              disabled={clearDebt.isPending}
+              className="mt-2 w-full text-[10px] font-medium py-1 px-2 rounded border border-amber-500/30 text-amber-400/80 hover:bg-amber-500/10 hover:border-amber-500/50 hover:text-amber-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {clearDebt.isPending ? "Clearing…" : "Clear Debt"}
+            </button>
           </>
         ) : (
           <>

@@ -168,10 +168,13 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     maxDrawdown:            s ? Number(s.maxDrawdown ?? 20) : 20,
     requirePositiveEv:      s?.requirePositiveEv ?? true,
     paperTradeMode:         s?.paperTradeMode ?? false,
-    normalOverDigit:        s?.normalOverDigit ?? 2,
-    normalUnderDigit:       s?.normalUnderDigit ?? 7,
-    recoveryOverDigit:      s?.recoveryOverDigit ?? 4,
-    recoveryUnderDigit:     s?.recoveryUnderDigit ?? 5,
+    // Clamp digit barriers to valid Deriv ranges.
+    // OVER 0–8 are valid (OVER 9 is impossible — no digit > 9 exists).
+    // UNDER 1–9 are valid (UNDER 0 is impossible — no digit < 0 exists).
+    normalOverDigit:        Math.min(8, Math.max(0, s?.normalOverDigit ?? 2)),
+    normalUnderDigit:       Math.min(9, Math.max(1, s?.normalUnderDigit ?? 7)),
+    recoveryOverDigit:      Math.min(8, Math.max(0, s?.recoveryOverDigit ?? 4)),
+    recoveryUnderDigit:     Math.min(9, Math.max(1, s?.recoveryUnderDigit ?? 5)),
   };
 }
 
@@ -1442,6 +1445,30 @@ router.get("/intelligence/thresholds", async (_req, res): Promise<void> => {
  * (normalOverDigit/normalUnderDigit/recoveryOverDigit/recoveryUnderDigit), not
  * a scanned/ranked candidate table.
  */
+/**
+ * POST /api/ai/recovery/clear-debt
+ * Immediately zeroes the unrecovered debt so the engine returns to normal-stake
+ * trading. Future losses will accumulate fresh (smaller) debt as usual.
+ * This does NOT disable Recovery Mode — it only clears the current balance owed.
+ */
+router.post("/recovery/clear-debt", async (_req, res): Promise<void> => {
+  try {
+    recoveryEngine.resetAll();
+    // Persist the cleared state immediately so a server restart won't reload stale debt.
+    const [settings] = await db.select().from(settingsTable).limit(1);
+    if (settings) {
+      await db.update(settingsTable)
+        .set({ recoveryStateJson: recoveryEngine.serializeState(), updatedAt: new Date() } as any)
+        .where(eq(settingsTable.id, settings.id));
+    }
+    logger.info("Recovery debt cleared manually by user");
+    res.json({ success: true, message: "Recovery debt cleared — engine returning to normal stake" });
+  } catch (err) {
+    logger.error({ err }, "Failed to clear recovery debt");
+    res.status(500).json({ error: "Failed to clear recovery debt" });
+  }
+});
+
 router.get("/recovery/evaluation", async (_req, res): Promise<void> => {
   try {
     const state = recoveryEngine.getState();
