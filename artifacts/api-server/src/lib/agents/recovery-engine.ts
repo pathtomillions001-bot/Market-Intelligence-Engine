@@ -116,14 +116,22 @@ export function isInRecovery(): boolean {
 /**
  * Compute the MINIMUM stake required to recover `unrecoveredAmount` in a single
  * winning trade. We use the exact mathematical minimum (unrecovered / netPayout)
- * plus a tiny 2% rounding buffer — no inflation by win probability, which was
- * inflating stakes well above what was needed and unnecessarily exposing capital.
+ * plus a tiny 2% rounding buffer — no inflation by win probability.
  *
  * Example: lost $17.78 on a trade paying 1.63×
  *   netPayout = 0.63
  *   minRecovery = 17.78 / 0.63 = 28.22  →  with 2% buffer = $28.78
  *   That stake at 1.63× yields profit of $18.13 — just enough to cover the loss.
+ *
+ * BASE STAKE CAP (critical): if the formula produces a stake larger than
+ * MAX_RECOVERY_MULTIPLIER × the original base stake (because the chosen recovery
+ * contract has a low payout ratio), the stake is capped and partial recovery
+ * happens — the remaining debt stays active and the engine continues recovering
+ * over subsequent trades. This prevents one unlucky low-payout recovery choice
+ * from staking 3–5× what was originally risked.
  */
+const MAX_RECOVERY_MULTIPLIER = 3.0;
+
 function computeDynamicStake(
   unrecoveredAmount: number,
   payout: number,
@@ -131,6 +139,7 @@ function computeDynamicStake(
   balance: number,
   maxTradeStake: number,
   riskProfile: "conservative" | "moderate" | "aggressive",
+  baseStake: number,      // original normal-mode stake — used for the hard cap
 ): number {
   const netPayout = payout - 1;
   if (netPayout <= 0) return 0.35;
@@ -146,7 +155,12 @@ function computeDynamicStake(
     : 0.12;   // moderate
   const maxExposure = Math.min(balance * maxExposurePct, maxTradeStake);
 
-  return Math.max(0.35, Math.min(minRecovery, maxExposure));
+  // Hard cap: stake ≤ MAX_RECOVERY_MULTIPLIER × baseStake.
+  // If the needed stake exceeds this (low-payout contract), partial recovery
+  // happens — remaining debt persists until the next winning recovery trade.
+  const baseStakeCap = baseStake > 0 ? baseStake * MAX_RECOVERY_MULTIPLIER : maxTradeStake;
+
+  return Math.max(0.35, Math.min(minRecovery, maxExposure, baseStakeCap));
 }
 
 /**
@@ -172,6 +186,7 @@ export function getDynamicRecoveryStake(
 
   const raw = computeDynamicStake(
     state.unrecoveredAmount, payoutMultiplier, winProbability01, balance, maxTradeStake, riskProfile,
+    state.baseStake,
   );
   return Math.max(0.35, Math.min(raw, maxTradeStake));
 }

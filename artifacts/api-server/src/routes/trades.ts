@@ -58,7 +58,7 @@ async function getDerivTransactions(token: string): Promise<any[]> {
   }
   // Cache stale or empty — do a one-shot fetch and let the persistent manager update async
   try {
-    return await fetchDerivProfitTable(token, 200);
+    return await fetchDerivProfitTable(token, 500);
   } catch {
     // Use whatever is in cache even if stale
     return journalManager.getCached();

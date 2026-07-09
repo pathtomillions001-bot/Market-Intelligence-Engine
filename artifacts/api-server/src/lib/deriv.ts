@@ -929,7 +929,7 @@ class DerivJournalManager extends EventEmitter {
   /** Immediately request a fresh profit_table — call after any trade settles. */
   forceRefresh() {
     if (this.isAuthorized && this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 200 }));
+      this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 500 }));
     }
   }
 
@@ -943,7 +943,7 @@ class DerivJournalManager extends EventEmitter {
     if (this.refreshTimer) clearInterval(this.refreshTimer);
     this.refreshTimer = setInterval(() => {
       if (this.isAuthorized && this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 200 }));
+        this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 500 }));
       }
     }, 60_000);
   }
@@ -975,7 +975,7 @@ class DerivJournalManager extends EventEmitter {
           this.isAuthorized = true;
           this.reconnectDelay = 3000;
           logger.info({ loginId: msg.authorize.loginid }, "JournalManager: authorized, fetching profit table");
-          this.ws!.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 200 }));
+          this.ws!.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 500 }));
         }
         if (msg.msg_type === "profit_table" && msg.profit_table) {
           this.cachedTransactions = msg.profit_table.transactions ?? [];

@@ -18,3 +18,4 @@
 - [Recovery Intelligence v2](recovery-intelligence-v2.md) — evaluates all 8 OVER/UNDER candidates per market; symbol-scoped cache (family|symbol); hard gate skips coordinator when below threshold.
 - [Recovery epsilon + daily reset scope](recovery-epsilon-and-daily-reset.md) — recovery clearing needs a half-cent epsilon not exact float compare; Dashboard/Journal cards reset daily, Analytics stays all-time.
 - [Risk engine bug fixes](risk-engine-fixes.md) — risk-intelligence used ctx.dailyPnl (undefined) + wrong maxDrawdown scale; recovery stake was inflated by conservativeFactor; recovery-intelligence not a hard gate in fusion.
+- [Analytics filter + agent map](analytics-filter-agent-map.md) — date filter, toLocalDate() bucketing, today's summary uses allTrades, explicit AGENT_NAMES→AGENT_SCORE_KEYS map (string normalisation fails for "Rise/Fall Model"), recovery cap at 3×base.
