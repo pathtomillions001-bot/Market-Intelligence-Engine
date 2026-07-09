@@ -1,43 +1,37 @@
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import {
-  Brain, Target, AlertTriangle, TrendingUp, CheckCircle2,
-  XCircle, Lightbulb, Activity, BarChart3, Shield, Zap, Cpu,
+  Brain, Target, AlertTriangle, CheckCircle2, XCircle,
+  Lightbulb, Activity, BarChart3, Shield, Zap, Cpu,
+  TrendingUp, TrendingDown, ArrowRight,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { useMemo } from "react";
 
-// ── API helpers ───────────────────────────────────────────────────────────────
+// ── Data hooks ────────────────────────────────────────────────────────────────
 
 function useIntelligenceSummary() {
   return useQuery({
     queryKey: ["intelligence-summary"],
     queryFn: () => fetch("/api/ai/intelligence/summary").then(r => r.json()),
-    refetchInterval: 15_000,
-    staleTime: 8_000,
-    refetchOnWindowFocus: true,
+    refetchInterval: 15_000, staleTime: 8_000, refetchOnWindowFocus: true,
   });
 }
 
 function useRecentReports() {
   return useQuery({
-    queryKey: ["intelligence-reports"],
-    queryFn: () => fetch("/api/ai/intelligence/reports?limit=20").then(r => r.json()),
-    refetchInterval: 15_000,
-    staleTime: 8_000,
-    refetchOnWindowFocus: true,
+    queryKey: ["intelligence-reports-5"],
+    queryFn: () => fetch("/api/ai/intelligence/reports?limit=5").then(r => r.json()),
+    refetchInterval: 15_000, staleTime: 8_000, refetchOnWindowFocus: true,
   });
 }
 
 function useRecentMissed() {
   return useQuery({
     queryKey: ["intelligence-missed"],
-    queryFn: () => fetch("/api/ai/intelligence/missed?limit=15").then(r => r.json()),
-    refetchInterval: 15_000,
-    staleTime: 8_000,
-    refetchOnWindowFocus: true,
+    queryFn: () => fetch("/api/ai/intelligence/missed?limit=8").then(r => r.json()),
+    refetchInterval: 15_000, staleTime: 8_000, refetchOnWindowFocus: true,
   });
 }
 
@@ -45,9 +39,7 @@ function useThresholds() {
   return useQuery({
     queryKey: ["intelligence-thresholds"],
     queryFn: () => fetch("/api/ai/intelligence/thresholds").then(r => r.json()),
-    refetchInterval: 10_000,
-    staleTime: 5_000,
-    refetchOnWindowFocus: true,
+    refetchInterval: 10_000, staleTime: 5_000, refetchOnWindowFocus: true,
   });
 }
 
@@ -55,88 +47,138 @@ function useEngineStatus() {
   return useQuery({
     queryKey: ["engine-status-intel"],
     queryFn: () => fetch("/api/ai/engine/status").then(r => r.json()),
-    refetchInterval: 10_000,
-    staleTime: 5_000,
-    refetchOnWindowFocus: true,
+    refetchInterval: 10_000, staleTime: 5_000, refetchOnWindowFocus: true,
   });
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const AGENT_NAME_TO_KEY: Record<string, string> = {
+  "Market Scanner":        "marketScanner",
+  "Tick Intelligence":     "tickIntelligence",
+  "Digit Probability":     "digitProbability",
+  "Rise/Fall Model":       "riseFallAgent",
+  "Market Regime":         "marketRegime",
+  "Execution Timing":      "executionTiming",
+  "Confidence Fusion":     "confidenceFusion",
+  "Recovery Intelligence": "recoveryIntelligence",
+  "Risk Intelligence":     "riskIntelligence",
+  "Portfolio Manager":     "portfolioManager",
+  "Learning Agent":        "learningAgent",
+  "Pattern Discovery":     "patternDiscovery",
+  "Trade Explainability":  "tradeExplainability",
+};
+
+const AGENT_SHORT: Record<string, string> = {
+  "Market Scanner":        "Scanner",
+  "Tick Intelligence":     "Ticks",
+  "Digit Probability":     "Digits",
+  "Rise/Fall Model":       "Rise/Fall",
+  "Market Regime":         "Regime",
+  "Execution Timing":      "Timing",
+  "Confidence Fusion":     "Fusion",
+  "Recovery Intelligence": "Recovery",
+  "Risk Intelligence":     "Risk",
+  "Portfolio Manager":     "Portfolio",
+  "Learning Agent":        "Learning",
+  "Pattern Discovery":     "Patterns",
+  "Trade Explainability":  "Explainer",
+};
+
+const AGENT_ICON_COLORS: Record<string, string> = {
+  "Market Scanner":        "#06b6d4",
+  "Tick Intelligence":     "#8b5cf6",
+  "Digit Probability":     "#f59e0b",
+  "Rise/Fall Model":       "#10b981",
+  "Market Regime":         "#3b82f6",
+  "Execution Timing":      "#ec4899",
+  "Confidence Fusion":     "hsl(var(--primary))",
+  "Recovery Intelligence": "#ef4444",
+  "Risk Intelligence":     "#f97316",
+  "Portfolio Manager":     "#14b8a6",
+  "Learning Agent":        "#a855f7",
+  "Pattern Discovery":     "#eab308",
+  "Trade Explainability":  "#64748b",
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function pct(n: number | null | undefined) {
-  if (n == null) return "—";
-  return `${Math.round(n)}%`;
+  return n == null ? "—" : `${Math.round(n)}%`;
+}
+function fmt2(n: number) {
+  return isNaN(n) ? "0.00" : n.toFixed(2);
+}
+function scoreGrade(s: number): { ring: string; text: string; bg: string } {
+  if (s >= 70) return { ring: "border-green-500/40",  text: "text-green-400",  bg: "bg-green-500" };
+  if (s >= 50) return { ring: "border-yellow-500/40", text: "text-yellow-400", bg: "bg-yellow-500" };
+  return           { ring: "border-red-500/40",    text: "text-red-400",    bg: "bg-red-500" };
+}
+function confLabel(a: string) {
+  if (a === "too_high") return { text: "Overconfident",  cls: "border-red-500/40 text-red-400" };
+  if (a === "too_low")  return { text: "Underconfident", cls: "border-yellow-500/40 text-yellow-400" };
+  return                       { text: "Calibrated",     cls: "border-green-500/40 text-green-400" };
 }
 
-function fmt2(n: number | null | undefined) {
-  if (n == null) return "—";
-  return n.toFixed(2);
-}
+// ── KPI bar ───────────────────────────────────────────────────────────────────
 
-function confidenceColor(assessment: string) {
-  if (assessment === "too_high") return "text-red-400";
-  if (assessment === "too_low")  return "text-yellow-400";
-  return "text-green-400";
-}
-
-function confidenceLabel(assessment: string) {
-  if (assessment === "too_high") return "Overconfident";
-  if (assessment === "too_low")  return "Underconfident";
-  return "Appropriate";
-}
-
-function scoreColor(score: number) {
-  if (score >= 65) return "text-green-400";
-  if (score >= 50) return "text-yellow-400";
-  return "text-red-400";
-}
-
-// ── Section: Overview cards ────────────────────────────────────────────────────
-
-function OverviewCards({ summary, missed }: { summary: any; missed: any }) {
-  const cards = [
+function KpiBar({ summary, missed }: { summary: any; missed: any }) {
+  const kpis = [
     {
-      label: "Trades Analyzed",
-      value: summary?.totalAnalyzed ?? 0,
       icon: Brain,
+      label: "Analyzed",
+      value: summary?.totalAnalyzed ?? 0,
+      sub: summary?.totalAnalyzed > 0 ? `${summary.winsAnalyzed}W · ${summary.lossesAnalyzed}L` : "No data yet",
       color: "text-primary",
-      sub: summary?.totalAnalyzed > 0 ? `${summary.winsAnalyzed}W / ${summary.lossesAnalyzed}L` : "Run trades to build intelligence",
+      accent: "from-primary/20",
     },
     {
-      label: "Avoidable Loss Rate",
-      value: summary?.totalAnalyzed > 0 ? `${summary.avoidableLossRate}%` : "—",
       icon: Shield,
-      color: summary?.avoidableLossRate > 30 ? "text-red-400" : "text-green-400",
+      label: "Avoidable Losses",
+      value: summary?.totalAnalyzed > 0 ? `${summary.avoidableLossRate}%` : "—",
       sub: `${summary?.avoidableLosses ?? 0} of ${summary?.lossesAnalyzed ?? 0} losses`,
+      color: (summary?.avoidableLossRate ?? 0) > 30 ? "text-red-400" : "text-green-400",
+      accent: "from-green-500/10",
     },
     {
+      icon: Target,
       label: "Confidence Accuracy",
       value: summary?.totalAnalyzed > 0 ? `${summary.appropriateConfidenceRate}%` : "—",
-      icon: Target,
-      color: summary?.appropriateConfidenceRate > 65 ? "text-green-400" : "text-yellow-400",
-      sub: "Appropriately calibrated",
+      sub: "Properly calibrated trades",
+      color: (summary?.appropriateConfidenceRate ?? 0) > 65 ? "text-green-400" : "text-yellow-400",
+      accent: "from-yellow-500/10",
     },
     {
-      label: "Missed Win Rate",
-      value: missed?.evaluated > 0 ? `${missed.wouldHaveWonRate}%` : "—",
       icon: AlertTriangle,
-      color: missed?.wouldHaveWonRate > 50 ? "text-yellow-400" : "text-green-400",
+      label: "Rejected Win Rate",
+      value: missed?.evaluated > 0 ? `${missed.wouldHaveWonRate}%` : "—",
       sub: `${missed?.wouldHaveWon ?? 0} of ${missed?.evaluated ?? 0} evaluated`,
+      color: (missed?.wouldHaveWonRate ?? 0) > 50 ? "text-yellow-400" : "text-green-400",
+      accent: "from-yellow-500/10",
     },
   ];
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-      {cards.map((card, i) => (
-        <motion.div key={card.label} initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.06 }}>
-          <Card className="bg-card border-border">
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      {kpis.map((k, i) => (
+        <motion.div
+          key={k.label}
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: i * 0.05 }}
+        >
+          <Card className={`bg-gradient-to-br ${k.accent} to-card border-border overflow-hidden`}>
             <CardContent className="p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-muted-foreground uppercase tracking-wider font-medium">{card.label}</span>
-                <card.icon className={`w-4 h-4 ${card.color}`} />
+              <div className="flex items-start justify-between">
+                <div>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">{k.label}</p>
+                  <p className={`text-2xl font-bold font-mono ${k.color}`}>{k.value}</p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">{k.sub}</p>
+                </div>
+                <div className={`p-2 rounded-lg bg-card/60`}>
+                  <k.icon className={`w-4 h-4 ${k.color}`} />
+                </div>
               </div>
-              <p className={`text-2xl font-bold font-mono ${card.color}`}>{card.value}</p>
-              {card.sub && <p className="text-xs text-muted-foreground mt-0.5">{card.sub}</p>}
             </CardContent>
           </Card>
         </motion.div>
@@ -145,470 +187,486 @@ function OverviewCards({ summary, missed }: { summary: any; missed: any }) {
   );
 }
 
-// ── Section: 13 Agents Live Intelligence ─────────────────────────────────────
+// ── Agent tile grid ───────────────────────────────────────────────────────────
 
-// Explicit name→agentId map matching AGENT_NAMES / AGENT_SCORE_KEYS in ai.ts
-// (string normalisation would mismap "Rise/Fall Model" → "risefallModel" ≠ "riseFallAgent")
-const AGENT_NAME_TO_KEY: Record<string, string> = {
-  "Market Scanner":        "marketScanner",
-  "Tick Intelligence":     "tickIntelligence",
-  "Digit Probability":     "digitProbability",
-  "Rise/Fall Model":       "riseFallAgent",
-  "Market Regime":         "marketRegime",
-  "Execution Timing":      "executionTiming",
-  "Confidence Fusion":     "confidenceFusion",       // meta-agent, no adaptive stats by design
-  "Recovery Intelligence": "recoveryIntelligence",
-  "Risk Intelligence":     "riskIntelligence",
-  "Portfolio Manager":     "portfolioManager",
-  "Learning Agent":        "learningAgent",
-  "Pattern Discovery":     "patternDiscovery",
-  "Trade Explainability":  "tradeExplainability",    // meta-agent, no adaptive stats by design
-};
+function AgentGrid({ engineStatus, dynamicStatus }: { engineStatus: any; dynamicStatus: any }) {
+  const statuses: any[] = engineStatus?.agentStatuses ?? [];
+  const accList: any[]  = dynamicStatus?.agentStats   ?? [];
 
-const AGENT_DESCRIPTIONS: Record<string, string> = {
-  "Market Scanner":       "Ranks all markets by opportunity quality",
-  "Tick Intelligence":    "Analyses tick patterns, noise, momentum",
-  "Digit Probability":    "Digit frequency, Markov chains, streaks",
-  "Rise/Fall Model":      "Directional bias, trend strength",
-  "Market Regime":        "Classifies trending / choppy / volatile",
-  "Execution Timing":     "Optimal entry window detection",
-  "Confidence Fusion":    "Weighted consensus of all agents",
-  "Recovery Intelligence":"Loss-streak gating, recovery safety",
-  "Risk Intelligence":    "Capital exposure, drawdown monitoring",
-  "Portfolio Manager":    "Position sizing, session balance",
-  "Learning Agent":       "Historical win-rate calibration per market",
-  "Pattern Discovery":    "Recurring pattern detection across trades",
-  "Trade Explainability": "Post-trade why-won/lost analysis",
-};
+  if (statuses.length === 0) {
+    return (
+      <Card className="bg-card border-border h-full">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            <Cpu className="w-4 h-4 text-primary" />
+            13 Agents · Live Intelligence
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex items-center justify-center py-12">
+          <div className="text-center">
+            <Cpu className="w-8 h-8 text-muted-foreground/30 mx-auto mb-2" />
+            <p className="text-xs text-muted-foreground">
+              Engine not running — start the autonomous engine to see live agent scores.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
 
-function AgentLiveStatus({ engineStatus, dynamicStatus }: { engineStatus: any; dynamicStatus: any }) {
-  const agentStatuses: Array<{ name: string; confidence: number }> = engineStatus?.agentStatuses ?? [];
-  const agentAccuracy: Array<{ agentId: string; accuracy: number; samples: number; dynamicWeight: number }> =
-    dynamicStatus?.agentStats ?? [];
-
-  // Merge live scores with accuracy data using the explicit name→key map
-  const merged = agentStatuses.map((a: any) => {
-    const key = AGENT_NAME_TO_KEY[a.name as string];  // explicit — no string normalisation
-    const acc = key ? (agentAccuracy.find(x => x.agentId === key) ?? null) : null;
+  const merged = statuses.map((a: any) => {
+    const key = AGENT_NAME_TO_KEY[a.name as string];
+    const acc = key ? (accList.find((x: any) => x.agentId === key) ?? null) : null;
     const isMeta = a.name === "Confidence Fusion" || a.name === "Trade Explainability";
-    return { name: a.name, liveScore: a.confidence, accuracy: acc?.accuracy ?? null, samples: acc?.samples ?? 0, weight: acc?.dynamicWeight ?? 1.0, isMeta };
+    const color = AGENT_ICON_COLORS[a.name] ?? "#71717a";
+    const grade = scoreGrade(a.confidence);
+    return { name: a.name, short: AGENT_SHORT[a.name] ?? a.name, score: a.confidence, accuracy: acc?.accuracy ?? null, samples: acc?.samples ?? 0, weight: acc?.dynamicWeight ?? 1.0, isMeta, color, grade };
   });
 
   return (
-    <Card className="bg-card border-border">
+    <Card className="bg-card border-border h-full">
       <CardHeader className="pb-3">
-        <CardTitle className="text-sm font-semibold flex items-center gap-2">
-          <Cpu className="w-4 h-4 text-primary" />
-          13 Agents — Live Scores &amp; Learning Status
-        </CardTitle>
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            <Cpu className="w-4 h-4 text-primary" />
+            13 Agents · Live Intelligence
+          </CardTitle>
+          <span className="text-[10px] text-muted-foreground">Score · Accuracy · Weight</span>
+        </div>
       </CardHeader>
       <CardContent>
-        {merged.length === 0 ? (
-          <p className="text-xs text-muted-foreground">Engine not running — start the autonomous engine to see live scores.</p>
-        ) : (
-          <div className="space-y-2.5">
-            {merged.map((agent: any) => (
-              <div key={agent.name}>
-                <div className="flex items-center gap-2 mb-0.5">
-                  <span className="text-xs text-muted-foreground w-36 shrink-0 truncate">{agent.name}</span>
-                  <Progress value={agent.liveScore} className="flex-1 h-1.5" />
-                  <span className={`text-xs font-mono font-medium w-9 text-right shrink-0 ${scoreColor(agent.liveScore)}`}>
-                    {Math.round(agent.liveScore)}
-                  </span>
-                  {agent.accuracy !== null ? (
-                    <span className={`text-[10px] font-mono w-10 text-right shrink-0 ${agent.accuracy > 55 ? "text-green-400" : agent.accuracy > 45 ? "text-yellow-400" : "text-red-400"}`}>
-                      {agent.accuracy}%✓
-                    </span>
-                  ) : (
-                    <span className="text-[10px] text-muted-foreground w-10 text-right shrink-0">—</span>
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
+          {merged.map((agent, i) => (
+            <motion.div
+              key={agent.name}
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ delay: i * 0.03 }}
+              className={`relative rounded-xl border p-3 ${agent.grade.ring} bg-secondary/20 overflow-hidden`}
+            >
+              {/* colour accent strip */}
+              <div
+                className="absolute top-0 left-0 right-0 h-0.5 rounded-t-xl"
+                style={{ backgroundColor: agent.color }}
+              />
+
+              <div className="flex items-start justify-between mb-2 mt-0.5">
+                <div>
+                  <p className="text-[10px] text-muted-foreground font-medium leading-tight">{agent.short}</p>
+                  {agent.isMeta && (
+                    <span className="text-[8px] text-muted-foreground/60 uppercase tracking-wider">meta</span>
                   )}
                 </div>
-                <p className="text-[9px] text-muted-foreground ml-[9.5rem] leading-tight">
-                  {AGENT_DESCRIPTIONS[agent.name] ?? ""}
-                  {agent.samples > 0 && (
-                    <span className="ml-1 text-primary/60">{agent.samples} samples · {agent.weight}× weight</span>
-                  )}
-                </p>
+                <span className={`text-lg font-mono font-bold leading-none ${agent.grade.text}`}>
+                  {Math.round(agent.score)}
+                </span>
               </div>
-            ))}
-          </div>
-        )}
-        <p className="text-[10px] text-muted-foreground mt-3 pt-2 border-t border-border">
-          Live score = current market quality (0–100). Accuracy% = how often the agent correctly predicted trade outcome. Dynamic weight = how much influence this agent has in future decisions.
+
+              {/* Score bar */}
+              <div className="w-full h-1 bg-secondary rounded-full overflow-hidden mb-2">
+                <div
+                  className={`h-full rounded-full transition-all duration-500 ${agent.grade.bg}`}
+                  style={{ width: `${agent.score}%` }}
+                />
+              </div>
+
+              {/* Accuracy + weight */}
+              <div className="flex items-center justify-between">
+                {agent.accuracy !== null ? (
+                  <span className={`text-[10px] font-mono ${agent.accuracy > 55 ? "text-green-400" : agent.accuracy > 45 ? "text-yellow-400" : "text-red-400"}`}>
+                    {agent.accuracy}% ✓
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-muted-foreground/50">—</span>
+                )}
+                {agent.samples > 0 && (
+                  <span className="text-[9px] text-muted-foreground">{agent.weight}×</span>
+                )}
+              </div>
+            </motion.div>
+          ))}
+        </div>
+
+        <p className="text-[10px] text-muted-foreground mt-3 pt-2.5 border-t border-border/60 flex items-center gap-1.5">
+          <Activity className="w-3 h-3" />
+          Score = current market quality (0–100) · Accuracy = correct outcome predictions · Weight = adaptive influence
         </p>
       </CardContent>
     </Card>
   );
 }
 
-// ── Section: Top findings ─────────────────────────────────────────────────────
+// ── Confidence engine panel ───────────────────────────────────────────────────
 
-function TopFindings({ findings, loading }: { findings: Array<{ finding: string; count: number }>; loading: boolean }) {
-  if (loading) {
-    return (
-      <Card className="bg-card border-border">
-        <CardHeader className="pb-3"><CardTitle className="text-sm font-semibold flex items-center gap-2"><Lightbulb className="w-4 h-4 text-yellow-400" /> Recurring Patterns Found</CardTitle></CardHeader>
-        <CardContent><p className="text-sm text-muted-foreground animate-pulse">Loading patterns…</p></CardContent>
-      </Card>
-    );
-  }
-
-  if (!findings || findings.length === 0) {
-    return (
-      <Card className="bg-card border-border">
-        <CardHeader className="pb-3"><CardTitle className="text-sm font-semibold flex items-center gap-2"><Lightbulb className="w-4 h-4 text-yellow-400" /> Recurring Patterns Found</CardTitle></CardHeader>
-        <CardContent><p className="text-sm text-muted-foreground">No patterns yet — more trades are needed to identify recurring signals.</p></CardContent>
-      </Card>
-    );
-  }
-
-  return (
-    <Card className="bg-card border-border">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-sm font-semibold flex items-center gap-2">
-          <Lightbulb className="w-4 h-4 text-yellow-400" />
-          Recurring Patterns Found
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-2">
-        {findings.map((f, i) => (
-          <div key={i} className="flex items-start gap-3 p-2 rounded bg-secondary/40">
-            <span className="text-xs font-mono font-bold text-primary mt-0.5 flex-shrink-0">{f.count}×</span>
-            <p className="text-xs text-foreground leading-relaxed">{f.finding}</p>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
-}
-
-// ── Section: Recent trade reports ────────────────────────────────────────────
-
-function RecentReports({ reports, loading }: { reports: any[]; loading: boolean }) {
-  if (loading) {
-    return (
-      <Card className="bg-card border-border">
-        <CardHeader className="pb-3"><CardTitle className="text-sm font-semibold flex items-center gap-2"><Brain className="w-4 h-4 text-primary" /> Recent Trade Analysis</CardTitle></CardHeader>
-        <CardContent><p className="text-sm text-muted-foreground animate-pulse">Loading analysis reports…</p></CardContent>
-      </Card>
-    );
-  }
-
-  if (!reports || reports.length === 0) {
-    return (
-      <Card className="bg-card border-border">
-        <CardHeader className="pb-3"><CardTitle className="text-sm font-semibold flex items-center gap-2"><Brain className="w-4 h-4 text-primary" /> Recent Trade Analysis</CardTitle></CardHeader>
-        <CardContent><p className="text-sm text-muted-foreground">No trade intelligence reports yet — run some trades to generate analysis.</p></CardContent>
-      </Card>
-    );
-  }
-
-  return (
-    <Card className="bg-card border-border">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-sm font-semibold flex items-center gap-2">
-          <Brain className="w-4 h-4 text-primary" />
-          Recent Trade Analysis ({reports.length})
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {reports.map((r: any) => (
-          <div key={r.id} className={`p-3 rounded-lg border ${r.won ? "border-green-500/20 bg-green-500/5" : "border-red-500/20 bg-red-500/5"}`}>
-            <div className="flex items-center justify-between mb-1.5">
-              <div className="flex items-center gap-2">
-                {r.won
-                  ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400 flex-shrink-0" />
-                  : <XCircle    className="w-3.5 h-3.5 text-red-400   flex-shrink-0" />
-                }
-                <span className="text-xs font-semibold font-mono">
-                  {r.symbol} · {r.contractType}{r.barrier != null ? ` @${r.barrier}` : ""}
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                {r.couldHaveAvoided && (
-                  <Badge variant="outline" className="text-[9px] border-yellow-500/50 text-yellow-400 px-1 py-0">Avoidable</Badge>
-                )}
-                <Badge variant="outline" className={`text-[9px] px-1 py-0 ${confidenceColor(r.confidenceAssessment)} border-current/30`}>
-                  {confidenceLabel(r.confidenceAssessment)}
-                </Badge>
-                <span className={`text-xs font-mono font-bold ${r.won ? "text-green-400" : "text-red-400"}`}>
-                  {r.won ? "+" : ""}{fmt2(Number(r.profit))}
-                </span>
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              {r.won ? r.whyWon : r.whyLost}
-            </p>
-            {r.avoidanceReason && (
-              <p className="text-xs text-yellow-400/80 mt-1 leading-relaxed">⚠ {r.avoidanceReason}</p>
-            )}
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
-}
-
-// ── Section: Missed Opportunities ────────────────────────────────────────────
-
-function MissedOpportunities({ summary, records, loading }: { summary: any; records: any[]; loading: boolean }) {
-  return (
-    <div className="space-y-4">
-      <Card className="bg-card border-border">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-semibold flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-yellow-400" />
-            Missed Opportunity Analysis
-            {loading && <Activity className="w-3 h-3 animate-spin text-muted-foreground ml-1" />}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {loading && !summary ? (
-            <p className="text-sm text-muted-foreground animate-pulse">Loading missed opportunity data…</p>
-          ) : (
-            <>
-              {/* Stats row */}
-              <div className="grid grid-cols-3 gap-3">
-                {[
-                  { label: "Correct Rejections", value: pct(summary?.correctRejectionRate), color: "text-green-400" },
-                  { label: "Too Strict",          value: pct(summary?.strictFilterRate),     color: "text-yellow-400" },
-                  { label: "Would've Won",         value: pct(summary?.wouldHaveWonRate),     color: "text-primary" },
-                ].map(stat => (
-                  <div key={stat.label} className="text-center">
-                    <p className={`text-xl font-bold font-mono ${stat.color}`}>{stat.value}</p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5 leading-tight">{stat.label}</p>
-                  </div>
-                ))}
-              </div>
-
-              {summary?.totalTracked === 0 && (
-                <p className="text-xs text-muted-foreground italic">
-                  No rejected trades tracked yet. When the engine rejects a trade, it monitors the outcome and reports here.
-                </p>
-              )}
-
-              {/* Top blocking filters */}
-              {summary?.topBlockingFilters?.length > 0 && (
-                <div>
-                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Top Blocking Filters</p>
-                  <div className="space-y-1.5">
-                    {summary.topBlockingFilters.slice(0, 5).map((f: any, i: number) => (
-                      <div key={i} className="flex items-center gap-2">
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs text-foreground truncate">{f.filter}</p>
-                        </div>
-                        <div className="flex items-center gap-2 flex-shrink-0">
-                          {f.tooStrictCount > 0 && (
-                            <span className="text-[9px] text-yellow-400 font-mono">{f.tooStrictCount} too strict</span>
-                          )}
-                          <Badge variant="outline" className="text-[9px] px-1 py-0">{f.count}×</Badge>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Recent missed */}
-              {records && records.length > 0 && (
-                <div>
-                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
-                    Recent Rejected Trades ({records.length})
-                  </p>
-                  <div className="space-y-2 max-h-48 overflow-y-auto">
-                    {records.slice(0, 10).map((r: any) => (
-                      <div key={r.id} className="flex items-center gap-2 p-2 rounded bg-secondary/40">
-                        <div className="flex-1 min-w-0">
-                          <span className="text-xs font-mono">{r.symbol} · {r.contractType}{r.barrier != null ? ` @${r.barrier}` : ""}</span>
-                          {r.evaluatedAt && (
-                            <span className={`ml-2 text-[10px] font-medium ${r.wouldHaveWon ? "text-yellow-400" : "text-green-400"}`}>
-                              {r.wouldHaveWon ? "Would've WON" : "Would've LOST"}
-                            </span>
-                          )}
-                          {!r.evaluatedAt && (
-                            <span className="ml-2 text-[10px] text-muted-foreground">Pending evaluation…</span>
-                          )}
-                        </div>
-                        <span className="text-[10px] text-muted-foreground truncate max-w-[120px]">{r.rejectReason?.slice(0, 40)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-// ── Section: Adaptive Thresholds ─────────────────────────────────────────────
-
-function AdaptiveThresholds({ status, loading }: { status: any; loading: boolean }) {
+function EnginePanel({ status, summary, loading }: { status: any; summary: any; loading: boolean }) {
   if (loading && !status) {
     return (
-      <Card className="bg-card border-border">
-        <CardHeader className="pb-3"><CardTitle className="text-sm font-semibold flex items-center gap-2"><Zap className="w-4 h-4 text-primary" /> Dynamic Confidence Engine</CardTitle></CardHeader>
-        <CardContent><p className="text-sm text-muted-foreground animate-pulse">Loading thresholds…</p></CardContent>
+      <Card className="bg-card border-border h-full">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            <Zap className="w-4 h-4 text-primary" /> Confidence Engine
+          </CardTitle>
+        </CardHeader>
+        <CardContent><p className="text-xs text-muted-foreground animate-pulse">Loading…</p></CardContent>
       </Card>
     );
   }
-  if (!status) return null;
+
+  const calBars = summary ? [
+    { label: "Calibrated",    value: summary.appropriateConfidenceRate ?? 0, color: "bg-green-500" },
+    { label: "Overconfident", value: summary.overconfidentRate ?? 0,          color: "bg-red-500" },
+    { label: "Under",         value: summary.underconfidentRate ?? 0,          color: "bg-yellow-500" },
+  ] : [];
 
   return (
-    <Card className="bg-card border-border">
+    <Card className="bg-card border-border h-full">
       <CardHeader className="pb-3">
         <CardTitle className="text-sm font-semibold flex items-center gap-2">
           <Zap className="w-4 h-4 text-primary" />
-          Dynamic Confidence Engine
+          Confidence Engine
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-5">
+
+        {/* Threshold trio */}
+        {status && (
+          <div className="grid grid-cols-3 gap-2 text-center">
+            {[
+              { label: "Min Score",  value: fmt2(status.confidenceThreshold), unit: "pts" },
+              { label: "Min EV",     value: `${(Number(status.evThreshold) * 100).toFixed(1)}`, unit: "%" },
+              { label: "Win Rate",   value: status.recentWinRate != null ? `${status.recentWinRate}` : "—", unit: status.recentWinRate != null ? "%" : "" },
+            ].map(t => (
+              <div key={t.label} className="rounded-lg bg-secondary/40 py-2.5 px-1">
+                <p className="text-base font-bold font-mono text-primary leading-none">
+                  {t.value}<span className="text-[9px] text-muted-foreground ml-0.5">{t.unit}</span>
+                </p>
+                <p className="text-[9px] text-muted-foreground mt-1 leading-tight">{t.label}</p>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {status && (
+          <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+            <Activity className="w-3 h-3 shrink-0" />
+            {status.tradesAnalyzed} analyzed · {status.recentSampleSize} recent
+          </div>
+        )}
+
+        {/* Calibration bars */}
+        {calBars.length > 0 && (
+          <div className="space-y-2">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium flex items-center gap-1.5">
+              <BarChart3 className="w-3 h-3" /> Calibration
+            </p>
+            {calBars.map(b => (
+              <div key={b.label}>
+                <div className="flex justify-between text-[10px] mb-0.5">
+                  <span className="text-muted-foreground">{b.label}</span>
+                  <span className="font-mono font-semibold">{b.value}%</span>
+                </div>
+                <div className="h-1 w-full bg-secondary rounded-full overflow-hidden">
+                  <div className={`${b.color} h-full rounded-full transition-all duration-500`} style={{ width: `${b.value}%` }} />
+                </div>
+              </div>
+            ))}
+            {summary && (
+              <div className="flex justify-between text-[10px] text-muted-foreground pt-1 border-t border-border/60">
+                <span>Avg agreement</span>
+                <span className="font-mono font-semibold text-foreground">{summary.avgAgentAgreement}/100</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Agent accuracy (compact — top 6 only) */}
+        {status?.agentStats?.filter((a: any) => a.samples > 0).length > 0 && (
+          <div className="space-y-1.5">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Top Agent Accuracy</p>
+            {status.agentStats
+              .filter((a: any) => a.samples > 0)
+              .sort((a: any, b: any) => b.accuracy - a.accuracy)
+              .slice(0, 6)
+              .map((agent: any) => (
+                <div key={agent.agentId} className="flex items-center gap-2">
+                  <span className="text-[10px] text-muted-foreground w-24 shrink-0 truncate">
+                    {agent.agentId.replace(/([A-Z])/g, " $1").trim()}
+                  </span>
+                  <Progress value={agent.accuracy} className="flex-1 h-1" />
+                  <span className={`text-[10px] font-mono w-8 text-right shrink-0 ${agent.accuracy > 55 ? "text-green-400" : agent.accuracy > 45 ? "text-yellow-400" : "text-red-400"}`}>
+                    {agent.accuracy}%
+                  </span>
+                </div>
+              ))}
+          </div>
+        )}
+
+        {status?.tradesAnalyzed < 10 && (
+          <p className="text-[10px] text-muted-foreground italic">
+            Dynamic weights activate after 5+ predictions per agent.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Recent trades (5) ─────────────────────────────────────────────────────────
+
+function RecentTrades({ reports, loading }: { reports: any[]; loading: boolean }) {
+  return (
+    <Card className="bg-card border-border h-full">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <Brain className="w-4 h-4 text-primary" />
+          Last 5 Trades
+          {loading && !reports.length && <Activity className="w-3 h-3 animate-spin text-muted-foreground" />}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {!reports.length ? (
+          <div className="flex flex-col items-center justify-center py-8 gap-2">
+            <Brain className="w-7 h-7 text-muted-foreground/25" />
+            <p className="text-xs text-muted-foreground text-center">
+              {loading ? "Loading…" : "No trade intelligence yet — run some trades."}
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {reports.slice(0, 5).map((r: any, i: number) => {
+              const conf = confLabel(r.confidenceAssessment ?? "");
+              const profit = Number(r.profit);
+              return (
+                <motion.div
+                  key={r.id}
+                  initial={{ opacity: 0, x: -8 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: i * 0.04 }}
+                  className={`rounded-lg border p-3 ${r.won ? "border-green-500/20 bg-green-500/5" : "border-red-500/20 bg-red-500/5"}`}
+                >
+                  {/* Top row */}
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      {r.won
+                        ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400 shrink-0" />
+                        : <XCircle      className="w-3.5 h-3.5 text-red-400   shrink-0" />
+                      }
+                      <span className="text-xs font-mono font-semibold truncate">
+                        {r.symbol} · {r.contractType}{r.barrier != null ? ` @${r.barrier}` : ""}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                      {r.couldHaveAvoided && (
+                        <Badge variant="outline" className="text-[8px] border-yellow-500/40 text-yellow-400 px-1 py-0 h-4">Avoidable</Badge>
+                      )}
+                      <Badge variant="outline" className={`text-[8px] px-1 py-0 h-4 ${conf.cls}`}>
+                        {conf.text}
+                      </Badge>
+                      <span className={`text-xs font-mono font-bold ${r.won ? "text-green-400" : "text-red-400"}`}>
+                        {r.won ? "+" : ""}{fmt2(profit)}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Reason */}
+                  <p className="text-[11px] text-muted-foreground leading-snug line-clamp-2">
+                    {r.won ? r.whyWon : r.whyLost}
+                  </p>
+                  {r.avoidanceReason && (
+                    <p className="text-[10px] text-yellow-400/80 mt-0.5 leading-snug line-clamp-1">⚠ {r.avoidanceReason}</p>
+                  )}
+                </motion.div>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Top findings ──────────────────────────────────────────────────────────────
+
+function TopFindings({ findings, loading }: { findings: any[]; loading: boolean }) {
+  return (
+    <Card className="bg-card border-border h-full">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <Lightbulb className="w-4 h-4 text-yellow-400" />
+          Recurring Patterns
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {loading && !findings.length ? (
+          <p className="text-xs text-muted-foreground animate-pulse">Detecting patterns…</p>
+        ) : findings.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-8 gap-2">
+            <Lightbulb className="w-7 h-7 text-muted-foreground/25" />
+            <p className="text-xs text-muted-foreground text-center">
+              Patterns emerge after more trades are analyzed.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {findings.slice(0, 6).map((f: any, i: number) => (
+              <motion.div
+                key={i}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: i * 0.05 }}
+                className="flex items-start gap-2.5 p-2.5 rounded-lg bg-secondary/30"
+              >
+                <span className="text-xs font-mono font-bold text-primary shrink-0 mt-0.5 w-5 text-right">{f.count}×</span>
+                <p className="text-xs text-foreground leading-relaxed">{f.finding}</p>
+              </motion.div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Missed opportunities (compact) ────────────────────────────────────────────
+
+function MissedCompact({ summary, records, loading }: { summary: any; records: any[]; loading: boolean }) {
+  return (
+    <Card className="bg-card border-border h-full">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-yellow-400" />
+          Rejected Trades
+          {loading && <Activity className="w-3 h-3 animate-spin text-muted-foreground" />}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-3 gap-3">
+
+        {/* Stat trio */}
+        <div className="grid grid-cols-3 gap-2 text-center">
           {[
-            { label: "Confidence Threshold", value: fmt2(status.confidenceThreshold), unit: "pts" },
-            { label: "EV Threshold",          value: `${(Number(status.evThreshold) * 100).toFixed(1)}`, unit: "%" },
-            { label: "Recent Win Rate",       value: status.recentWinRate != null ? `${status.recentWinRate}` : "—", unit: status.recentWinRate != null ? "%" : "" },
-          ].map(t => (
-            <div key={t.label} className="text-center">
-              <p className="text-lg font-bold font-mono text-primary">{t.value}<span className="text-xs text-muted-foreground ml-0.5">{t.unit}</span></p>
-              <p className="text-[10px] text-muted-foreground mt-0.5 leading-tight">{t.label}</p>
+            { label: "Correct", value: pct(summary?.correctRejectionRate), color: "text-green-400" },
+            { label: "Too Strict", value: pct(summary?.strictFilterRate),  color: "text-yellow-400" },
+            { label: "Won Rate",  value: pct(summary?.wouldHaveWonRate),   color: "text-primary" },
+          ].map(s => (
+            <div key={s.label} className="rounded-lg bg-secondary/40 py-2.5 px-1">
+              <p className={`text-base font-bold font-mono leading-none ${s.color}`}>{s.value}</p>
+              <p className="text-[9px] text-muted-foreground mt-1 leading-tight">{s.label}</p>
             </div>
           ))}
         </div>
 
-        <div className="text-xs text-muted-foreground flex items-center gap-1">
-          <Activity className="w-3 h-3" />
-          <span>{status.tradesAnalyzed} trades analyzed · {status.recentSampleSize} in recent window</span>
-        </div>
-
-        {status.agentStats && status.agentStats.length > 0 && (
-          <div>
-            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Agent Prediction Accuracy</p>
-            <div className="space-y-1.5">
-              {status.agentStats
-                .filter((a: any) => a.samples > 0)
-                .sort((a: any, b: any) => b.accuracy - a.accuracy)
-                .map((agent: any) => (
-                  <div key={agent.agentId} className="flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground w-36 flex-shrink-0 truncate capitalize">
-                      {agent.agentId.replace(/([A-Z])/g, " $1").trim()}
-                    </span>
-                    <Progress value={agent.accuracy} className="flex-1 h-1.5" />
-                    <span className={`text-xs font-mono font-medium w-10 text-right flex-shrink-0 ${agent.accuracy > 55 ? "text-green-400" : agent.accuracy > 45 ? "text-yellow-400" : "text-red-400"}`}>
-                      {agent.accuracy}%
-                    </span>
-                    <span className="text-[10px] text-muted-foreground w-12 text-right flex-shrink-0">
-                      {agent.dynamicWeight}×
-                    </span>
-                  </div>
-                ))}
-            </div>
+        {/* Empty hint */}
+        {(!summary || summary.totalTracked === 0) && (
+          <div className="flex flex-col items-center justify-center py-4 gap-1.5">
+            <Shield className="w-6 h-6 text-muted-foreground/25" />
+            <p className="text-[11px] text-muted-foreground text-center">
+              Rejected trades appear here once the engine starts filtering.
+            </p>
           </div>
         )}
 
-        {status.tradesAnalyzed < 10 && (
-          <p className="text-xs text-muted-foreground italic">
-            Dynamic weights activate after 5+ predictions per agent. Currently using base weights.
-          </p>
+        {/* Top blocking filters */}
+        {summary?.topBlockingFilters?.length > 0 && (
+          <div className="space-y-1.5">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Top Filters</p>
+            {summary.topBlockingFilters.slice(0, 4).map((f: any, i: number) => (
+              <div key={i} className="flex items-center gap-2">
+                <p className="text-[10px] text-foreground flex-1 truncate">{f.filter}</p>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {f.tooStrictCount > 0 && (
+                    <span className="text-[9px] text-yellow-400">{f.tooStrictCount}×⚠</span>
+                  )}
+                  <Badge variant="outline" className="text-[9px] px-1 py-0 h-4">{f.count}</Badge>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Recent rejected trades */}
+        {records && records.length > 0 && (
+          <div className="space-y-1.5">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Recent</p>
+            {records.slice(0, 5).map((r: any) => (
+              <div key={r.id} className="flex items-center gap-2 py-1 border-b border-border/40 last:border-0">
+                <div className="flex-1 min-w-0">
+                  <span className="text-[10px] font-mono">{r.symbol} · {r.contractType}{r.barrier != null ? ` @${r.barrier}` : ""}</span>
+                </div>
+                {r.evaluatedAt ? (
+                  <span className={`text-[9px] font-semibold shrink-0 ${r.wouldHaveWon ? "text-yellow-400" : "text-green-400"}`}>
+                    {r.wouldHaveWon ? "W↑" : "L↓"}
+                  </span>
+                ) : (
+                  <span className="text-[9px] text-muted-foreground shrink-0">…</span>
+                )}
+              </div>
+            ))}
+          </div>
         )}
       </CardContent>
     </Card>
   );
 }
 
-// ── Section: Confidence calibration chart ────────────────────────────────────
+// ── Learning pipeline strip ───────────────────────────────────────────────────
 
-function ConfidenceBreakdown({ summary, loading }: { summary: any; loading: boolean }) {
-  if (loading && !summary) return null;
-  if (!summary || summary.totalAnalyzed === 0) return null;
-
-  const bars = [
-    { label: "Appropriate",   value: summary.appropriateConfidenceRate, color: "bg-green-500" },
-    { label: "Overconfident", value: summary.overconfidentRate,          color: "bg-red-500" },
-    { label: "Underconfident",value: summary.underconfidentRate,          color: "bg-yellow-500" },
-  ];
-
-  return (
-    <Card className="bg-card border-border">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-sm font-semibold flex items-center gap-2">
-          <BarChart3 className="w-4 h-4 text-primary" />
-          Confidence Calibration
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {bars.map(bar => (
-          <div key={bar.label} className="space-y-1">
-            <div className="flex justify-between items-center">
-              <span className="text-xs text-muted-foreground">{bar.label}</span>
-              <span className="text-xs font-mono font-semibold">{bar.value}%</span>
-            </div>
-            <div className="w-full bg-secondary rounded-full h-1.5">
-              <div className={`${bar.color} h-1.5 rounded-full transition-all duration-500`} style={{ width: `${bar.value}%` }} />
-            </div>
-          </div>
-        ))}
-        <div className="pt-1 border-t border-border">
-          <div className="flex justify-between text-xs text-muted-foreground">
-            <span>Avg agent agreement</span>
-            <span className="font-mono font-semibold text-foreground">{summary.avgAgentAgreement}/100</span>
-          </div>
-          <div className="flex justify-between text-xs text-muted-foreground mt-1">
-            <span>Timing issues</span>
-            <span className="font-mono font-semibold text-foreground">{summary.timingIssueRate}%</span>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-// ── Learning data flow card ───────────────────────────────────────────────────
-
-function LearningDataFlow({ tradesAnalyzed }: { tradesAnalyzed: number }) {
+function LearningPipeline({ tradesAnalyzed }: { tradesAnalyzed: number }) {
   const steps = [
-    { label: "Trade executes", detail: "Manual or autonomous engine", done: true },
-    { label: "13-agent output recorded", detail: "Scores, confidence, reasoning captured", done: true },
-    { label: "Intelligence analysis runs", detail: "Why won/lost, avoidability, confidence calibration", done: true },
-    { label: "Dynamic weights updated", detail: "Agents that predicted correctly get more influence", done: tradesAnalyzed >= 5 },
-    { label: "Confidence threshold adapts", detail: "Auto-tightens when losing, relaxes when winning", done: tradesAnalyzed >= 10 },
+    { icon: TrendingUp,  label: "Trade executes",           detail: "Manual or autonomous",              done: true },
+    { icon: Cpu,         label: "13 agents score",          detail: "Confidence, EV, regime captured",   done: true },
+    { icon: Brain,       label: "Intelligence analysis",    detail: "Why won/lost, calibration check",   done: true },
+    { icon: BarChart3,   label: "Dynamic weights update",   detail: "Accurate agents gain influence",    done: tradesAnalyzed >= 5 },
+    { icon: Zap,         label: "Threshold adapts",         detail: "Tightens on losses, relaxes on wins", done: tradesAnalyzed >= 10 },
   ];
 
   return (
     <Card className="bg-card border-border">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-sm font-semibold flex items-center gap-2">
-          <TrendingUp className="w-4 h-4 text-green-400" />
-          Learning Data Flow
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-2">
-        {steps.map((step, i) => (
-          <div key={i} className="flex items-start gap-2.5">
-            <div className={`mt-0.5 w-4 h-4 rounded-full flex-shrink-0 flex items-center justify-center text-[9px] font-bold ${step.done ? "bg-green-500/20 text-green-400" : "bg-secondary text-muted-foreground"}`}>
-              {step.done ? "✓" : i + 1}
-            </div>
-            <div>
-              <p className={`text-xs font-medium ${step.done ? "text-foreground" : "text-muted-foreground"}`}>{step.label}</p>
-              <p className="text-[10px] text-muted-foreground">{step.detail}</p>
-            </div>
-          </div>
-        ))}
-        <div className="pt-2 border-t border-border">
-          <p className="text-[10px] text-muted-foreground">
+      <CardContent className="p-4">
+        <div className="flex items-center gap-1 mb-3">
+          <TrendingUp className="w-3.5 h-3.5 text-green-400" />
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium ml-1">
+            Self-Learning Pipeline
+          </span>
+          <span className="ml-auto text-[10px] text-muted-foreground">
             {tradesAnalyzed === 0
-              ? "Start trading to begin the learning cycle."
-              : `${tradesAnalyzed} trades analyzed. ${tradesAnalyzed < 5 ? `${5 - tradesAnalyzed} more needed for dynamic weights.` : "Dynamic weights active."}`}
-          </p>
+              ? "Waiting for first trade"
+              : `${tradesAnalyzed} trades analyzed · ${tradesAnalyzed >= 10 ? "All stages active" : tradesAnalyzed >= 5 ? "Stage 4 active" : "Stages 1–3 active"}`}
+          </span>
+        </div>
+        <div className="flex items-stretch gap-0">
+          {steps.map((step, i) => (
+            <div key={i} className="flex items-stretch flex-1 min-w-0">
+              {/* Step card */}
+              <div className={`flex-1 rounded-lg p-2.5 flex flex-col items-center text-center gap-1.5 border transition-colors ${
+                step.done
+                  ? "border-green-500/30 bg-green-500/5"
+                  : "border-border bg-secondary/20"
+              }`}>
+                <div className={`w-7 h-7 rounded-full flex items-center justify-center ${
+                  step.done ? "bg-green-500/20" : "bg-secondary"
+                }`}>
+                  <step.icon className={`w-3.5 h-3.5 ${step.done ? "text-green-400" : "text-muted-foreground"}`} />
+                </div>
+                <p className={`text-[10px] font-semibold leading-tight ${step.done ? "text-foreground" : "text-muted-foreground"}`}>
+                  {step.label}
+                </p>
+                <p className="text-[9px] text-muted-foreground leading-tight hidden sm:block">{step.detail}</p>
+              </div>
+              {/* Connector arrow */}
+              {i < steps.length - 1 && (
+                <div className="flex items-center px-1 shrink-0">
+                  <ArrowRight className={`w-3 h-3 ${step.done ? "text-green-500/50" : "text-muted-foreground/30"}`} />
+                </div>
+              )}
+            </div>
+          ))}
         </div>
       </CardContent>
     </Card>
   );
 }
 
-// ── Main page ─────────────────────────────────────────────────────────────────
+// ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Intelligence() {
   const { data: summaryData,    isLoading: summaryLoading }    = useIntelligenceSummary();
@@ -617,60 +675,72 @@ export default function Intelligence() {
   const { data: thresholdsData, isLoading: thresholdsLoading } = useThresholds();
   const { data: engineData }                                    = useEngineStatus();
 
-  const summary        = summaryData?.summary;
-  const missedSummary  = summaryData?.missedSummary;
-  const dynamicStatus  = summaryData?.dynamicStatus ?? thresholdsData;
-  const reports        = Array.isArray(reportsData) ? reportsData : [];
-  const missed         = Array.isArray(missedData)  ? missedData  : [];
+  const summary       = summaryData?.summary;
+  const missedSummary = summaryData?.missedSummary;
+  const dynamicStatus = summaryData?.dynamicStatus ?? thresholdsData;
+  const reports       = Array.isArray(reportsData) ? reportsData : [];
+  const missed        = Array.isArray(missedData)  ? missedData  : [];
   const tradesAnalyzed = dynamicStatus?.tradesAnalyzed ?? 0;
 
   return (
-    <div className="p-4 md:p-6 max-w-7xl mx-auto space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-          <Brain className="w-6 h-6 text-primary" />
-          Trade Intelligence
-        </h1>
-        <p className="text-sm text-muted-foreground mt-0.5">
-          Self-learning AI — all 13 agents feed outcomes back into this system after every trade
-        </p>
+    <div className="p-4 md:p-6 max-w-7xl mx-auto space-y-5">
+
+      {/* ── Header ─────────────────────────────────────────────────────── */}
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2.5">
+            <Brain className="w-6 h-6 text-primary" />
+            Trade Intelligence
+          </h1>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            Self-learning AI — 13 agents adapt after every trade
+          </p>
+        </div>
+        {tradesAnalyzed > 0 && (
+          <div className="text-right">
+            <p className="text-xs text-muted-foreground">Analyzed</p>
+            <p className="text-2xl font-mono font-bold text-primary">{tradesAnalyzed}</p>
+          </div>
+        )}
       </div>
 
-      {/* Overview KPI row — always visible once summary loads */}
-      {(summaryLoading && !summaryData) ? (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* ── KPI bar ────────────────────────────────────────────────────── */}
+      {summaryLoading && !summaryData ? (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           {[1,2,3,4].map(i => (
             <Card key={i} className="bg-card border-border animate-pulse">
-              <CardContent className="p-4 h-20" />
+              <CardContent className="p-4 h-[88px]" />
             </Card>
           ))}
         </div>
       ) : (
-        <OverviewCards summary={summary} missed={missedSummary} />
+        <KpiBar summary={summary} missed={missedSummary} />
       )}
 
-      {/* Main grid — each column loads independently */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left: recent reports + findings */}
-        <div className="lg:col-span-2 space-y-6">
-          <RecentReports reports={reports} loading={reportsLoading} />
-          <TopFindings findings={summary?.topFindings ?? []} loading={summaryLoading && !summaryData} />
+      {/* ── Row 2: Agent grid (hero) + Engine panel ─────────────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        <div className="lg:col-span-2">
+          <AgentGrid engineStatus={engineData} dynamicStatus={dynamicStatus} />
         </div>
-
-        {/* Right: adaptive engine + calibration + learning flow */}
-        <div className="space-y-6">
-          <AdaptiveThresholds status={dynamicStatus} loading={thresholdsLoading && !thresholdsData} />
-          <ConfidenceBreakdown summary={summary} loading={summaryLoading && !summaryData} />
-          <LearningDataFlow tradesAnalyzed={tradesAnalyzed} />
+        <div>
+          <EnginePanel
+            status={dynamicStatus}
+            summary={summary}
+            loading={thresholdsLoading && !thresholdsData}
+          />
         </div>
       </div>
 
-      {/* Full-width: 13-agent live status */}
-      <AgentLiveStatus engineStatus={engineData} dynamicStatus={dynamicStatus} />
+      {/* ── Row 3: Last 5 trades · Patterns · Rejected trades ──────────── */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+        <RecentTrades reports={reports} loading={reportsLoading} />
+        <TopFindings  findings={summary?.topFindings ?? []} loading={summaryLoading && !summaryData} />
+        <MissedCompact summary={missedSummary} records={missed} loading={missedLoading} />
+      </div>
 
-      {/* Full-width: missed opportunities */}
-      <MissedOpportunities summary={missedSummary} records={missed} loading={missedLoading} />
+      {/* ── Row 4: Learning pipeline (full-width) ──────────────────────── */}
+      <LearningPipeline tradesAnalyzed={tradesAnalyzed} />
+
     </div>
   );
 }
