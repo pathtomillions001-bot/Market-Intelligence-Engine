@@ -864,6 +864,7 @@ export const UpdateSettingsBody = zod.object({
   "normalUnderDigit": zod.number().optional(),
   "recoveryOverDigit": zod.number().optional(),
   "recoveryUnderDigit": zod.number().optional(),
+  "recoveryMethod": zod.string().optional(),
   "allowedMarkets": zod.union([zod.string(), zod.array(zod.string())]).optional()
 })
 

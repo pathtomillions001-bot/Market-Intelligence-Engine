@@ -51,7 +51,7 @@ export type MarketRegime =
 
 // ── Product-specific decision ─────────────────────────────────────────────────
 
-export type ProductType = "CALL" | "PUT" | "RISE" | "FALL" | "DIGITOVER" | "DIGITUNDER" | "DIGITEVEN" | "DIGITODD";
+export type ProductType = "CALL" | "PUT" | "RISE" | "FALL" | "DIGITOVER" | "DIGITUNDER" | "DIGITEVEN" | "DIGITODD" | "DIGITMATCH" | "DIGITDIFF";
 
 export interface ProductRecommendation {
   product: ProductType;
@@ -85,6 +85,8 @@ export interface TradingSettings {
   normalUnderDigit: number;
   recoveryOverDigit: number;
   recoveryUnderDigit: number;
+  recoveryMethod: "split" | "instant";
+  recoveryMultiplier: number;
 }
 
 export interface DailyStats {

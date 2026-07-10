@@ -8,7 +8,7 @@ import { motion } from "framer-motion";
 import { useState, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Info, TrendingUp, TrendingDown, Hash } from "lucide-react";
+import { Info, TrendingUp, TrendingDown, Hash, Equal, Shuffle } from "lucide-react";
 
 function SettingRow({ label, description, children }: { label: string; description?: string; children: React.ReactNode }) {
   return (
@@ -22,15 +22,16 @@ function SettingRow({ label, description, children }: { label: string; descripti
   );
 }
 
-function NumInput({ value, onChange, min, max, step = 1, suffix }: {
-  value: number; onChange: (v: number) => void; min?: number; max?: number; step?: number; suffix?: string;
+function NumInput({ value, onChange, min, max, step = 1, suffix, disabled }: {
+  value: number; onChange: (v: number) => void; min?: number; max?: number; step?: number; suffix?: string; disabled?: boolean;
 }) {
   return (
     <div className="flex items-center gap-1.5">
       <Input
         type="number" value={value} min={min} max={max} step={step}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="w-24 text-right font-mono text-sm bg-secondary/50"
+        disabled={disabled}
+        className="w-24 text-right font-mono text-sm bg-secondary/50 disabled:opacity-40"
       />
       {suffix && <span className="text-xs text-muted-foreground w-8">{suffix}</span>}
     </div>
@@ -63,6 +64,14 @@ const CONTRACT_GROUPS = [
     types: ["DIGITEVEN", "DIGITODD"],
     color: "violet",
   },
+  {
+    id: "matchDiff",
+    label: "Matches & Differs (Digits)",
+    icon: <Equal className="w-4 h-4" />,
+    desc: "Predict whether the last digit will match (MATCH) or differ from (DIFF) a specific digit. AI picks the hottest digit to match and coldest digit to differ from for positive EV.",
+    types: ["DIGITMATCH", "DIGITDIFF"],
+    color: "rose",
+  },
 ];
 
 export default function Settings() {
@@ -84,7 +93,8 @@ export default function Settings() {
     maxTradeStake: 500,
     autonomousEnabled: false,
     recoveryMode: false,
-    recoveryMultiplier: 1.2,
+    recoveryMethod: "split" as "split" | "instant",
+    recoveryMultiplier: 1.5,
     maxRecoverySteps: 3,
     normalOverDigit: 2,
     normalUnderDigit: 7,
@@ -113,7 +123,8 @@ export default function Settings() {
         maxTradeStake: (settings as any).maxTradeStake ?? 500,
         autonomousEnabled: settings.autonomousEnabled,
         recoveryMode: (settings as any).recoveryMode ?? false,
-        recoveryMultiplier: (settings as any).recoveryMultiplier ?? 1.2,
+        recoveryMethod: ((settings as any).recoveryMethod ?? "split") as "split" | "instant",
+        recoveryMultiplier: (settings as any).recoveryMultiplier ?? 1.5,
         maxRecoverySteps: (settings as any).maxRecoverySteps ?? 3,
         normalOverDigit: (settings as any).normalOverDigit ?? 2,
         normalUnderDigit: (settings as any).normalUnderDigit ?? 7,
@@ -124,7 +135,7 @@ export default function Settings() {
         requirePositiveEv: (settings as any).requirePositiveEv ?? true,
         preferredContractTypes: settings.preferredContractTypes.length > 0
           ? settings.preferredContractTypes.map((t: string) => t === "RISE" ? "CALL" : t === "FALL" ? "PUT" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i)
-          : ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"],
+          : ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD", "DIGITMATCH", "DIGITDIFF"],
         preferredCategories: (settings as any).preferredCategories?.length > 0
           ? (settings as any).preferredCategories
           : ["synthetic"],
@@ -256,10 +267,24 @@ export default function Settings() {
             <Switch checked={form.recoveryMode} onCheckedChange={(v) => set("recoveryMode", v)} />
           </SettingRow>
           <SettingRow
-            label="Recovery Multiplier"
-            description={`Stake is multiplied by this after each loss. At step ${form.maxRecoverySteps}, stake is ×${maxRecovery.toFixed(2)} of base.`}
+            label="Recovery Method"
+            description="Split: stake is capped at Multiplier × base stake per trade — recovery spreads across multiple wins. Instant: AI uses the minimum stake needed to recover the full loss in the next single winning trade."
           >
-            <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", v)} min={1.01} max={5} step={0.05} suffix="×" />
+            <Select value={form.recoveryMethod} onValueChange={(v) => set("recoveryMethod", v)}>
+              <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="split">Split</SelectItem>
+                <SelectItem value="instant">Instant</SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingRow>
+          <SettingRow
+            label="Recovery Multiplier"
+            description={form.recoveryMethod === "instant"
+              ? "Not used in Instant mode — AI sizes the stake to recover the exact lost amount."
+              : `Split mode cap: recovery stake will not exceed this multiple of the original base stake (e.g. 1.5 = max 1.5× base).`}
+          >
+            <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", v)} min={1.1} max={5} step={0.05} suffix="×" disabled={form.recoveryMethod === "instant"} />
           </SettingRow>
           <SettingRow
             label="Max Recovery Steps"

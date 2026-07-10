@@ -166,15 +166,17 @@ function buildAnalytics(trades: any[]): {
 }
 
 // ── Journal data hook ─────────────────────────────────────────────────────────
+// Uses the local DB as the primary source so autonomous, paper and manual trades
+// are all included with accurate createdAt timestamps that the period filter relies on.
 function useJournalTrades() {
-  const { data: journalData, isLoading } = useQuery({
-    queryKey: ["derivJournal-analytics"],
-    queryFn: () => fetch("/api/trades/deriv-journal").then(r => r.json()),
+  const { data: dbData, isLoading: dbLoading } = useQuery({
+    queryKey: ["analytics-db-trades"],
+    queryFn: () => fetch("/api/trades?limit=500").then(r => r.json()),
     refetchInterval: 20_000,
     staleTime: 10_000,
   });
-  const trades: any[] = (journalData as any)?.trades ?? [];
-  return { trades, isLoading };
+  const trades: any[] = Array.isArray(dbData) ? dbData.filter((t: any) => t.status === "won" || t.status === "lost") : [];
+  return { trades, isLoading: dbLoading };
 }
 
 // ── Filter helpers ────────────────────────────────────────────────────────────

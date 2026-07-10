@@ -159,7 +159,9 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
       (bestEV.product === "DIGITOVER"  && bestEV.barrier === 2) ||
       // UNDER 7 → ~70% theoretical win, 1.19x payout — mirrors OVER 2 (digit-probability.ts normal mode)
       // NOTE: barrier 7 not 8; digit-probability.ts uses UNDER 7 as the normal-mode barrier
-      (bestEV.product === "DIGITUNDER" && bestEV.barrier === 7)
+      (bestEV.product === "DIGITUNDER" && bestEV.barrier === 7) ||
+      // DIGITDIFF → ~90% theoretical win, 1.04x payout — gate on edge (win rate > 96.2% for positive EV)
+      bestEV.product === "DIGITDIFF"
     );
     const isDigitTier2 = (
       // OVER 4  → ~50% theoretical win, 1.50x payout — recovery mode barrier
@@ -167,8 +169,17 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
       // UNDER 5 → ~50% theoretical win, 1.50x payout — recovery mode barrier
       (bestEV.product === "DIGITUNDER" && bestEV.barrier === 5)
     );
+    const isDigitMatch = bestEV.product === "DIGITMATCH";
 
-    if (isDigitTier1) {
+    if (isDigitMatch) {
+      // DIGITMATCH → ~10% theoretical win, 9.0x payout — require positive EV
+      // (positive EV only when the matched digit appears >11.1% of the time)
+      if (bestEV.expectedValue <= 0) {
+        rejectReasons.push(
+          `DIGITMATCH digit=${bestEV.barrier}: EV ${(bestEV.expectedValue * 100).toFixed(1)}% — digit not hot enough to trade`,
+        );
+      }
+    } else if (isDigitTier1) {
       // Tier-1: only require positive edge (win rate above theoretical).
       // edge = winProbability - 1/payout. For OVER 2: theoretical win rate = 70%,
       // so edge > 0 means the market has ≥70% digits in range 3-9 right now.
@@ -251,10 +262,12 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     const wantDir = preferred.some((t) => ["CALL", "PUT", "RISE", "FALL"].includes(t));
     const wantOU  = preferred.some((t) => t === "DIGITOVER" || t === "DIGITUNDER");
     const wantEO  = preferred.some((t) => t === "DIGITEVEN" || t === "DIGITODD");
+    const wantMD  = preferred.some((t) => t === "DIGITMATCH" || t === "DIGITDIFF");
     const product: ProductType = wantDir
       ? (probUpLocal >= 0.5 ? "CALL" : "PUT")
       : wantOU  ? "DIGITOVER"
       : wantEO  ? "DIGITEVEN"
+      : wantMD  ? "DIGITMATCH"
       : (probUpLocal >= 0.5 ? "CALL" : "PUT");   // absolute last resort
     recommendation = {
       product,

@@ -121,6 +121,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   const wantDirection = preferred.some(t => ["RISE", "FALL", "CALL", "PUT"].includes(t));
   const wantDigit = preferred.some(t => ["DIGITOVER", "DIGITUNDER"].includes(t));
   const wantEvenOdd = preferred.some(t => ["DIGITEVEN", "DIGITODD"].includes(t));
+  const wantMatchDiff = preferred.some(t => ["DIGITMATCH", "DIGITDIFF"].includes(t));
 
   // ── Stage 1: Feature Engineering (data pipeline) ──────────────────────────
   const feAgent = runFeatureEngineeringAgent(ctx);
@@ -152,9 +153,11 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   // ── Stage 3.5: Duration Optimizer ─────────────────────────────────────────
   const candidateProduct = wantDigit
     ? (bestBarrier?.contractType ?? "DIGITOVER")
-    : wantDirection
-      ? (dirResult.direction === "up" ? "CALL" : "PUT")
-      : wantEvenOdd ? "DIGITEVEN" : "DIGITOVER";
+    : wantMatchDiff
+      ? "DIGITMATCH"
+      : wantDirection
+        ? (dirResult.direction === "up" ? "CALL" : "PUT")
+        : wantEvenOdd ? "DIGITEVEN" : "DIGITOVER";
 
   const durationOpt = selectOptimalDuration(ctx, features, regime, candidateProduct);
   const optimizedDuration = durationOpt.duration;
@@ -165,6 +168,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
     ...(wantDirection ? ["CALL", "PUT"] : []),
     ...(wantDigit ? ["DIGITOVER", "DIGITUNDER"] : []),
     ...(wantEvenOdd ? ["DIGITEVEN", "DIGITODD"] : []),
+    ...(wantMatchDiff ? ["DIGITMATCH", "DIGITDIFF"] : []),
   ];
 
   let livePayouts: Record<string, number> | null = null;
@@ -182,10 +186,40 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
     evenProb = ctx.digits.slice(-100).filter(d => d % 2 === 0).length / Math.min(100, ctx.digits.length);
   }
 
+  // Extend barrier options with DIGITMATCH/DIGITDIFF when preferred
+  const allBarrierOptions = [...barrierOptions];
+  if (wantMatchDiff && digitAgent.matchDiffersAnalysis && ctx.digits.length >= 30) {
+    const md = digitAgent.matchDiffersAnalysis;
+    if (preferred.includes("DIGITMATCH") && md.matchRecommended) {
+      allBarrierOptions.push({
+        contractType: "DIGITMATCH" as import("./agents/types").ProductType,
+        barrier: md.matchDigit,
+        winProbability: md.matchWinProbability,
+        payout: 9.00,
+        expectedValue: md.matchExpectedValue,
+        edge: md.matchEdge,
+        tier: 2,
+        adjustedEvScore: md.matchEdge > 0 ? md.matchExpectedValue * 10 : md.matchExpectedValue,
+      });
+    }
+    if (preferred.includes("DIGITDIFF") && md.diffRecommended) {
+      allBarrierOptions.push({
+        contractType: "DIGITDIFF" as import("./agents/types").ProductType,
+        barrier: md.diffDigit,
+        winProbability: md.diffWinProbability,
+        payout: 1.04,
+        expectedValue: md.diffExpectedValue,
+        edge: md.diffEdge,
+        tier: 1,
+        adjustedEvScore: md.diffEdge > 0 ? md.diffExpectedValue * 10 : md.diffExpectedValue,
+      });
+    }
+  }
+
   const evAgent = runEVCalculatorAgent(
     ctx,
     wantDirection ? dirResult : null,
-    wantDigit ? barrierOptions : [],
+    (wantDigit || wantMatchDiff) ? allBarrierOptions : [],
     livePayouts && Object.keys(livePayouts).length > 0 ? livePayouts : null,
     evenProb,
   );

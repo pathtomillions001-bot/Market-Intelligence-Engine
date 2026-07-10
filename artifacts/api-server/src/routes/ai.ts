@@ -175,6 +175,8 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     normalUnderDigit:       Math.min(9, Math.max(1, s?.normalUnderDigit ?? 7)),
     recoveryOverDigit:      Math.min(8, Math.max(0, s?.recoveryOverDigit ?? 4)),
     recoveryUnderDigit:     Math.min(9, Math.max(1, s?.recoveryUnderDigit ?? 5)),
+    recoveryMethod:         (s?.recoveryMethod === "instant" ? "instant" : "split") as "split" | "instant",
+    recoveryMultiplier:     s ? Math.max(1.1, Number(s.recoveryMultiplier ?? 1.5)) : 1.5,
   };
 }
 
@@ -778,6 +780,8 @@ async function runAutonomousLoop() {
         rec.payoutMultiplier,
         rec.winProbability / 100,
         tradingSettings.riskProfile,
+        tradingSettings.recoveryMultiplier,
+        tradingSettings.recoveryMethod,
       );
     }
 

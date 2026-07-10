@@ -15,6 +15,8 @@ import { scoreToSignal } from "./types";
 // ── Digit payout table (Deriv's actual payout schedule) ──────────────────────
 // OVER 0/UNDER 9 = lowest risk = lowest payout
 // OVER 8/UNDER 1 = highest risk = highest payout
+// DIGITMATCH barrier 0-9: ~9.00× (10% theoretical win rate)
+// DIGITDIFF  barrier 0-9: ~1.04× (90% theoretical win rate)
 export const DIGIT_PAYOUTS: Record<string, Record<number, number>> = {
   DIGITOVER: {
     0: 1.04, 1: 1.08, 2: 1.19, 3: 1.37, 4: 1.63,
@@ -23,6 +25,14 @@ export const DIGIT_PAYOUTS: Record<string, Record<number, number>> = {
   DIGITUNDER: {
     9: 1.04, 8: 1.08, 7: 1.19, 6: 1.37, 5: 1.63,
     4: 1.96, 3: 2.45, 2: 3.27, 1: 4.90,
+  },
+  DIGITMATCH: {
+    0: 9.00, 1: 9.00, 2: 9.00, 3: 9.00, 4: 9.00,
+    5: 9.00, 6: 9.00, 7: 9.00, 8: 9.00, 9: 9.00,
+  },
+  DIGITDIFF: {
+    0: 1.04, 1: 1.04, 2: 1.04, 3: 1.04, 4: 1.04,
+    5: 1.04, 6: 1.04, 7: 1.04, 8: 1.04, 9: 1.04,
   },
 };
 
@@ -211,6 +221,79 @@ function buildBarrierOptions(
   return options;
 }
 
+// ── Matches / Differs analysis ────────────────────────────────────────────────
+//
+// DIGITMATCH: win if last digit = chosen digit. Best choice: the "hot" digit
+//   (highest frequency). Positive EV when that digit's frequency > 1/payout = ~11.1%.
+//
+// DIGITDIFF:  win if last digit ≠ chosen digit. Best choice: the "hot" digit
+//   (differ from the most frequent one gives LOWEST win rate — actually we want
+//   to differ from the COLDEST digit so we almost always win). EV positive when
+//   frequency of chosen digit < (1 - 1/1.04) = ~3.8%.
+//
+// The agent returns the best match digit and best diff digit along with their
+// estimated win probabilities.
+
+export interface MatchDiffersAnalysis {
+  // DIGITMATCH: pick the digit predicted most likely to appear next
+  matchDigit: number;           // 0-9: best digit to match
+  matchWinProbability: number;  // estimated P(last digit = matchDigit)
+  matchExpectedValue: number;   // EV per $1 stake
+  matchEdge: number;            // winP - 1/payout
+  matchRecommended: boolean;    // true if EV > 0
+
+  // DIGITDIFF: pick the digit predicted least likely to appear next
+  diffDigit: number;            // 0-9: best digit to differ from
+  diffWinProbability: number;   // estimated P(last digit ≠ diffDigit)
+  diffExpectedValue: number;    // EV per $1 stake
+  diffEdge: number;             // winP - 1/payout
+  diffRecommended: boolean;     // true if EV > 0
+}
+
+export function analyzeMatchDiffers(
+  digits: number[],
+  analysis: ReturnType<typeof analyzeDigits>,
+): MatchDiffersAnalysis {
+  const MATCH_PAYOUT = 9.00;
+  const DIFF_PAYOUT  = 1.04;
+
+  // For DIGITMATCH: use ensemble of Bayesian + Markov next-digit probability
+  const ensembleProb = analysis.bayesianProb.map((bayP, d) => {
+    const markovP = analysis.markov.nextProb[d] ?? 0.1;
+    return bayP * 0.7 + markovP * 0.3;
+  });
+
+  // Best DIGITMATCH: digit with highest ensemble probability
+  let matchDigit = 0;
+  let matchWinP = 0;
+  for (let d = 0; d <= 9; d++) {
+    if (ensembleProb[d] > matchWinP) { matchWinP = ensembleProb[d]; matchDigit = d; }
+  }
+  const matchEV   = matchWinP * (MATCH_PAYOUT - 1) - (1 - matchWinP);
+  const matchEdge = matchWinP - 1 / MATCH_PAYOUT;
+
+  // Best DIGITDIFF: differ from the digit with the LOWEST ensemble probability
+  // (we are predicting "not that digit", so pick the rarest one to differ from
+  // so that P(win) = 1 - P(rarest digit) is maximised).
+  let diffDigit = 0;
+  let diffTargetP = 1;   // probability of the digit we'll differ FROM (want this LOW)
+  for (let d = 0; d <= 9; d++) {
+    if (ensembleProb[d] < diffTargetP) { diffTargetP = ensembleProb[d]; diffDigit = d; }
+  }
+  const diffWinP  = 1 - diffTargetP;
+  const diffEV    = diffWinP * (DIFF_PAYOUT - 1) - (1 - diffWinP);
+  const diffEdge  = diffWinP - 1 / DIFF_PAYOUT;
+
+  return {
+    matchDigit, matchWinProbability: matchWinP,
+    matchExpectedValue: matchEV, matchEdge,
+    matchRecommended: matchEV > 0 && digits.length >= 30,
+    diffDigit, diffWinProbability: diffWinP,
+    diffExpectedValue: diffEV, diffEdge,
+    diffRecommended: diffEV > 0 && digits.length >= 30,
+  };
+}
+
 // ── Even/Odd analysis ──────────────────────────────────────────────────────────
 
 export function analyzeEvenOdd(digits: number[]): {
@@ -287,6 +370,7 @@ export function analyzeEvenOdd(digits: number[]): {
 export interface DigitProbabilityOutput extends AgentOutput {
   barrierOptions: BarrierOption[];
   evenAnalysis: ReturnType<typeof analyzeEvenOdd>;
+  matchDiffersAnalysis: MatchDiffersAnalysis | null;
   bestBarrier: BarrierOption | null;
   frequency: number[];
   hotDigits: number[];
@@ -306,6 +390,7 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
       reasoning: `Insufficient digit data (${digits.length} samples — need ≥30).`,
       data: {}, executionTimeMs: Date.now() - t0,
       barrierOptions: [], evenAnalysis: analyzeEvenOdd([]),
+      matchDiffersAnalysis: null,
       bestBarrier: null, frequency: Array(10).fill(0.1),
       hotDigits: [], coldDigits: [], isUniform: true,
       evenProbability: 0.5, chiSquarePValue: 1,
@@ -315,6 +400,7 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
   const analysis = analyzeDigits(digits);
   const barrierOptions = buildBarrierOptions(analysis, ctx.recoveryBarrierOverride);
   const evenAnalysis = analyzeEvenOdd(digits);
+  const matchDiffersAnalysis = analyzeMatchDiffers(digits, analysis);
 
   // Sort by adjustedEvScore
   const sorted = [...barrierOptions].sort((a, b) => b.adjustedEvScore - a.adjustedEvScore);
@@ -349,7 +435,13 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
       ? `Best barrier: ${bestBarrier.contractType} ${bestBarrier.barrier} | P(win)=${(bestBarrier.winProbability * 100).toFixed(1)}% | EV=${(bestBarrier.expectedValue * 100).toFixed(1)}%.`
       : "No suitable barrier found.",
     `Even prob: ${(analysis.evenProbability * 100).toFixed(1)}% | Markov recommendation: ${evenAnalysis.recommendation}.`,
-  ].join(" ");
+    matchDiffersAnalysis.matchRecommended
+      ? `MATCH digit=${matchDiffersAnalysis.matchDigit} P=${(matchDiffersAnalysis.matchWinProbability * 100).toFixed(1)}%.`
+      : "",
+    matchDiffersAnalysis.diffRecommended
+      ? `DIFF digit=${matchDiffersAnalysis.diffDigit} P(win)=${(matchDiffersAnalysis.diffWinProbability * 100).toFixed(1)}%.`
+      : "",
+  ].filter(Boolean).join(" ");
 
   return {
     agentId: "digitProbability",
@@ -364,10 +456,12 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
       isUniform,
       evenProbability: analysis.evenProbability,
       chiSquarePValue: analysis.chiSquarePValue,
+      matchDiffersAnalysis,
     },
     executionTimeMs: Date.now() - t0,
     barrierOptions,
     evenAnalysis,
+    matchDiffersAnalysis,
     bestBarrier,
     frequency: analysis.frequency,
     hotDigits: analysis.hotDigits,

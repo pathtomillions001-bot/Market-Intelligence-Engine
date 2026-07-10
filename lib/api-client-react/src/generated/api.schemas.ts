@@ -489,6 +489,8 @@ export interface TradingSettings {
   recoveryOverDigit?: number;
   /** Digit barrier used for DIGITUNDER trades while in recovery mode */
   recoveryUnderDigit?: number;
+  /** Recovery method: split (gradual across wins) or instant (full recovery in one trade) */
+  recoveryMethod?: string;
 }
 
 export type TradingSettingsInputRiskProfile = typeof TradingSettingsInputRiskProfile[keyof typeof TradingSettingsInputRiskProfile];
@@ -526,6 +528,7 @@ export interface TradingSettingsInput {
   normalUnderDigit?: number;
   recoveryOverDigit?: number;
   recoveryUnderDigit?: number;
+  recoveryMethod?: string;
 }
 
 export type GetMarketsParams = {

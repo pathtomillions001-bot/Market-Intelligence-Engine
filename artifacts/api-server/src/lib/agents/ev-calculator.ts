@@ -202,7 +202,7 @@ export function runEVCalculatorAgent(
     allEV.push(...evForDirectionProducts(dirResult, payouts, stake, preferred));
   }
 
-  if (preferred.some((t) => t === "DIGITOVER" || t === "DIGITUNDER") && barrierOptions.length > 0) {
+  if (preferred.some((t) => t === "DIGITOVER" || t === "DIGITUNDER" || t === "DIGITMATCH" || t === "DIGITDIFF") && barrierOptions.length > 0) {
     allEV.push(...evForDigitProducts(barrierOptions, stake));
   }
 

@@ -44,6 +44,7 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     normalUnderDigit: s.normalUnderDigit,
     recoveryOverDigit: s.recoveryOverDigit,
     recoveryUnderDigit: s.recoveryUnderDigit,
+    recoveryMethod: (s as any).recoveryMethod ?? "split",
   };
 }
 
@@ -99,6 +100,7 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).normalUnderDigit !== undefined) updateData.normalUnderDigit = (updates as any).normalUnderDigit;
   if ((updates as any).recoveryOverDigit !== undefined) updateData.recoveryOverDigit = (updates as any).recoveryOverDigit;
   if ((updates as any).recoveryUnderDigit !== undefined) updateData.recoveryUnderDigit = (updates as any).recoveryUnderDigit;
+  if ((updates as any).recoveryMethod !== undefined) (updateData as any).recoveryMethod = (updates as any).recoveryMethod;
 
     const [updated] = await db.update(settingsTable)
       .set(updateData)

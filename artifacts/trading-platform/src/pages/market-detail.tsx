@@ -839,6 +839,119 @@ export default function MarketDetail() {
 
 
 
+      {/* Matches & Differs — only for digit markets */}
+      {isDigitMarket && digitStats && (
+        <Card className="bg-card">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <span className="text-base leading-none">🎯</span>
+              Matches &amp; Differs Intelligence
+              <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              <strong className="text-foreground">Matches</strong>: win if the last digit of the closing price equals your chosen digit. <strong className="text-foreground">Differs</strong>: win if the last digit is anything but your chosen digit. AI picks the statistically best digit for each.
+            </p>
+            {(() => {
+              // Compute best match (highest freq) and best diff (lowest freq) from live distribution
+              const dist: Array<{ digit: number; pct: number }> = digitStats.distribution ?? [];
+              if (dist.length === 0) return <p className="text-xs text-muted-foreground">Insufficient digit data.</p>;
+
+              const best = [...dist].sort((a, b) => b.pct - a.pct);
+              const matchDigit = best[0];       // hottest digit → best to match
+              const diffDigit  = best[best.length - 1]; // coldest → best to differ from
+
+              // EV estimates: MATCH pays ~9x, DIFF pays ~1.04x
+              const matchWinP = matchDigit.pct / 100;
+              const diffWinP  = 1 - diffDigit.pct / 100;
+              const matchEV   = matchWinP * 8.0 - (1 - matchWinP);
+              const diffEV    = diffWinP * 0.04 - (1 - diffWinP);
+
+              return (
+                <div className="grid grid-cols-2 gap-3">
+                  {/* DIGITMATCH */}
+                  <div className="space-y-2">
+                    <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Matches</div>
+                    <button
+                      onClick={() => openTradeDialog("DIGITMATCH", "up", matchDigit.digit)}
+                      className={`w-full flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
+                        matchEV > 0
+                          ? "border-green-500/60 bg-green-500/10"
+                          : "border-border bg-secondary/30 hover:border-green-500/30"
+                      }`}
+                    >
+                      <div className="text-[9px] font-mono text-muted-foreground">MATCH digit</div>
+                      <div className={`text-3xl font-mono font-bold mt-0.5 ${matchEV > 0 ? "text-green-400" : "text-foreground"}`}>{matchDigit.digit}</div>
+                      <div className="text-[10px] text-muted-foreground mt-1">freq {matchDigit.pct.toFixed(1)}% · P(win) {(matchWinP * 100).toFixed(1)}%</div>
+                      <div className={`text-[10px] font-mono mt-0.5 ${matchEV > 0 ? "text-green-500" : "text-zinc-600"}`}>
+                        EV {matchEV > 0 ? "+" : ""}{(matchEV * 100).toFixed(1)}%
+                      </div>
+                      {matchEV > 0 && <Badge className="mt-1.5 text-[9px] bg-green-500/20 text-green-400 border-green-500/30">AI EDGE</Badge>}
+                    </button>
+                    <div className="grid grid-cols-5 gap-1">
+                      {dist.map((d) => {
+                        const isHot = d.pct > 13;
+                        return (
+                          <button key={d.digit} onClick={() => openTradeDialog("DIGITMATCH", "up", d.digit)}
+                            className={`flex flex-col items-center p-1.5 rounded border text-center transition-all hover:scale-105 ${isHot ? "border-green-500/40 bg-green-500/8" : "border-border bg-secondary/20"}`}
+                          >
+                            <div className="text-[9px] text-muted-foreground">{d.digit}</div>
+                            <div className={`text-xs font-mono font-bold ${isHot ? "text-green-400" : "text-foreground"}`}>{d.pct.toFixed(0)}%</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {/* DIGITDIFF */}
+                  <div className="space-y-2">
+                    <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Differs</div>
+                    <button
+                      onClick={() => openTradeDialog("DIGITDIFF", "up", diffDigit.digit)}
+                      className={`w-full flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
+                        diffEV > 0
+                          ? "border-blue-500/60 bg-blue-500/10"
+                          : "border-border bg-secondary/30 hover:border-blue-500/30"
+                      }`}
+                    >
+                      <div className="text-[9px] font-mono text-muted-foreground">DIFFER from digit</div>
+                      <div className={`text-3xl font-mono font-bold mt-0.5 ${diffEV > 0 ? "text-blue-400" : "text-foreground"}`}>{diffDigit.digit}</div>
+                      <div className="text-[10px] text-muted-foreground mt-1">freq {diffDigit.pct.toFixed(1)}% · P(win) {(diffWinP * 100).toFixed(1)}%</div>
+                      <div className={`text-[10px] font-mono mt-0.5 ${diffEV > 0 ? "text-blue-500" : "text-zinc-600"}`}>
+                        EV {diffEV > 0 ? "+" : ""}{(diffEV * 100).toFixed(1)}%
+                      </div>
+                      {diffEV > 0 && <Badge className="mt-1.5 text-[9px] bg-blue-500/20 text-blue-400 border-blue-500/30">AI EDGE</Badge>}
+                    </button>
+                    <div className="grid grid-cols-5 gap-1">
+                      {dist.map((d) => {
+                        const isCold = d.pct < 7;
+                        return (
+                          <button key={d.digit} onClick={() => openTradeDialog("DIGITDIFF", "up", d.digit)}
+                            className={`flex flex-col items-center p-1.5 rounded border text-center transition-all hover:scale-105 ${isCold ? "border-blue-500/40 bg-blue-500/8" : "border-border bg-secondary/20"}`}
+                          >
+                            <div className="text-[9px] text-muted-foreground">{d.digit}</div>
+                            <div className={`text-xs font-mono font-bold ${isCold ? "text-blue-400" : "text-foreground"}`}>{d.pct.toFixed(0)}%</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+            <div className="p-2 rounded-lg bg-secondary/30 border border-border text-xs text-muted-foreground">
+              <span className="text-foreground font-medium">AI Signal: </span>
+              {digitStats.distribution && (() => {
+                const sorted = [...digitStats.distribution].sort((a: any, b: any) => b.pct - a.pct);
+                const hot = sorted[0];
+                const cold = sorted[sorted.length - 1];
+                return `Hot digit: ${hot.digit} (${hot.pct.toFixed(1)}%) — best for MATCH. Cold digit: ${cold.digit} (${cold.pct.toFixed(1)}%) — best for DIFF.`;
+              })()}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Trade dialog */}
       <Dialog open={tradeDialog} onOpenChange={setTradeDialog}>
         <DialogContent className="bg-card border-border max-w-sm">

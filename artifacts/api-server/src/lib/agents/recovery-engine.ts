@@ -95,6 +95,7 @@ async function persistToDb(): Promise<void> {
 /** Contract types the recovery engine tracks outcomes for. */
 const TRACKED_CONTRACT_TYPES = new Set([
   "CALL", "PUT", "RISE", "FALL", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD",
+  "DIGITMATCH", "DIGITDIFF",
 ]);
 
 export function isTrackedContract(contractType: string): boolean {
@@ -114,53 +115,65 @@ export function isInRecovery(): boolean {
 // ── Stake calculation ─────────────────────────────────────────────────────────
 
 /**
- * Compute the MINIMUM stake required to recover `unrecoveredAmount` in a single
- * winning trade. We use the exact mathematical minimum (unrecovered / netPayout)
- * plus a tiny 2% rounding buffer — no inflation by win probability.
+ * Compute the stake for a recovery trade.
  *
- * Example: lost $17.78 on a trade paying 1.63×
- *   netPayout = 0.63
- *   minRecovery = 17.78 / 0.63 = 28.22  →  with 2% buffer = $28.78
- *   That stake at 1.63× yields profit of $18.13 — just enough to cover the loss.
+ * SPLIT mode (default): cap stake at `baseStake × recoveryMultiplier`.
+ *   If the required stake exceeds this cap, partial recovery happens —
+ *   the remaining debt persists until the next winning recovery trade.
+ *   The multiplier comes from settings (default 1.5×), meaning the
+ *   recovery stake is at most 1.5× the original trade stake.
  *
- * BASE STAKE CAP (critical): if the formula produces a stake larger than
- * MAX_RECOVERY_MULTIPLIER × the original base stake (because the chosen recovery
- * contract has a low payout ratio), the stake is capped and partial recovery
- * happens — the remaining debt stays active and the engine continues recovering
- * over subsequent trades. This prevents one unlucky low-payout recovery choice
- * from staking 3–5× what was originally risked.
+ * INSTANT mode: no multiplier cap — use exactly the minimum stake needed
+ *   to recover the full unrecovered amount in one trade. Only the
+ *   profile-based exposure cap (% of balance) limits the stake.
+ *   The AI will attempt to recover everything in the very next win.
+ *
+ * In both modes the stake is floored at $0.35 and capped at maxTradeStake.
+ *
+ * Example (SPLIT): lost $17.78 on OVER 4 (payout 1.63×), recoveryMultiplier=1.5
+ *   minRecovery = 17.78 / 0.63 × 1.02 = $28.78
+ *   splitCap    = 17.78 × 1.5         = $26.67
+ *   final stake = $26.67  → partial recovery this trade, remainder next trade.
+ *
+ * Example (INSTANT): same loss
+ *   final stake = $28.78  → full recovery in one winning trade.
  */
-const MAX_RECOVERY_MULTIPLIER = 3.0;
-
 function computeDynamicStake(
   unrecoveredAmount: number,
   payout: number,
-  _blendedWinP: number,   // intentionally unused — see note above
+  _blendedWinP: number,   // intentionally unused — win probability does not inflate stake
   balance: number,
   maxTradeStake: number,
   riskProfile: "conservative" | "moderate" | "aggressive",
-  baseStake: number,      // original normal-mode stake — used for the hard cap
+  baseStake: number,
+  recoveryMultiplier: number,  // from settings (default 1.5)
+  recoveryMethod: "split" | "instant",
 ): number {
   const netPayout = payout - 1;
   if (netPayout <= 0) return 0.35;
 
-  // Exact minimum stake to fully recover in one winning trade,
-  // plus a 2% buffer to absorb Deriv's 2-decimal-place rounding.
+  // Exact minimum stake to recover the full unrecovered amount in one win,
+  // plus a 2% buffer for Deriv's decimal rounding.
   const minRecovery = (unrecoveredAmount / netPayout) * 1.02;
 
-  // Profile-based safety cap: never risk more than this fraction of balance
-  // on a single recovery trade, regardless of the unrecovered amount.
+  // Profile-based safety cap: never risk more than this fraction of balance.
   const maxExposurePct = riskProfile === "conservative" ? 0.08
     : riskProfile === "aggressive" ? 0.20
     : 0.12;   // moderate
   const maxExposure = Math.min(balance * maxExposurePct, maxTradeStake);
 
-  // Hard cap: stake ≤ MAX_RECOVERY_MULTIPLIER × baseStake.
-  // If the needed stake exceeds this (low-payout contract), partial recovery
-  // happens — remaining debt persists until the next winning recovery trade.
-  const baseStakeCap = baseStake > 0 ? baseStake * MAX_RECOVERY_MULTIPLIER : maxTradeStake;
+  if (recoveryMethod === "instant") {
+    // Instant: attempt full recovery with minRecovery, limited only by balance exposure.
+    return Math.max(0.35, Math.min(minRecovery, maxExposure, maxTradeStake));
+  }
 
-  return Math.max(0.35, Math.min(minRecovery, maxExposure, baseStakeCap));
+  // Split: cap at baseStake × recoveryMultiplier (user-configurable, default 1.5×).
+  // If minRecovery exceeds this cap, partial recovery happens.
+  const splitCap = baseStake > 0
+    ? baseStake * Math.max(1.1, recoveryMultiplier)
+    : maxTradeStake;
+
+  return Math.max(0.35, Math.min(minRecovery, maxExposure, splitCap, maxTradeStake));
 }
 
 /**
@@ -169,6 +182,9 @@ function computeDynamicStake(
  * accumulated unrecovered amount given the payout/win-probability of whatever
  * contract type the AI has selected for this trade (recovery is not tied to a
  * specific contract type).
+ *
+ * @param recoveryMultiplier  From settings — controls the split-mode cap (default 1.5)
+ * @param recoveryMethod      "split" (partial, gradual) or "instant" (full in one trade)
  */
 export function getDynamicRecoveryStake(
   baseStakeFromAI: number,
@@ -177,6 +193,8 @@ export function getDynamicRecoveryStake(
   payoutMultiplier: number,
   winProbability01: number,
   riskProfile: "conservative" | "moderate" | "aggressive",
+  recoveryMultiplier = 1.5,
+  recoveryMethod: "split" | "instant" = "split",
 ): number {
   ensureFreshDay();
   if (!state.inRecovery) {
@@ -186,7 +204,7 @@ export function getDynamicRecoveryStake(
 
   const raw = computeDynamicStake(
     state.unrecoveredAmount, payoutMultiplier, winProbability01, balance, maxTradeStake, riskProfile,
-    state.baseStake,
+    state.baseStake, recoveryMultiplier, recoveryMethod,
   );
   return Math.max(0.35, Math.min(raw, maxTradeStake));
 }
