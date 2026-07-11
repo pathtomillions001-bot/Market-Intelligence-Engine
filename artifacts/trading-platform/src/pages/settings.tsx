@@ -1,4 +1,4 @@
-import { useGetSettings, useUpdateSettings, useGetAccount } from "@workspace/api-client-react";
+import { useGetSettings, useUpdateSettings, useGetAccount, getGetSettingsQueryKey } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -94,12 +94,12 @@ export default function Settings() {
     autonomousEnabled: false,
     recoveryMode: false,
     recoveryMethod: "split" as "split" | "instant",
-    recoveryMultiplier: 1.5,
+    recoveryMultiplier: 1.62,
     maxRecoverySteps: 3,
-    normalOverDigit: 2,
-    normalUnderDigit: 7,
-    recoveryOverDigit: 4,
-    recoveryUnderDigit: 5,
+    normalOverDigit: 1,
+    normalUnderDigit: 8,
+    recoveryOverDigit: 3,
+    recoveryUnderDigit: 6,
     scanAllMarkets: true,
     paperTradeMode: false,
     requirePositiveEv: true,
@@ -124,12 +124,12 @@ export default function Settings() {
         autonomousEnabled: settings.autonomousEnabled,
         recoveryMode: (settings as any).recoveryMode ?? false,
         recoveryMethod: ((settings as any).recoveryMethod ?? "split") as "split" | "instant",
-        recoveryMultiplier: (settings as any).recoveryMultiplier ?? 1.5,
+        recoveryMultiplier: (settings as any).recoveryMultiplier ?? 1.62,
         maxRecoverySteps: (settings as any).maxRecoverySteps ?? 3,
-        normalOverDigit: (settings as any).normalOverDigit ?? 2,
-        normalUnderDigit: (settings as any).normalUnderDigit ?? 7,
-        recoveryOverDigit: (settings as any).recoveryOverDigit ?? 4,
-        recoveryUnderDigit: (settings as any).recoveryUnderDigit ?? 5,
+        normalOverDigit: (settings as any).normalOverDigit ?? 1,
+        normalUnderDigit: (settings as any).normalUnderDigit ?? 8,
+        recoveryOverDigit: (settings as any).recoveryOverDigit ?? 3,
+        recoveryUnderDigit: (settings as any).recoveryUnderDigit ?? 6,
         scanAllMarkets: (settings as any).scanAllMarkets ?? true,
         paperTradeMode: (settings as any).paperTradeMode ?? false,
         requirePositiveEv: (settings as any).requirePositiveEv ?? true,
@@ -166,12 +166,14 @@ export default function Settings() {
   const handleSave = () => {
     updateSettings.mutate({ data: { ...form } as any }, {
       onSuccess: (saved: any) => {
-        // Update settings cache directly so the toggles reflect immediately
-        queryClient.setQueryData(["getSettings"], saved);
-        queryClient.setQueryData(["settings"], saved);
+        // Update settings cache directly so the toggles reflect immediately.
+        // IMPORTANT: must use the actual query key from the orval hook (["/api/settings"]),
+        // not a hand-rolled key — mismatch causes the form to revert to stale data on re-render.
+        const settingsKey = getGetSettingsQueryKey();
+        queryClient.setQueryData(settingsKey, saved);
         // Invalidate all data that depends on settings (contract types, market rankings, etc.)
         // The server will also broadcast SSE "settings_updated" to all open tabs/dashboard
-        queryClient.invalidateQueries({ queryKey: ["getSettings"] });
+        queryClient.invalidateQueries({ queryKey: settingsKey });
         queryClient.invalidateQueries({ queryKey: ["markets-top-signals"] });
         queryClient.invalidateQueries({ queryKey: ["markets", "ranked-all"] });
         queryClient.invalidateQueries({ queryKey: ["/api/markets/top"] });
@@ -187,7 +189,14 @@ export default function Settings() {
 
   if (isLoading) return <div className="p-8 text-muted-foreground text-sm animate-pulse">Loading settings…</div>;
 
-  const maxRecovery = Math.pow(form.recoveryMultiplier, form.maxRecoverySteps);
+  // Auto-suggest a recovery multiplier calibrated to the selected recovery barrier payout.
+  // Formula: payout ≈ (10 / winDigits) × 0.972, where winDigits = 9 - overDigit.
+  // At OVER 3 / UNDER 6 this yields 1.62, meaning a 1.62× stake exactly covers 1 base-stake loss.
+  const suggestedMultiplier = (() => {
+    const winDigits = 9 - form.recoveryOverDigit;
+    if (winDigits <= 0) return 9.0;
+    return Math.round((10 / winDigits) * 0.972 * 100) / 100;
+  })();
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-8 max-w-3xl mx-auto space-y-5 pb-24">
@@ -281,26 +290,38 @@ export default function Settings() {
           <SettingRow
             label="Recovery Multiplier"
             description={form.recoveryMethod === "instant"
-              ? "Not used in Instant mode — AI sizes the stake to recover the exact lost amount."
-              : `Split mode cap: recovery stake will not exceed this multiple of the original base stake (e.g. 1.5 = max 1.5× base).`}
+              ? "Not used in Instant mode — AI computes the exact stake to recover the full loss in one trade."
+              : `Calibrate to your recovery barrier payout. Step 1 stakes Multiplier × base; each consecutive loss adds 1.0 (e.g. 1.62 → 2.62 → 3.62). OVER 3 / UNDER 6 ≈ 1.62×.`}
           >
-            <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", v)} min={1.1} max={5} step={0.05} suffix="×" disabled={form.recoveryMethod === "instant"} />
+            <div className="flex items-center gap-1.5">
+              <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", v)} min={1.1} max={10} step={0.01} suffix="×" disabled={form.recoveryMethod === "instant"} />
+              {form.recoveryMethod === "split" && Math.abs(suggestedMultiplier - form.recoveryMultiplier) > 0.01 && (
+                <button
+                  onClick={() => set("recoveryMultiplier", suggestedMultiplier)}
+                  className="text-[10px] px-1.5 py-1 rounded bg-primary/10 text-primary border border-primary/30 hover:bg-primary/20 transition-colors font-medium whitespace-nowrap"
+                  title={`Auto-set to ${suggestedMultiplier}× (calibrated to OVER ${form.recoveryOverDigit} payout)`}
+                >
+                  Auto {suggestedMultiplier}×
+                </button>
+              )}
+            </div>
           </SettingRow>
           <SettingRow
             label="Max Recovery Steps"
-            description="Maximum number of consecutive stake escalations. Stakes cap here and won't increase further."
+            description="Maximum consecutive stake escalations before the engine stops escalating further."
           >
             <NumInput value={form.maxRecoverySteps} onChange={(v) => set("maxRecoverySteps", v)} min={1} max={10} />
           </SettingRow>
           {form.recoveryMode && (
             <div className="mt-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
-              <div className="text-xs font-medium text-amber-400 mb-2">Recovery stake escalation preview</div>
+              <div className="text-xs font-medium text-amber-400 mb-1">Split mode escalation (×base stake per step)</div>
+              <div className="text-[10px] text-muted-foreground mb-2">Each step covers the previous step's stake. Win at any step = full coverage of that step's loss.</div>
               <div className="flex gap-2 flex-wrap">
-                {Array.from({ length: form.maxRecoverySteps }, (_, i) => i + 1).map((step) => (
-                  <div key={step} className="text-center">
-                    <div className="text-[10px] text-muted-foreground">Step {step}</div>
+                {Array.from({ length: form.maxRecoverySteps }, (_, i) => i).map((i) => (
+                  <div key={i} className="text-center">
+                    <div className="text-[10px] text-muted-foreground">Step {i + 1}</div>
                     <div className="text-xs font-mono font-bold text-amber-400">
-                      ×{Math.pow(form.recoveryMultiplier, step).toFixed(2)}
+                      ×{(form.recoveryMultiplier + i).toFixed(2)}
                     </div>
                   </div>
                 ))}
@@ -313,24 +334,34 @@ export default function Settings() {
       {/* Over/Under Digit Configuration */}
       <Card className="bg-card">
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Over/Under Digits</CardTitle>
+          <CardTitle className="text-base">Over/Under Digit Barriers</CardTitle>
           <CardDescription className="text-xs">
-            The AI only ever trades these exact digit barriers — one pair for normal trading, one pair while recovery is active. No other digits are scanned or selected automatically.
+            The AI only ever trades these exact digit barriers — one pair for normal trading, one pair while recovery is active. Changing the recovery digit automatically recalculates the suggested recovery multiplier above.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <SettingRow label="Normal — OVER digit" description="Barrier used for DIGITOVER trades outside of recovery.">
-            <NumInput value={form.normalOverDigit} onChange={(v) => set("normalOverDigit", v)} min={0} max={9} />
+          <SettingRow label="Normal — OVER digit" description="Barrier for DIGITOVER outside recovery. Default: OVER 1 (~80% win rate, lower payout).">
+            <NumInput value={form.normalOverDigit} onChange={(v) => set("normalOverDigit", v)} min={0} max={8} />
           </SettingRow>
-          <SettingRow label="Normal — UNDER digit" description="Barrier used for DIGITUNDER trades outside of recovery.">
-            <NumInput value={form.normalUnderDigit} onChange={(v) => set("normalUnderDigit", v)} min={0} max={9} />
+          <SettingRow label="Normal — UNDER digit" description="Barrier for DIGITUNDER outside recovery. Default: UNDER 8 (~80% win rate, lower payout).">
+            <NumInput value={form.normalUnderDigit} onChange={(v) => set("normalUnderDigit", v)} min={1} max={9} />
           </SettingRow>
-          <SettingRow label="Recovery — OVER digit" description="Barrier used for DIGITOVER trades while recovery is active.">
-            <NumInput value={form.recoveryOverDigit} onChange={(v) => set("recoveryOverDigit", v)} min={0} max={9} />
+          <SettingRow
+            label="Recovery — OVER digit"
+            description={`Barrier for DIGITOVER while recovering. Default: OVER 3 (~60% win rate, payout ≈${(() => { const w = 9 - form.recoveryOverDigit; return w > 0 ? (Math.round((10/w)*0.972*100)/100).toFixed(2) : "9.00"; })()}×). Adjust Recovery Multiplier to match.`}
+          >
+            <NumInput value={form.recoveryOverDigit} onChange={(v) => { set("recoveryOverDigit", v); }} min={0} max={8} />
           </SettingRow>
-          <SettingRow label="Recovery — UNDER digit" description="Barrier used for DIGITUNDER trades while recovery is active.">
-            <NumInput value={form.recoveryUnderDigit} onChange={(v) => set("recoveryUnderDigit", v)} min={0} max={9} />
+          <SettingRow
+            label="Recovery — UNDER digit"
+            description={`Barrier for DIGITUNDER while recovering. Default: UNDER 6 (~60% win rate, payout ≈${(() => { const w = form.recoveryUnderDigit; return w > 0 ? (Math.round((10/w)*0.972*100)/100).toFixed(2) : "9.00"; })()}×). Adjust Recovery Multiplier to match.`}
+          >
+            <NumInput value={form.recoveryUnderDigit} onChange={(v) => { set("recoveryUnderDigit", v); }} min={1} max={9} />
           </SettingRow>
+          <div className="mt-2 p-2.5 bg-secondary/20 rounded-lg text-[11px] text-muted-foreground space-y-1">
+            <p><strong className="text-foreground">Tip:</strong> Normal digits OVER 1 / UNDER 8 give ~80% win rate with smaller payout — high frequency, steady income.</p>
+            <p>Recovery digits OVER 3 / UNDER 6 give ~60% win rate with 1.62× payout — the recovery multiplier (1.62) is calibrated so one win covers the full loss. Use the <strong className="text-foreground">Auto</strong> button above to keep them in sync.</p>
+          </div>
         </CardContent>
       </Card>
 

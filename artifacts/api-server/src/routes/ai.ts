@@ -484,11 +484,14 @@ async function runAutonomousLoop() {
     type ScanResult = { market: typeof availableMarkets[0]; output: Awaited<ReturnType<typeof runCoordinator>>; ctx: ScanContext; family: string };
 
     // ── Contract family definitions ───────────────────────────────────────────
-    // Each market is evaluated by up to 3 families simultaneously.
+    // Each market is evaluated by up to 4 families simultaneously.
     // Only families with enabled contract types are run per market.
     const dirTypes  = preferredContractTypes.filter(t => ["CALL", "PUT"].includes(t));
     const ouTypes   = preferredContractTypes.filter(t => ["DIGITOVER", "DIGITUNDER"].includes(t));
     const eoTypes   = preferredContractTypes.filter(t => ["DIGITEVEN", "DIGITODD"].includes(t));
+    // Matches & Differs: DIGITDIFF in normal mode (high ~96% win rate, 1.04× payout),
+    // DIGITMATCH in recovery mode (9× payout — a tiny stake recovers the full DIFF loss).
+    const mdTypes   = preferredContractTypes.filter(t => ["DIGITMATCH", "DIGITDIFF"].includes(t));
 
     // ── Phase 1: All 4 groups scan in PARALLEL, but each group scans
     //    ONLY ONE market per iteration — the one at its cursor position.
@@ -521,6 +524,19 @@ async function runAutonomousLoop() {
               if (dirTypes.length > 0)                                  families.push({ name: "direction", types: dirTypes });
               if (!isBullBear && m.digitEnabled && ouTypes.length > 0)  families.push({ name: "overunder", types: ouTypes });
               if (!isBullBear && m.digitEnabled && eoTypes.length > 0)  families.push({ name: "evenodd",   types: eoTypes });
+              if (!isBullBear && m.digitEnabled && mdTypes.length > 0) {
+                // Strategy: trade DIGITDIFF in normal mode (coldest digit, ~96% win rate).
+                //           trade DIGITMATCH in recovery mode (hottest digit, 9× payout —
+                //           a $1.28 stake on MATCH recovers a $10 DIFF loss).
+                // If user only enabled one of the two, use whichever is enabled.
+                const inRecovery = recoveryEngine.isInRecovery();
+                const activeMdTypes = (inRecovery && mdTypes.includes("DIGITMATCH"))
+                  ? ["DIGITMATCH"]   // recovery: high payout covers full DIFF loss cheaply
+                  : mdTypes.includes("DIGITDIFF")
+                    ? ["DIGITDIFF"]  // normal: near-certain wins on the cold digit
+                    : mdTypes;       // fallback: whatever the user enabled
+                families.push({ name: "matchdiff", types: activeMdTypes });
+              }
 
               if (families.length === 0) return null;
 
@@ -541,9 +557,16 @@ async function runAutonomousLoop() {
                       // agents. Always lower the threshold for this family regardless of what
                       // other families are also active so Even/Odd gets a fair shot in the
                       // tournament when multiple markets are enabled simultaneously.
-                      minConfidenceThreshold: fam.name === "evenodd"
-                        ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 48)
-                        : baseCtx.settings.minConfidenceThreshold,
+                      minConfidenceThreshold:
+                        fam.name === "evenodd"
+                          ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 48)
+                          // DIGITMATCH: 9× payout but only ~10-15% win rate → agent scores are
+                          // naturally lower. Lower the threshold so the EV gate (not confidence)
+                          // does the real filtering; master-decision already requires positive EV.
+                          // DIGITDIFF: ~96% win rate but low payout → scores may vary; keep same floor.
+                          : fam.name === "matchdiff"
+                            ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 45)
+                            : baseCtx.settings.minConfidenceThreshold,
                     },
                     recoveryBarrierOverride: fam.name === "overunder" ? activeBarrierOverride : undefined,
                   };
@@ -747,6 +770,7 @@ async function runAutonomousLoop() {
         ...(dirTypes.length > 0 ? ["direction"] : []),
         ...(ouTypes.length > 0 ? ["overunder"] : []),
         ...(eoTypes.length > 0 ? ["evenodd"] : []),
+        ...(mdTypes.length > 0 ? ["matchdiff"] : []),
       ];
       if (allEnabledFamilies.length > 1) {
         const currentIdx = allEnabledFamilies.indexOf(bestResult.family);

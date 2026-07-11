@@ -130,13 +130,19 @@ export function isInRecovery(): boolean {
  *
  * In both modes the stake is floored at $0.35 and capped at maxTradeStake.
  *
- * Example (SPLIT): lost $17.78 on OVER 4 (payout 1.63×), recoveryMultiplier=1.5
- *   minRecovery = 17.78 / 0.63 × 1.02 = $28.78
- *   splitCap    = 17.78 × 1.5         = $26.67
- *   final stake = $26.67  → partial recovery this trade, remainder next trade.
+ * SPLIT mode progressive cap: each consecutive recovery LOSS raises the cap by
+ *   1.0× so the sequence naturally becomes recoveryMultiplier, recoveryMultiplier+1,
+ *   recoveryMultiplier+2, … (e.g. 1.62 → 2.62 → 3.62 for OVER 3 / UNDER 6).
+ *   Step 1 stakes enough to cover the base loss; later steps grow to cover
+ *   accumulated debt while keeping stakes predictable and non-exponential.
+ *
+ * Example (SPLIT, OVER 3, payout 1.62×, multiplier 1.62):
+ *   Step 1: cap = base × 1.62;  win profit = 1.62 × 0.62 = 1.004 × base ✓
+ *   Step 2: cap = base × 2.62;  win profit = 2.62 × 0.62 = 1.624 × base ✓
+ *   Step 3: cap = base × 3.62;  win profit = 3.62 × 0.62 = 2.244 × base
  *
  * Example (INSTANT): same loss
- *   final stake = $28.78  → full recovery in one winning trade.
+ *   stake = minRecovery = unrecoveredAmount / netPayout × 1.02 → full recovery in one winning trade.
  */
 function computeDynamicStake(
   unrecoveredAmount: number,
@@ -146,8 +152,9 @@ function computeDynamicStake(
   maxTradeStake: number,
   riskProfile: "conservative" | "moderate" | "aggressive",
   baseStake: number,
-  recoveryMultiplier: number,  // from settings (default 1.5)
+  recoveryMultiplier: number,  // from settings (default 1.62 for OVER 3 / UNDER 6)
   recoveryMethod: "split" | "instant",
+  recoveryStep: number,        // how many consecutive recovery losses so far (drives progressive cap)
 ): number {
   const netPayout = payout - 1;
   if (netPayout <= 0) return 0.35;
@@ -167,11 +174,15 @@ function computeDynamicStake(
     return Math.max(0.35, Math.min(minRecovery, maxExposure, maxTradeStake));
   }
 
-  // Split: cap at baseStake × recoveryMultiplier (user-configurable, default 1.5×).
-  // If minRecovery exceeds this cap, partial recovery happens.
-  const splitCap = baseStake > 0
-    ? baseStake * Math.max(1.1, recoveryMultiplier)
-    : maxTradeStake;
+  // Split: progressive cap grows by 1× base stake per consecutive recovery loss.
+  //   Step 1 → cap = base × recoveryMultiplier          (e.g. 1.62×)
+  //   Step 2 → cap = base × (recoveryMultiplier + 1)    (e.g. 2.62×)
+  //   Step 3 → cap = base × (recoveryMultiplier + 2)    (e.g. 3.62×)
+  // The recoveryMultiplier from settings is calibrated to the recovery barrier
+  // payout so step 1 always covers exactly one base-stake loss.
+  const stepOffset = Math.max(0, recoveryStep - 1);
+  const progressiveMultiplier = Math.max(1.1, recoveryMultiplier + stepOffset);
+  const splitCap = baseStake > 0 ? baseStake * progressiveMultiplier : maxTradeStake;
 
   return Math.max(0.35, Math.min(minRecovery, maxExposure, splitCap, maxTradeStake));
 }
@@ -183,8 +194,10 @@ function computeDynamicStake(
  * contract type the AI has selected for this trade (recovery is not tied to a
  * specific contract type).
  *
- * @param recoveryMultiplier  From settings — controls the split-mode cap (default 1.5)
- * @param recoveryMethod      "split" (partial, gradual) or "instant" (full in one trade)
+ * @param recoveryMultiplier  From settings — controls the split-mode base multiplier (default 1.62 for OVER 3 / UNDER 6).
+ *                            Calibrate to the recovery barrier payout so step 1 recovers exactly one base-stake loss.
+ *                            Auto-suggested: multiplier ≈ 10/(9-overDigit) × 0.972.
+ * @param recoveryMethod      "split" (progressive, non-exponential) or "instant" (full recovery in one trade)
  */
 export function getDynamicRecoveryStake(
   baseStakeFromAI: number,
@@ -193,7 +206,7 @@ export function getDynamicRecoveryStake(
   payoutMultiplier: number,
   winProbability01: number,
   riskProfile: "conservative" | "moderate" | "aggressive",
-  recoveryMultiplier = 1.5,
+  recoveryMultiplier = 1.62,
   recoveryMethod: "split" | "instant" = "split",
 ): number {
   ensureFreshDay();
@@ -204,7 +217,7 @@ export function getDynamicRecoveryStake(
 
   const raw = computeDynamicStake(
     state.unrecoveredAmount, payoutMultiplier, winProbability01, balance, maxTradeStake, riskProfile,
-    state.baseStake, recoveryMultiplier, recoveryMethod,
+    state.baseStake, recoveryMultiplier, recoveryMethod, state.recoveryStep,
   );
   return Math.max(0.35, Math.min(raw, maxTradeStake));
 }
