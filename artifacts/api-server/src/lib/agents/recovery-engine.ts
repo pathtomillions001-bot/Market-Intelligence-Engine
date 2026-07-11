@@ -170,8 +170,16 @@ function computeDynamicStake(
   const maxExposure = Math.min(balance * maxExposurePct, maxTradeStake);
 
   if (recoveryMethod === "instant") {
-    // Instant: attempt full recovery with minRecovery, limited only by balance exposure.
-    return Math.max(0.35, Math.min(minRecovery, maxExposure, maxTradeStake));
+    // Instant: attempt full recovery in one trade but cap at recoveryMultiplier × base
+    // to protect the user from over-exposure on accumulated losses.
+    // If the full-recovery stake exceeds the cap, partial recovery happens this trade
+    // and the remaining debt carries forward — same debt-tracking as split mode but
+    // resolved in the next winning trade rather than spread over many steps.
+    //
+    // Example: base=$1, loss=$1, payout=1.62x → minRecovery=$1.65 → cap=$1.62 → use $1.62 ✓
+    // Example: base=$1, loss=$40, payout=1.62x → minRecovery=$65.8 → cap=$1.62 → partial ✓
+    const instantCap = baseStake > 0 ? baseStake * recoveryMultiplier : maxTradeStake;
+    return Math.max(0.35, Math.min(minRecovery, instantCap, maxExposure, maxTradeStake));
   }
 
   // Split: progressive cap grows by 1× base stake per consecutive recovery loss.

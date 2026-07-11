@@ -99,26 +99,25 @@ export function runConfidenceFusionAgent(
   const TOTAL_WEIGHT = Object.values(AGENT_WEIGHTS).reduce((a, b) => a + b, 0);
 
   // ── 2. EV gate ───────────────────────────────────────────────────────────────
-  // During a loss streak the EV threshold tightens: we need real edge, not near-breakeven.
-  // 0 losses → allow EV ≥ adaptive threshold (dynamic-confidence engine)
-  // 2 losses → allow EV ≥ -0.02
-  // 3+ losses → require EV > 0 (positive expected value only)
+  // EV is always a semi-hard gate — the engine never trades on genuinely terrible EV.
+  // A baseline floor of -0.04 applies in all conditions (normal: some house-edge tolerated,
+  // e.g. DIGITDIFF is structurally -3%). During loss streaks the bar tightens further.
+  //
+  // 0 losses  → EV ≥ max(adaptive, -0.04)  — baseline always enforced
+  // 2 losses  → EV ≥ -0.02                 — tighter: edge required
+  // 3+ losses → EV > 0                     — strictly positive (capital protection)
   const sessionLosses = ctx.daily.consecutiveLosses;
   const adaptiveMinEV = getAdaptiveEvThreshold();
-  const minEV = sessionLosses >= 3 ? 0.001 : sessionLosses >= 2 ? -0.02 : adaptiveMinEV; // 3+ losses: strictly positive EV
+  const baselineMinEV = Math.max(adaptiveMinEV, -0.04);   // -4% floor, always applied
+  const minEV = sessionLosses >= 3 ? 0.001 : sessionLosses >= 2 ? -0.02 : baselineMinEV;
   const evPasses = input.bestEVResult !== null && input.bestEVResult.expectedValue >= minEV;
-  // EV gate is a HARD block only when the user opted into requiring positive/adaptive EV
-  // (settings.requirePositiveEv) or during an active loss streak (recovery needs real edge).
-  // Otherwise it's advisory — most digit/barrier contracts on Deriv carry a small structural
-  // negative EV from the house edge, so hard-gating on it here made the engine perpetually
-  // find "no qualifying opportunity" and never execute a trade.
-  const evIsHardGate = ctx.settings.requirePositiveEv || sessionLosses >= 2;
-  const evGated = evPasses || !evIsHardGate;
+  // EV is now always a hard gate — poor-EV trades are the primary cause of loss streaks.
+  const evIsHardGate = true;
+  const evGated = evPasses;
   if (!evPasses && input.bestEVResult !== null) {
-    const reason = sessionLosses >= 2
-      ? `EV gate (recovery mode, ${sessionLosses} losses): ${(input.bestEVResult.expectedValue * 100).toFixed(1)}% < ${(minEV * 100).toFixed(0)}% required`
-      : `EV gate: ${(input.bestEVResult.expectedValue * 100).toFixed(1)}% — below threshold${evIsHardGate ? "" : " (advisory)"}`;
-    blockers.push(reason);
+    const streakNote = sessionLosses >= 3 ? ` (${sessionLosses} losses — strictly positive EV required)`
+      : sessionLosses >= 2 ? ` (${sessionLosses} losses — tighter EV gate)` : "";
+    blockers.push(`EV gate: ${(input.bestEVResult.expectedValue * 100).toFixed(1)}% < ${(minEV * 100).toFixed(0)}% required${streakNote}`);
   }
 
   // ── 3. Timing gate ───────────────────────────────────────────────────────────
@@ -156,11 +155,11 @@ export function runConfidenceFusionAgent(
   // based on recent win-rate, keeping it within [MIN_THRESHOLD, MAX_THRESHOLD].
   const historyAdjust = (input.learningAgentScore - 50) * 0.1; // ±5 adjustment
   const adaptiveBase = getAdaptiveConfidenceThreshold(ctx.settings.minConfidenceThreshold ?? 50);
-  // During a loss streak, raise the bar aggressively: each consecutive loss adds 6 points
-  // (was 3), capped at +30 (was +15). This forces near-consensus from all agents before
-  // the engine takes another trade after repeated losses — critical for protecting capital.
+  // During a loss streak, raise the bar aggressively: each consecutive loss adds 6 points,
+  // capped at +30. Floor raised from 44 → 50 so the engine only trades when at least
+  // half the agents agree — this is the main lever for avoiding low-quality trades.
   const lossStreakBoost = Math.min(sessionLosses * 6, 30);
-  const effectiveThreshold = Math.max(44, Math.min(82, adaptiveBase + historyAdjust + lossStreakBoost));
+  const effectiveThreshold = Math.max(50, Math.min(82, adaptiveBase + historyAdjust + lossStreakBoost));
 
   // ── 6. Enhancement signals ────────────────────────────────────────────────────
   if (input.patternDiscoveryScore > 70) enhancers.push("Pattern discovery: recognized profitable pattern");

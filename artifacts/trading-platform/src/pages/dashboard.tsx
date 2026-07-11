@@ -152,11 +152,13 @@ function AIOpportunityScanner() {
     CALL: "#10b981", PUT: "#ef4444",
     DIGITOVER: "#06b6d4", DIGITUNDER: "#f59e0b",
     DIGITEVEN: "#8b5cf6", DIGITODD: "#ec4899",
+    DIGITMATCH: "#a855f7", DIGITDIFF: "#14b8a6",
   };
   const CONTRACT_LABELS: Record<string, string> = {
     CALL: "RISE", PUT: "FALL",
     DIGITOVER: "OVER", DIGITUNDER: "UNDER",
     DIGITEVEN: "EVEN", DIGITODD: "ODD",
+    DIGITMATCH: "MATCH", DIGITDIFF: "DIFF",
   };
 
   const topMarkets = (allMarkets ?? []).slice(0, 6);
@@ -260,16 +262,19 @@ const GROUP_COLORS: Record<string, string> = {
 };
 const CONTRACT_SHORT: Record<string, string> = {
   CALL: "RISE", PUT: "FALL", DIGITOVER: "OVER", DIGITUNDER: "UNDER", DIGITEVEN: "EVEN", DIGITODD: "ODD",
+  DIGITMATCH: "MATCH", DIGITDIFF: "DIFF",
 };
 const FAMILY_COLORS: Record<string, string> = {
-  direction: "#10b981",
-  overunder: "#06b6d4",
-  evenodd:   "#8b5cf6",
+  direction:  "#10b981",
+  overunder:  "#06b6d4",
+  evenodd:    "#8b5cf6",
+  matchdiff:  "#a855f7",
 };
 const CONTRACT_COLORS_MAP: Record<string, string> = {
   CALL: "#10b981", PUT: "#ef4444",
   DIGITOVER: "#06b6d4", DIGITUNDER: "#f59e0b",
   DIGITEVEN: "#8b5cf6", DIGITODD: "#ec4899",
+  DIGITMATCH: "#a855f7", DIGITDIFF: "#14b8a6",
 };
 
 function ParallelGroupScanner({ groups, isScanning, winner, lastSkipReason }: {
