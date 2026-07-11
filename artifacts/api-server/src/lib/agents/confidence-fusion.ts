@@ -156,10 +156,16 @@ export function runConfidenceFusionAgent(
   const historyAdjust = (input.learningAgentScore - 50) * 0.1; // ±5 adjustment
   const adaptiveBase = getAdaptiveConfidenceThreshold(ctx.settings.minConfidenceThreshold ?? 50);
   // During a loss streak, raise the bar aggressively: each consecutive loss adds 6 points,
-  // capped at +30. Floor raised from 44 → 50 so the engine only trades when at least
-  // half the agents agree — this is the main lever for avoiding low-quality trades.
+  // capped at +30. Default floor is 50 so the engine needs at least half the agents to agree.
+  // Exception: DIGITMATCH/DIGITDIFF (matchdiff family) use a lower floor of 45 because:
+  //   • DIGITMATCH has a naturally lower agent consensus (only ~10% theoretical win rate means
+  //     many agents score it conservatively even when the digit IS hot)
+  //   • DIGITDIFF at ~96% win rate still confuses some agents that look at payout, not win rate
+  //   • The real quality gate for these contracts is the EV/edge check in master-decision.ts
+  const isMatchDiff = input.bestEVResult?.product === "DIGITMATCH" || input.bestEVResult?.product === "DIGITDIFF";
+  const thresholdFloor = isMatchDiff ? 45 : 50;
   const lossStreakBoost = Math.min(sessionLosses * 6, 30);
-  const effectiveThreshold = Math.max(50, Math.min(82, adaptiveBase + historyAdjust + lossStreakBoost));
+  const effectiveThreshold = Math.max(thresholdFloor, Math.min(82, adaptiveBase + historyAdjust + lossStreakBoost));
 
   // ── 6. Enhancement signals ────────────────────────────────────────────────────
   if (input.patternDiscoveryScore > 70) enhancers.push("Pattern discovery: recognized profitable pattern");

@@ -364,7 +364,7 @@ export async function getIntelligenceSummary() {
     .select()
     .from(tradeIntelligenceReportsTable)
     .orderBy(desc(tradeIntelligenceReportsTable.createdAt))
-    .limit(100);
+    .limit(500);
 
   if (reports.length === 0) {
     return {

@@ -172,9 +172,11 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     const isDigitMatch = bestEV.product === "DIGITMATCH";
 
     if (isDigitMatch) {
-      // DIGITMATCH → ~10% theoretical win, 9.0x payout — require positive EV
-      // (positive EV only when the matched digit appears >11.1% of the time)
-      if (bestEV.expectedValue <= 0) {
+      // DIGITMATCH → ~10% theoretical win, 9.0x payout.
+      // In recovery mode this contract recovers DIGITDIFF losses cheaply (9× payout),
+      // so accept a slightly negative EV floor (-5%) — a digit appearing ≥10.4% still has
+      // strong enough probability. Strictly positive EV requires >11.1%.
+      if (bestEV.expectedValue < -0.05) {
         rejectReasons.push(
           `DIGITMATCH digit=${bestEV.barrier}: EV ${(bestEV.expectedValue * 100).toFixed(1)}% — digit not hot enough to trade`,
         );

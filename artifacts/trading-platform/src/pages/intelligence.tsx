@@ -87,9 +87,13 @@ function KpiBar({ summary, missed, tradesAnalyzed }: { summary: any; missed: any
     {
       icon: Brain,
       label: "Trades Analyzed",
-      // Use the consistent tradesAnalyzed count from the dynamic-confidence engine
-      value: tradesAnalyzed > 0 ? tradesAnalyzed : (summary?.totalAnalyzed ?? 0),
-      sub: summary?.totalAnalyzed > 0 ? `${summary.winsAnalyzed}W · ${summary.lossesAnalyzed}L` : "No data yet",
+      // Use summary.totalAnalyzed — same source as winsAnalyzed/lossesAnalyzed so
+      // the main count and the W·L breakdown are always consistent with each other.
+      // (DB limit raised to 500; header shows dynamicStatus.tradesAnalyzed separately.)
+      value: summary?.totalAnalyzed > 0 ? summary.totalAnalyzed : tradesAnalyzed,
+      sub: summary?.totalAnalyzed > 0
+        ? `${summary.winsAnalyzed}W · ${summary.lossesAnalyzed}L`
+        : "No data yet",
       color: "text-primary",
       accent: "from-primary/20",
     },
