@@ -60,17 +60,24 @@ function useAllTrades() {
 
 // ── Analytics computation ─────────────────────────────────────────────────────
 
+function isWon(t: any): boolean {
+  // Trades stored in DB use t.status === "won" / "lost"; t.won is not a DB column.
+  // Always derive from status, falling back to profit sign for edge cases.
+  return t.status === "won" || (t.status !== "lost" && Number(t.profit ?? 0) > 0);
+}
+
 function buildDailyStats(trades: any[]) {
-  const won   = trades.filter(t => t.won);
-  const lost  = trades.filter(t => !t.won);
-  const pnl   = trades.reduce((s, t) => s + (t.profit ?? 0), 0);
+  const won   = trades.filter(t => isWon(t));
+  const lost  = trades.filter(t => !isWon(t));
+  const pnl   = trades.reduce((s, t) => s + Number(t.profit ?? 0), 0);
   const winRate = trades.length > 0 ? won.length / trades.length : 0;
 
   let streak = 0;
   for (const t of trades) {
-    if (streak === 0) streak = t.won ? 1 : -1;
-    else if (t.won && streak > 0) streak++;
-    else if (!t.won && streak < 0) streak--;
+    const w = isWon(t);
+    if (streak === 0) streak = w ? 1 : -1;
+    else if (w && streak > 0) streak++;
+    else if (!w && streak < 0) streak--;
     else break;
   }
 
@@ -93,8 +100,8 @@ function buildCumulativeCurve(sorted: any[]) {
   for (const t of sorted) {
     const date = toLocalDate(new Date(t.createdAt));
     if (!byDate[date]) byDate[date] = { wins: 0, losses: 0, pnl: 0 };
-    byDate[date].pnl += t.profit ?? 0;
-    if (t.won) byDate[date].wins++; else byDate[date].losses++;
+    byDate[date].pnl += Number(t.profit ?? 0);
+    if (isWon(t)) byDate[date].wins++; else byDate[date].losses++;
   }
   let cumulative = 0;
   return Object.entries(byDate).map(([date, d]) => {
@@ -123,8 +130,8 @@ function buildContractBreakdown(trades: any[]) {
   for (const t of trades) {
     const ct = t.contractType ?? "?";
     if (!map[ct]) map[ct] = { wins: 0, losses: 0, pnl: 0 };
-    map[ct].pnl += t.profit ?? 0;
-    if (t.won) map[ct].wins++; else map[ct].losses++;
+    map[ct].pnl += Number(t.profit ?? 0);
+    if (isWon(t)) map[ct].wins++; else map[ct].losses++;
   }
   return Object.entries(map)
     .map(([ct, d]) => ({
@@ -145,8 +152,8 @@ function buildMarketRanking(trades: any[]) {
   for (const t of trades) {
     const sym = t.symbol ?? "?";
     if (!map[sym]) map[sym] = { wins: 0, losses: 0, pnl: 0, display: t.displayName ?? sym };
-    map[sym].pnl += t.profit ?? 0;
-    if (t.won) map[sym].wins++; else map[sym].losses++;
+    map[sym].pnl += Number(t.profit ?? 0);
+    if (isWon(t)) map[sym].wins++; else map[sym].losses++;
   }
   return Object.entries(map)
     .map(([sym, d]) => ({
