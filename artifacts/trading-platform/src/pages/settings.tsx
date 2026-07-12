@@ -103,6 +103,8 @@ export default function Settings() {
     scanAllMarkets: true,
     paperTradeMode: false,
     requirePositiveEv: true,
+    minConfidenceThreshold: 50,
+    loopIntervalSec: 15,
     preferredContractTypes: ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"],
     preferredCategories: ["synthetic"],
     allowedMarkets: [] as string[],
@@ -133,6 +135,8 @@ export default function Settings() {
         scanAllMarkets: (settings as any).scanAllMarkets ?? true,
         paperTradeMode: (settings as any).paperTradeMode ?? false,
         requirePositiveEv: (settings as any).requirePositiveEv ?? true,
+        minConfidenceThreshold: (settings as any).minConfidenceThreshold ?? 50,
+        loopIntervalSec: (settings as any).loopIntervalSec ?? 15,
         preferredContractTypes: settings.preferredContractTypes.length > 0
           ? settings.preferredContractTypes.map((t: string) => t === "RISE" ? "CALL" : t === "FALL" ? "PUT" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i)
           : ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD", "DIGITMATCH", "DIGITDIFF"],
@@ -260,6 +264,45 @@ export default function Settings() {
           <SettingRow label="Cooldown Duration" description="Minutes before engine auto-resumes after a consecutive-loss stop.">
             <NumInput value={form.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} min={1} max={1440} step={5} suffix="min" />
           </SettingRow>
+        </CardContent>
+      </Card>
+
+      {/* Engine Configuration */}
+      <Card className="bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Engine Configuration</CardTitle>
+          <CardDescription className="text-xs">Core AI engine parameters that control how and when the engine trades.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <SettingRow
+            label="Paper Trade Mode"
+            description="Log all trades to the journal without sending real orders to Deriv. Use to test strategies with zero risk. Turn off to go live."
+          >
+            <Switch checked={form.paperTradeMode} onCheckedChange={(v) => set("paperTradeMode", v)} />
+          </SettingRow>
+          <SettingRow
+            label="Require Positive EV"
+            description="Only trade when the engine calculates a positive expected value. Disabling allows more trade attempts but may reduce win rate."
+          >
+            <Switch checked={form.requirePositiveEv} onCheckedChange={(v) => set("requirePositiveEv", v)} />
+          </SettingRow>
+          <SettingRow
+            label="Min Confidence Threshold"
+            description="Minimum AI confidence score (0–100) required before placing a trade. Higher = fewer trades, better quality."
+          >
+            <NumInput value={form.minConfidenceThreshold} onChange={(v) => set("minConfidenceThreshold", v)} min={30} max={95} step={1} suffix="%" />
+          </SettingRow>
+          <SettingRow
+            label="Scan Interval"
+            description="How often the autonomous engine scans markets for opportunities."
+          >
+            <NumInput value={form.loopIntervalSec} onChange={(v) => set("loopIntervalSec", v)} min={5} max={120} step={1} suffix="s" />
+          </SettingRow>
+          {form.paperTradeMode && (
+            <div className="mt-2 p-2.5 bg-amber-500/5 border border-amber-500/20 rounded-lg text-[11px] text-amber-400">
+              <strong>Paper Trade Mode is ON</strong> — no real orders will be sent to Deriv. All trades are simulated in the journal.
+            </div>
+          )}
         </CardContent>
       </Card>
 
