@@ -87,51 +87,45 @@ export function runConfidenceFusionAgent(
   if (input.portfolioManagerScore < 20) {
     blockers.push("Portfolio manager: position limit reached");
   }
-  // NOTE: Recovery intelligence is NOT a hard gate here. Its score (15–72) already
-  // carries weight 1.2 in the weighted consensus, depressing the overall score when
-  // there's a streak. The loop-level cooldown (ai.ts) handles mandatory pauses at the
-  // configured consecutiveLossLimit — we don't need a duplicate hard veto here that
-  // causes permanent deadlock after ≥4 losses (engine resumes after cooldown only to
-  // be immediately blocked again by this gate, never actually trading).
+  // Recovery intelligence hard-gate: at ≥4 consecutive losses the recovery agent
+  // drops to score 15, triggering this explicit block (weighted averaging alone
+  // is not enough — we need a guaranteed veto to protect capital during severe streaks).
+  if (input.recoveryIntelligenceScore < 20) {
+    blockers.push("Recovery intelligence: consecutive loss limit — mandatory pause before next trade");
+  }
 
   // ── Resolve dynamic weights (accuracy-driven, falls back to base) ────────────
   const AGENT_WEIGHTS = getDynamicWeights();
   const TOTAL_WEIGHT = Object.values(AGENT_WEIGHTS).reduce((a, b) => a + b, 0);
 
   // ── 2. EV gate ───────────────────────────────────────────────────────────────
-  // EV is always a hard gate — the engine never trades on genuinely terrible EV.
-  // A baseline floor of -0.04 applies in all conditions (DIGITDIFF is structurally ~-0.2%
-  // so the -4% floor never blocks it; DIGITOVER 2 typically reaches +1–3% edge when cold).
-  // During loss streaks the bar tightens, but we cap the sessionLosses used here at 4 so
-  // the gate doesn't escalate indefinitely. The loop-level cooldown already pauses the
-  // engine at the consecutiveLossLimit — by the time the loop resumes, we want the EV gate
-  // to allow genuinely good setups (not block everything forever).
+  // EV is always a semi-hard gate — the engine never trades on genuinely terrible EV.
+  // A baseline floor of -0.04 applies in all conditions (normal: some house-edge tolerated,
+  // e.g. DIGITDIFF is structurally -3%). During loss streaks the bar tightens further.
   //
-  // 0–2 losses → EV ≥ max(adaptive, -0.04)  — baseline floor, house-edge tolerated
-  //   3 losses → EV ≥ -0.02                 — tighter; need some edge
-  //  4+ losses → EV ≥  0.00                 — non-negative only (positive EV required)
-  const sessionLosses = Math.min(ctx.daily.consecutiveLosses, 4);  // cap: gate plateaus at 4
+  // 0 losses  → EV ≥ max(adaptive, -0.04)  — baseline always enforced
+  // 2 losses  → EV ≥ -0.02                 — tighter: edge required
+  // 3+ losses → EV > 0                     — strictly positive (capital protection)
+  const sessionLosses = ctx.daily.consecutiveLosses;
   const adaptiveMinEV = getAdaptiveEvThreshold();
   const baselineMinEV = Math.max(adaptiveMinEV, -0.04);   // -4% floor, always applied
-  const minEV = sessionLosses >= 4 ? 0.0 : sessionLosses >= 3 ? -0.02 : baselineMinEV;
+  const minEV = sessionLosses >= 3 ? 0.001 : sessionLosses >= 2 ? -0.02 : baselineMinEV;
   const evPasses = input.bestEVResult !== null && input.bestEVResult.expectedValue >= minEV;
+  // EV is now always a hard gate — poor-EV trades are the primary cause of loss streaks.
+  const evIsHardGate = true;
   const evGated = evPasses;
   if (!evPasses && input.bestEVResult !== null) {
-    const streakNote = sessionLosses >= 4 ? ` (${ctx.daily.consecutiveLosses} losses — positive EV required)`
-      : sessionLosses >= 3 ? ` (${sessionLosses} losses — tighter EV gate)` : "";
+    const streakNote = sessionLosses >= 3 ? ` (${sessionLosses} losses — strictly positive EV required)`
+      : sessionLosses >= 2 ? ` (${sessionLosses} losses — tighter EV gate)` : "";
     blockers.push(`EV gate: ${(input.bestEVResult.expectedValue * 100).toFixed(1)}% < ${(minEV * 100).toFixed(0)}% required${streakNote}`);
   }
 
   // ── 3. Timing gate ───────────────────────────────────────────────────────────
-  // Timing is ALWAYS advisory. It informs the weighted score but never hard-blocks
-  // a trade. The EV gate and weighted consensus are the real quality controls.
-  // Turning timing into a hard gate during streaks caused the engine to skip genuinely
-  // good-EV setups simply because the execution-timing agent was slightly bearish.
   const adaptiveTimingThreshold = getAdaptiveTimingThreshold();
-  const timingGated = input.executionTimingScore >= adaptiveTimingThreshold;
+  const minTimingScore = sessionLosses >= 3 ? 50 : sessionLosses >= 2 ? 44 : adaptiveTimingThreshold;
+  const timingGated = input.executionTimingScore >= minTimingScore;
   if (!timingGated) {
-    // Advisory only — logged but not blocking
-    enhancers.push(`Timing advisory: score ${input.executionTimingScore} (threshold ${adaptiveTimingThreshold})`);
+    blockers.push(`Timing score ${input.executionTimingScore} < ${minTimingScore} — suboptimal entry`);
   }
 
   // ── 4. Weighted score aggregation ────────────────────────────────────────────
@@ -162,16 +156,10 @@ export function runConfidenceFusionAgent(
   const historyAdjust = (input.learningAgentScore - 50) * 0.1; // ±5 adjustment
   const adaptiveBase = getAdaptiveConfidenceThreshold(ctx.settings.minConfidenceThreshold ?? 50);
   // During a loss streak, raise the bar aggressively: each consecutive loss adds 6 points,
-  // capped at +30. Default floor is 50 so the engine needs at least half the agents to agree.
-  // Exception: DIGITMATCH/DIGITDIFF (matchdiff family) use a lower floor of 45 because:
-  //   • DIGITMATCH has a naturally lower agent consensus (only ~10% theoretical win rate means
-  //     many agents score it conservatively even when the digit IS hot)
-  //   • DIGITDIFF at ~96% win rate still confuses some agents that look at payout, not win rate
-  //   • The real quality gate for these contracts is the EV/edge check in master-decision.ts
-  const isMatchDiff = input.bestEVResult?.product === "DIGITMATCH" || input.bestEVResult?.product === "DIGITDIFF";
-  const thresholdFloor = isMatchDiff ? 45 : 50;
+  // capped at +30. Floor raised from 44 → 50 so the engine only trades when at least
+  // half the agents agree — this is the main lever for avoiding low-quality trades.
   const lossStreakBoost = Math.min(sessionLosses * 6, 30);
-  const effectiveThreshold = Math.max(thresholdFloor, Math.min(82, adaptiveBase + historyAdjust + lossStreakBoost));
+  const effectiveThreshold = Math.max(50, Math.min(82, adaptiveBase + historyAdjust + lossStreakBoost));
 
   // ── 6. Enhancement signals ────────────────────────────────────────────────────
   if (input.patternDiscoveryScore > 70) enhancers.push("Pattern discovery: recognized profitable pattern");
@@ -208,11 +196,13 @@ export function runConfidenceFusionAgent(
   const overallConfidence = agentWeightedScore;
   const meetsThreshold = overallConfidence >= effectiveThreshold;
 
-  // Timing is advisory — it influences the weighted score but is never a hard block.
-  // The EV gate and consensus threshold are the real quality gates.
-  const timingPass = true;
+  // During a loss streak (≥2 consecutive losses) timing becomes a hard gate, not advisory.
+  // In normal conditions timing is advisory so the engine keeps trading; during recovery
+  // we want the most favourable entry, so we block poor-timing setups.
+  const timingRequired = sessionLosses >= 2;
+  const timingPass = !timingRequired || timingGated;
 
-  const shouldTrade = !hardBlocked && meetsThreshold && evGated && !!recommendedContractType;
+  const shouldTrade = !hardBlocked && meetsThreshold && evGated && timingPass && !!recommendedContractType;
   const recommendedAction: FusionResult["recommendedAction"] = hardBlocked ? "skip"
     : !meetsThreshold ? "wait" : shouldTrade ? "buy" : "wait";
 

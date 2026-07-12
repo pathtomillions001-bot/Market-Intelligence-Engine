@@ -287,15 +287,10 @@ export function analyzeMatchDiffers(
   return {
     matchDigit, matchWinProbability: matchWinP,
     matchExpectedValue: matchEV, matchEdge,
-    // matchRecommended: allow slightly-negative EV so the option enters the coordinator's
-    // barrier list; master-decision.ts applies the real hard gate (expectedValue > 0 strictly).
-    // This lets the option be EVALUATED — not necessarily traded.
-    matchRecommended: matchEV > -0.03 && digits.length >= 30,
+    matchRecommended: matchEV > 0 && digits.length >= 30,
     diffDigit, diffWinProbability: diffWinP,
     diffExpectedValue: diffEV, diffEdge,
-    // diffRecommended: gate on edge (not EV) with -4% slack — a win rate of ~92%+ is worth
-    // evaluating; master-decision.ts gates at edge > 0 (win > 96.15%) before any trade fires.
-    diffRecommended: diffEdge > -0.04 && digits.length >= 30,
+    diffRecommended: diffEV > 0 && digits.length >= 30,
   };
 }
 
