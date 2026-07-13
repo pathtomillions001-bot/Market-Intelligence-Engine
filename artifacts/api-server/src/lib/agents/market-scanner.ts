@@ -41,23 +41,27 @@ export function runMarketScannerAgent(ctx: ScanContext): AgentOutput & { scanner
   const marketType = classifyMarketType(symbol);
 
   const hasDirectionCapability = marketType !== "other";
+  // Bull/Bear indices (RDBULL/RDBEAR) are digit-enabled just like the synthetic
+  // volatility/jump indices — they support Over/Under, Even/Odd, and Match/Differ
+  // in addition to Rise/Fall.
   const hasDigitCapability = (
     marketType === "synthetic_1s" ||
     marketType === "synthetic" ||
-    marketType === "jump"
+    marketType === "jump" ||
+    marketType === "bull_bear"
   );
 
   const wantDirection = preferred.some(t => ["CALL", "PUT", "RISE", "FALL"].includes(t));
   const wantOverUnder = preferred.some(t => t === "DIGITOVER" || t === "DIGITUNDER");
   const wantEvenOdd = preferred.some(t => t === "DIGITEVEN" || t === "DIGITODD");
-  const wantDigit = wantOverUnder || wantEvenOdd;
+  const wantMatchDiff = preferred.some(t => t === "DIGITMATCH" || t === "DIGITDIFF");
+  const wantDigit = wantOverUnder || wantEvenOdd || wantMatchDiff;
 
-  // Bull/Bear only supports direction
-  const isBullBear = marketType === "bull_bear";
   const enabledFamilies: string[] = [];
   if (wantDirection && hasDirectionCapability) enabledFamilies.push("direction");
-  if (wantOverUnder && hasDigitCapability && !isBullBear) enabledFamilies.push("overunder");
-  if (wantEvenOdd && hasDigitCapability && !isBullBear) enabledFamilies.push("evenodd");
+  if (wantOverUnder && hasDigitCapability) enabledFamilies.push("overunder");
+  if (wantEvenOdd && hasDigitCapability) enabledFamilies.push("evenodd");
+  if (wantMatchDiff && hasDigitCapability) enabledFamilies.push("matchdiff");
 
   // Skip if no enabled families for this market
   if (enabledFamilies.length === 0) {

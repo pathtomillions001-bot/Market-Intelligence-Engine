@@ -564,11 +564,14 @@ export default function Intelligence() {
 
   const summary       = summaryData?.summary;
   const missedSummary = summaryData?.missedSummary;
-  // Consistent source: always use dynamicStatus.tradesAnalyzed from confidence engine
   const dynamicStatus = summaryData?.dynamicStatus ?? thresholdsData;
   const reports       = Array.isArray(reportsData) ? reportsData : [];
   const missed        = Array.isArray(missedData)  ? missedData  : [];
-  const tradesAnalyzed = dynamicStatus?.tradesAnalyzed ?? 0;
+  // Single source of truth for "trades analyzed" everywhere on this page:
+  // summary.totalAnalyzed (true count from trade_intelligence_reports), falling
+  // back to the confidence engine's counter only when no reports exist yet.
+  // This keeps the header badge and the KPI card from ever showing different numbers.
+  const tradesAnalyzed = summary?.totalAnalyzed > 0 ? summary.totalAnalyzed : (dynamicStatus?.tradesAnalyzed ?? 0);
 
   return (
     <div className="p-4 md:p-6 max-w-7xl mx-auto space-y-5">

@@ -155,6 +155,7 @@ function computeDynamicStake(
   recoveryMultiplier: number,  // from settings (default 1.62 for OVER 3 / UNDER 6)
   recoveryMethod: "split" | "instant",
   recoveryStep: number,        // how many consecutive recovery losses so far (drives progressive cap)
+  maxRecoverySteps: number,    // from settings — bounds instant mode's exposure the same way split mode is bounded
 ): number {
   const netPayout = payout - 1;
   if (netPayout <= 0) return 0.35;
@@ -170,15 +171,19 @@ function computeDynamicStake(
   const maxExposure = Math.min(balance * maxExposurePct, maxTradeStake);
 
   if (recoveryMethod === "instant") {
-    // Instant: stake exactly what is needed to recover the full loss in ONE winning trade.
-    // No multiplier cap — the user explicitly chose instant mode knowing it can mean
-    // a larger stake. The only limits are the balance-safety cap (maxExposure) and the
-    // hard stake ceiling (maxTradeStake) set in settings.
+    // Instant: stake exactly what is needed to recover the full loss in ONE winning trade,
+    // but bounded by the SAME worst-case exposure ceiling as Split mode
+    // (baseStake × (recoveryMultiplier + maxRecoverySteps)) so Instant can never
+    // stake more, relative to the original loss, than Split's worst case would.
+    // This keeps "protect the stake" true for both modes — Instant just reaches
+    // full recovery in fewer trades when the loss is small enough to allow it.
     //
     // Example: base=$1, loss=$1, payout=1.62x → minRecovery=$1.65 → use $1.65 (full recovery)
-    // Example: base=$1, loss=$40, payout=1.62x → minRecovery=$65.8 → capped by maxExposure/maxTradeStake
-    // If capped, partial recovery this trade; remaining debt carries forward and next winning trade clears it.
-    return Math.max(0.35, Math.min(minRecovery, maxExposure, maxTradeStake));
+    // Example: base=$1, loss=$40, payout=1.62x → minRecovery=$65.8, but instantCeiling
+    //   (e.g. base=$1, multiplier=1.62, steps=3 → ceiling=$4.62) caps it well below that —
+    //   partial recovery this trade; remaining debt carries forward to the next win(s).
+    const instantCeiling = baseStake > 0 ? baseStake * (recoveryMultiplier + maxRecoverySteps) : maxTradeStake;
+    return Math.max(0.35, Math.min(minRecovery, maxExposure, maxTradeStake, instantCeiling));
   }
 
   // Split: progressive cap grows by 1× base stake per consecutive recovery loss.
@@ -215,6 +220,7 @@ export function getDynamicRecoveryStake(
   riskProfile: "conservative" | "moderate" | "aggressive",
   recoveryMultiplier = 1.62,
   recoveryMethod: "split" | "instant" = "split",
+  maxRecoverySteps = 3,
 ): number {
   ensureFreshDay();
   if (!state.inRecovery) {
@@ -224,7 +230,7 @@ export function getDynamicRecoveryStake(
 
   const raw = computeDynamicStake(
     state.unrecoveredAmount, payoutMultiplier, winProbability01, balance, maxTradeStake, riskProfile,
-    state.baseStake, recoveryMultiplier, recoveryMethod, state.recoveryStep,
+    state.baseStake, recoveryMultiplier, recoveryMethod, state.recoveryStep, maxRecoverySteps,
   );
   return Math.max(0.35, Math.min(raw, maxTradeStake));
 }

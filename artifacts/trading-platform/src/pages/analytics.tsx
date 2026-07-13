@@ -51,17 +51,25 @@ function contractColor(ct: string) {
 
 // ── Data hooks ────────────────────────────────────────────────────────────────
 
+// Same source of truth as Dashboard/Journal (Deriv's broker-confirmed profit_table,
+// no local-DB fallback) so "today's" profit/win-rate/streak/best-trade always agree
+// across every page. Falls back to the local trades table only when there's no
+// connected Deriv account (e.g. pure paper-trading before a token is set).
 function useTodayTrades() {
   const today = toLocalDate(new Date());
   return useQuery({
     queryKey: ["analytics-today", today],
-    queryFn: () => fetch("/api/trades?limit=500").then(r => r.json()),
+    queryFn: async () => {
+      const journal = await fetch("/api/trades/deriv-journal").then(r => r.json());
+      if (journal?.source === "deriv") return { source: "deriv" as const, trades: journal.trades ?? [] };
+      const local = await fetch("/api/trades?limit=500").then(r => r.json());
+      return { source: "local" as const, trades: Array.isArray(local) ? local : [] };
+    },
     refetchInterval: 10_000,
     staleTime: 5_000,
-    select: (data: any[]) => {
-      if (!Array.isArray(data)) return [];
+    select: (data: { source: "deriv" | "local"; trades: any[] }) => {
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-      return data
+      return data.trades
         .filter((t: any) => (t.status === "won" || t.status === "lost") && new Date(t.createdAt) >= todayStart)
         .sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     },

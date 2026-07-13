@@ -18,7 +18,7 @@
 
 import { db } from "@workspace/db";
 import { tradeIntelligenceReportsTable } from "@workspace/db";
-import { desc } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import type { CoordinatorOutput } from "./types";
 import { recordTradeOutcome as recordDynamicOutcome } from "./dynamic-confidence";
 import { logger } from "../logger";
@@ -360,13 +360,29 @@ export async function getRecentReports(limit = 20) {
 }
 
 export async function getIntelligenceSummary() {
+  // Sample of the most recent reports drives the qualitative breakdown
+  // (findings, confidence assessment, timing) — a rolling window is fine for that.
   const reports = await db
     .select()
     .from(tradeIntelligenceReportsTable)
     .orderBy(desc(tradeIntelligenceReportsTable.createdAt))
     .limit(100);
 
-  if (reports.length === 0) {
+  // totalAnalyzed / winsAnalyzed / lossesAnalyzed must reflect the TRUE total
+  // count of analyzed trades (not just the 100-row sample above), so this KPI
+  // matches the "trades analyzed" counter shown elsewhere in the UI.
+  const [{ total, wins, losses }] = await db
+    .select({
+      total:  sql<number>`count(*)`,
+      wins:   sql<number>`count(*) filter (where ${tradeIntelligenceReportsTable.won} = true)`,
+      losses: sql<number>`count(*) filter (where ${tradeIntelligenceReportsTable.won} = false)`,
+    })
+    .from(tradeIntelligenceReportsTable);
+  const totalCount  = Number(total)  || 0;
+  const winsCount   = Number(wins)   || 0;
+  const lossesCount = Number(losses) || 0;
+
+  if (totalCount === 0) {
     return {
       totalAnalyzed: 0,
       winsAnalyzed: 0,
@@ -412,9 +428,12 @@ export async function getIntelligenceSummary() {
     .map(([finding, count]) => ({ finding, count }));
 
   return {
-    totalAnalyzed:           reports.length,
-    winsAnalyzed:            won.length,
-    lossesAnalyzed:          lost.length,
+    // True totals across ALL analyzed trades (matches the "trades analyzed" counter
+    // shown elsewhere in the UI) — NOT limited to the 100-row sample used for the
+    // qualitative breakdown below.
+    totalAnalyzed:           totalCount,
+    winsAnalyzed:            winsCount,
+    lossesAnalyzed:          lossesCount,
     avoidableLosses:         avoidable.length,
     avoidableLossRate:       lost.length > 0 ? Math.round(avoidable.length / lost.length * 100) : 0,
     overconfidentRate:       Math.round(overconfident  / reports.length * 100),

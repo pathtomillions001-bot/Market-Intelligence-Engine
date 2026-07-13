@@ -37,6 +37,7 @@ function buildTradingSettingsForManual(s: any, preferredContractTypes: string[])
     recoveryUnderDigit:     s?.recoveryUnderDigit ?? 5,
     recoveryMethod:         (s?.recoveryMethod === "instant" ? "instant" : "split") as "split" | "instant",
     recoveryMultiplier:     s ? Math.max(1.1, Number(s.recoveryMultiplier ?? 1.5)) : 1.5,
+    maxRecoverySteps:       s?.maxRecoverySteps ?? 3,
   };
 }
 
@@ -591,12 +592,17 @@ router.get("/deriv-journal", async (_req, res): Promise<void> => {
     const sellPrice = Number(t.sell_price ?? 0);
     const profit = Math.round((sellPrice - buyPrice) * 100) / 100;
     const market = DERIV_MARKETS.find((m) => m.symbol === t.underlying_symbol);
+    // Deriv's profit_table doesn't return a structured barrier field for digit
+    // contracts — approximate it from the longcode's trailing digit
+    // (e.g. "...last digit is strictly higher than 5." → barrier 5).
+    const longcodeBarrierMatch = typeof t.longcode === "string" ? t.longcode.match(/(\d)(?!.*\d)/) : null;
+    const barrier = longcodeBarrierMatch ? Number(longcodeBarrierMatch[1]) : null;
     return {
       id: t.transaction_id,
       symbol: t.underlying_symbol ?? "—",
       displayName: market?.displayName ?? t.underlying_symbol ?? "—",
       contractType: normalizeDerivContractType(t.contract_type ?? "UNKNOWN"),
-      barrier: null,
+      barrier,
       stake: buyPrice,
       payout: sellPrice,
       profit,

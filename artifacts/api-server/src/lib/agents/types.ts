@@ -87,6 +87,7 @@ export interface TradingSettings {
   recoveryUnderDigit: number;
   recoveryMethod: "split" | "instant";
   recoveryMultiplier: number;
+  maxRecoverySteps: number;
 }
 
 export interface DailyStats {

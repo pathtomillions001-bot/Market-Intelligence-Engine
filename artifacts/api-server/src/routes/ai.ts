@@ -177,6 +177,7 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     recoveryUnderDigit:     Math.min(9, Math.max(1, s?.recoveryUnderDigit ?? 5)),
     recoveryMethod:         (s?.recoveryMethod === "instant" ? "instant" : "split") as "split" | "instant",
     recoveryMultiplier:     s ? Math.max(1.1, Number(s.recoveryMultiplier ?? 1.5)) : 1.5,
+    maxRecoverySteps:       s?.maxRecoverySteps ?? 3,
   };
 }
 
@@ -461,8 +462,8 @@ async function runAutonomousLoop() {
       if (cooledDownSymbols.has(m.symbol)) return false;
       // Skip non-digit markets when only digit contract types are enabled
       if (hasDigitTypes && !hasDirectionTypes && !m.digitEnabled) return false;
-      // Bull/Bear markets only support Rise/Fall — skip when no direction types
-      // Bull/Bear support both direction AND digit contracts — allow if any enabled type matches
+      // Bull/Bear (RDBULL/RDBEAR) support both direction AND digit contracts
+      // (Over/Under, Even/Odd, Match/Differ) — skip only if neither is enabled.
       if ((m.symbol === "RDBULL" || m.symbol === "RDBEAR") && !hasDirectionTypes && !hasDigitTypes) return false;
       return true;
     });
@@ -808,6 +809,7 @@ async function runAutonomousLoop() {
         tradingSettings.riskProfile,
         tradingSettings.recoveryMultiplier,
         tradingSettings.recoveryMethod,
+        tradingSettings.maxRecoverySteps,
       );
     }
 
