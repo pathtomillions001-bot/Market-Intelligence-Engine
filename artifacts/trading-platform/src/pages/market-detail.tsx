@@ -595,7 +595,8 @@ export default function MarketDetail() {
     });
   }
 
-  const isDigitMarket = !!(symbol?.includes("R_") || symbol?.includes("1HZ") || symbol?.startsWith("JD"));
+  // RDBULL and RDBEAR fully support digit contracts (OVER/UNDER, EVEN/ODD, MATCH/DIFF)
+  const isDigitMarket = !!(symbol?.includes("R_") || symbol?.includes("1HZ") || symbol?.startsWith("JD") || symbol === "RDBULL" || symbol === "RDBEAR");
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-6 max-w-7xl mx-auto space-y-5 pb-10">

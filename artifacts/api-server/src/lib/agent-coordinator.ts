@@ -186,11 +186,16 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
     evenProb = ctx.digits.slice(-100).filter(d => d % 2 === 0).length / Math.min(100, ctx.digits.length);
   }
 
-  // Extend barrier options with DIGITMATCH/DIGITDIFF when preferred
+  // Extend barrier options with DIGITMATCH/DIGITDIFF when preferred.
+  // The matchRecommended/diffRecommended flags required positive EV which is extremely
+  // rare for these contracts (DIFF needs >96% win rate; MATCH needs >11% frequency).
+  // Remove those gates — always include the options and let the EV calculator + confidence
+  // fusion decide. DIGITMATCH is added in recovery mode (9× payout covers losses cheaply);
+  // DIGITDIFF is added in normal mode (coldest digit gives ~96% win rate, near-certain win).
   const allBarrierOptions = [...barrierOptions];
   if (wantMatchDiff && digitAgent.matchDiffersAnalysis && ctx.digits.length >= 30) {
     const md = digitAgent.matchDiffersAnalysis;
-    if (preferred.includes("DIGITMATCH") && md.matchRecommended) {
+    if (preferred.includes("DIGITMATCH")) {
       allBarrierOptions.push({
         contractType: "DIGITMATCH" as import("./agents/types").ProductType,
         barrier: md.matchDigit,
@@ -202,7 +207,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
         adjustedEvScore: md.matchEdge > 0 ? md.matchExpectedValue * 10 : md.matchExpectedValue,
       });
     }
-    if (preferred.includes("DIGITDIFF") && md.diffRecommended) {
+    if (preferred.includes("DIGITDIFF")) {
       allBarrierOptions.push({
         contractType: "DIGITDIFF" as import("./agents/types").ProductType,
         barrier: md.diffDigit,
@@ -211,7 +216,10 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
         expectedValue: md.diffExpectedValue,
         edge: md.diffEdge,
         tier: 1,
-        adjustedEvScore: md.diffEdge > 0 ? md.diffExpectedValue * 10 : md.diffExpectedValue,
+        // DIGITDIFF EV is typically slightly negative (needs >96% win to be +EV) but the
+        // near-certain win rate provides a different kind of edge. Boost the adjustedEvScore
+        // so it competes fairly against other options in the EV tournament.
+        adjustedEvScore: md.diffWinProbability > 0.9 ? md.diffExpectedValue + 0.08 : md.diffExpectedValue,
       });
     }
   }

@@ -462,7 +462,8 @@ async function runAutonomousLoop() {
       // Skip non-digit markets when only digit contract types are enabled
       if (hasDigitTypes && !hasDirectionTypes && !m.digitEnabled) return false;
       // Bull/Bear markets only support Rise/Fall — skip when no direction types
-      if ((m.symbol === "RDBULL" || m.symbol === "RDBEAR") && !hasDirectionTypes) return false;
+      // Bull/Bear support both direction AND digit contracts — allow if any enabled type matches
+      if ((m.symbol === "RDBULL" || m.symbol === "RDBEAR") && !hasDirectionTypes && !hasDigitTypes) return false;
       return true;
     });
 
@@ -522,9 +523,10 @@ async function runAutonomousLoop() {
               // Only run families whose contract types are enabled in settings.
               const families: Array<{ name: string; types: string[] }> = [];
               if (dirTypes.length > 0)                                  families.push({ name: "direction", types: dirTypes });
-              if (!isBullBear && m.digitEnabled && ouTypes.length > 0)  families.push({ name: "overunder", types: ouTypes });
-              if (!isBullBear && m.digitEnabled && eoTypes.length > 0)  families.push({ name: "evenodd",   types: eoTypes });
-              if (!isBullBear && m.digitEnabled && mdTypes.length > 0) {
+              // Bull/Bear markets (RDBULL/RDBEAR) fully support digit contracts — allow all digit families
+              if (m.digitEnabled && ouTypes.length > 0)  families.push({ name: "overunder", types: ouTypes });
+              if (m.digitEnabled && eoTypes.length > 0)  families.push({ name: "evenodd",   types: eoTypes });
+              if (m.digitEnabled && mdTypes.length > 0) {
                 // Strategy: trade DIGITDIFF in normal mode (coldest digit, ~96% win rate).
                 //           trade DIGITMATCH in recovery mode (hottest digit, 9× payout —
                 //           a $1.28 stake on MATCH recovers a $10 DIFF loss).

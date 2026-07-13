@@ -83,13 +83,18 @@ const AGENT_DISPLAY: Record<string, string> = {
 // ── KPI bar ───────────────────────────────────────────────────────────────────
 
 function KpiBar({ summary, missed, tradesAnalyzed }: { summary: any; missed: any; tradesAnalyzed: number }) {
+  // Use summary.totalAnalyzed as the primary count — it comes from ai_insights so wins+losses
+  // always adds up to it. tradesAnalyzed (from dynamic-confidence engine) is a separate counter
+  // shown in the EngineHealth panel; mixing them caused the visible 417 vs 67W+34L mismatch.
+  const insightTotal = summary?.totalAnalyzed ?? 0;
   const kpis = [
     {
       icon: Brain,
       label: "Trades Analyzed",
-      // Use the consistent tradesAnalyzed count from the dynamic-confidence engine
-      value: tradesAnalyzed > 0 ? tradesAnalyzed : (summary?.totalAnalyzed ?? 0),
-      sub: summary?.totalAnalyzed > 0 ? `${summary.winsAnalyzed}W · ${summary.lossesAnalyzed}L` : "No data yet",
+      value: insightTotal > 0 ? insightTotal : (tradesAnalyzed > 0 ? tradesAnalyzed : 0),
+      sub: insightTotal > 0
+        ? `${summary.winsAnalyzed}W · ${summary.lossesAnalyzed}L`
+        : tradesAnalyzed > 0 ? `${tradesAnalyzed} in calibration engine` : "No data yet",
       color: "text-primary",
       accent: "from-primary/20",
     },
