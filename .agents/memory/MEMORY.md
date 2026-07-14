@@ -28,3 +28,4 @@
 - [Matchdiff market-scanner gap](matchdiff-market-scanner-gap.md) — market-scanner.ts never modeled a "matchdiff" family; a family missing from enabledFamilies zeroes eligibility even if downstream logic is correct.
 - [Longcode barrier parsing](longcode-barrier-parsing.md) — never grab "last digit in the longcode string" for OVER/UNDER barriers; the trailing "after N ticks" clause corrupts it. Match the specific barrier phrase.
 - [Recovery multiplier calibration](recovery-multiplier-calibration.md) — recoveryMultiplier must be derived from the real Deriv payout of the configured barrier (1/(payout-1)×1.02), not a disconnected formula; Instant mode escalates past it only when needed to fully cover the debt.
+- [Streak calc needs newest-first input](streak-order-dependency.md) — any streak-counting function that assumes trades[0]=most recent breaks silently if fed an ascending-sorted list; always pass a newest-first copy in.

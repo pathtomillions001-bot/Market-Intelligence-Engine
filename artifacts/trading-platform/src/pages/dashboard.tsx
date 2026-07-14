@@ -457,6 +457,28 @@ export default function Dashboard() {
 
   // Optimistic trade results — applied immediately when trade_completed SSE fires
   const [pendingResults, setPendingResults] = useState<PendingResult[]>([]);
+  // Tracks stats.totalTrades as of the last time we reconciled pendingResults against
+  // the server. Once the server's todayStats already includes N more trades than it
+  // did before, the oldest N pendingResults are now double-counted (once by the
+  // server, once by our optimistic overlay below) — drop them. Without this, a
+  // pendingResults entry that never gets cleared by "journal_refreshed" (e.g. if that
+  // SSE event is delayed or missed) stays applied on top of already-updated server
+  // stats forever, which was producing a stale/incorrect streak on the Dashboard that
+  // didn't match Journal/Analytics (which read the server value directly).
+  const lastServerTotalRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!stats) return;
+    const prevTotal = lastServerTotalRef.current;
+    lastServerTotalRef.current = stats.totalTrades;
+    if (prevTotal === null) return;
+    const delta = stats.totalTrades - prevTotal;
+    if (delta > 0) {
+      setPendingResults(prev => prev.slice(delta));
+    } else if (delta < 0) {
+      // Day rolled over (today's stats reset) — nothing from the old day applies anymore.
+      setPendingResults([]);
+    }
+  }, [stats?.totalTrades]);
   // Parallel group scanner state — driven by scan_started + group_scanned SSE events
   const [groupScans, setGroupScans] = useState<Record<string, GroupScanResult | "scanning">>({});
   const [isScanningGroups, setIsScanningGroups] = useState(false);

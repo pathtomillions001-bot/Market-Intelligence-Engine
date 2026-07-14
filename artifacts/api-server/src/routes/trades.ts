@@ -565,7 +565,14 @@ function computeJournalStats(trades: any[]) {
   const today = trades
     .filter((t) => new Date(t.createdAt) >= todayStart)
     .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-  const todayStats = computeStatsCore(today);
+  // computeStatsCore's streak logic requires newest-first order (trades[0] = most
+  // recent) to count consecutive wins/losses correctly. `today` above is sorted
+  // ascending (oldest→newest) for the timeline/chart consumers, so pass a
+  // newest-first copy here — otherwise the streak gets computed starting from the
+  // OLDEST trade of the day instead of the most recent one, producing a wrong
+  // "current" streak (e.g. showing a 2-loss streak from earlier in the day while
+  // the actual latest trades are a win streak).
+  const todayStats = computeStatsCore([...today].reverse());
 
   return {
     ...allTime,
