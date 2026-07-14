@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -8,14 +8,10 @@ import {
   TrendingUp, TrendingDown, Activity, Shield, Zap, Target,
   CheckCircle2, XCircle, Clock, Flame, AlertTriangle,
 } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useEffect } from "react";
 import { useGetDrawdownAnalysis } from "@workspace/api-client-react";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-function toLocalDate(d: Date) {
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-}
 
 function fmtTime(iso: string) {
   const d = new Date(iso);
@@ -51,28 +47,32 @@ function contractColor(ct: string) {
 
 // ── Data hooks ────────────────────────────────────────────────────────────────
 
-// Same source of truth as Dashboard/Journal (Deriv's broker-confirmed profit_table,
-// no local-DB fallback) so "today's" profit/win-rate/streak/best-trade always agree
-// across every page. Falls back to the local trades table only when there's no
-// connected Deriv account (e.g. pure paper-trading before a token is set).
+// Same query key AND same endpoint as Dashboard/Journal ("derivJournal") — this is
+// what keeps "today's" profit/win-rate/streak/best-trade in sync across every page.
+// Previously Analytics used its own query key + its own client-side midnight filter,
+// which could drift from the Dashboard/Journal numbers (different fetch timing, and
+// the server's day boundary vs the browser's day boundary are not guaranteed to be
+// the same instant). Now Analytics reads the exact same `todayTrades` list and
+// `stats.todayStats` the backend already computed — no re-derivation, no drift.
 function useTodayTrades() {
-  const today = toLocalDate(new Date());
   return useQuery({
-    queryKey: ["analytics-today", today],
+    queryKey: ["derivJournal"],
     queryFn: async () => {
       const journal = await fetch("/api/trades/deriv-journal").then(r => r.json());
-      if (journal?.source === "deriv") return { source: "deriv" as const, trades: journal.trades ?? [] };
+      if (journal?.source === "deriv" || journal?.source === "none") {
+        return { todayTrades: journal.todayTrades ?? [], todayStats: journal.stats?.todayStats ?? null };
+      }
+      // No Deriv connection at all — fall back to local DB, filtered client-side
+      // (there is no backend "today" computation to defer to on this path).
       const local = await fetch("/api/trades?limit=500").then(r => r.json());
-      return { source: "local" as const, trades: Array.isArray(local) ? local : [] };
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+      const todayTrades = (Array.isArray(local) ? local : [])
+        .filter((t: any) => (t.status === "won" || t.status === "lost") && new Date(t.createdAt) >= todayStart)
+        .sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      return { todayTrades, todayStats: null };
     },
     refetchInterval: 10_000,
     staleTime: 5_000,
-    select: (data: { source: "deriv" | "local"; trades: any[] }) => {
-      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-      return data.trades
-        .filter((t: any) => (t.status === "won" || t.status === "lost") && new Date(t.createdAt) >= todayStart)
-        .sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-    },
   });
 }
 
@@ -354,10 +354,34 @@ function RiskSnapshot({ drawdown, consecutiveLosses, consecutiveWins }: { drawdo
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function Analytics() {
-  const { data: trades = [], isLoading } = useTodayTrades();
+  const queryClient = useQueryClient();
+  const { data, isLoading } = useTodayTrades();
+  const trades = data?.todayTrades ?? [];
+  const serverStats = data?.todayStats ?? null;
   const { data: drawdown } = useGetDrawdownAnalysis({ query: { refetchInterval: 15000 } } as any);
 
+  // Same SSE-driven invalidation Dashboard/Journal use, on the same "derivJournal"
+  // query key — so a trade completing anywhere in the app updates Analytics with
+  // the same zero-latency feel, not just its 10s poll.
+  useEffect(() => {
+    const es = new EventSource("/api/ai/events");
+    es.addEventListener("trade_completed", () => queryClient.invalidateQueries({ queryKey: ["derivJournal"] }));
+    es.addEventListener("journal_refreshed", () => queryClient.invalidateQueries({ queryKey: ["derivJournal"] }));
+    return () => es.close();
+  }, [queryClient]);
+
+  // Prefer the backend's todayStats (identical numbers to Dashboard/Journal) —
+  // only fall back to a client-side recompute on the no-Deriv-token local-DB path,
+  // where the backend hasn't already produced a todayStats object.
   const stats = useMemo(() => {
+    if (serverStats) {
+      return {
+        won: serverStats.wonTrades, lost: serverStats.lostTrades,
+        pnl: serverStats.totalProfit, wr: serverStats.winRate,
+        best: serverStats.bestTrade, worst: serverStats.worstTrade,
+        streak: serverStats.currentStreak,
+      };
+    }
     const won  = trades.filter((t: any) => t.won);
     const lost = trades.filter((t: any) => !t.won);
     const pnl  = Math.round(trades.reduce((s: number, t: any) => s + (t.profit ?? 0), 0) * 100) / 100;
@@ -372,7 +396,7 @@ export default function Analytics() {
       else break;
     }
     return { won: won.length, lost: lost.length, pnl, wr, best, worst, streak };
-  }, [trades]);
+  }, [trades, serverStats]);
 
   const consecutiveLosses = stats.streak < 0 ? Math.abs(stats.streak) : 0;
   const consecutiveWins   = stats.streak > 0 ? stats.streak : 0;

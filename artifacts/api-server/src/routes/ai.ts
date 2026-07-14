@@ -13,6 +13,7 @@ import { analyzeCompletedTrade, getRecentReports, getIntelligenceSummary } from 
 import { trackRejectedTrade, getMissedOpportunitySummary, getRecentMissed } from "../lib/agents/missed-opportunity";
 import { getStatus as getDynamicConfidenceStatus, loadFromDb as loadDynamicConfidence } from "../lib/agents/dynamic-confidence";
 import { broadcastSSE, addSSEClient, removeSSEClient } from "../lib/sse";
+import { getTodayStart } from "./trades";
 
 const router = Router();
 
@@ -376,8 +377,10 @@ async function runAutonomousLoop() {
 
     if (settings?.loopIntervalSec) loopIntervalSec = settings.loopIntervalSec;
 
-    // Daily stats
-    const today = new Date(); today.setHours(0, 0, 0, 0);
+    // Daily stats — shared day boundary with /api/trades/deriv-journal and
+    // /api/trades/daily-summary so the engine's own hard-stop checks below use
+    // the exact same "today" window the dashboards display.
+    const today = getTodayStart();
     const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
     const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
     tradesExecutedToday = closedToday.length;

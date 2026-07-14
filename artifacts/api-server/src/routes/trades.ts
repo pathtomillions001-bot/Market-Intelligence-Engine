@@ -53,6 +53,19 @@ function buildDailyStatsForManual(closedToday: any[]): DailyStats {
   return { tradesCount: closedToday.length, wins, losses, profit, consecutiveLosses, consecutiveWins };
 }
 
+// ── Single source of truth for "today" boundary ─────────────────────────────
+// Every endpoint that reports today's win rate/profit/trade-count MUST call
+// this instead of rolling its own `new Date(); setHours(0,0,0,0)` — a second
+// independent copy of this logic is exactly how Dashboard/Journal/Analytics
+// drifted out of sync before. Server-local midnight; resets naturally at
+// midnight since it's computed fresh on every request (no caching of the
+// boundary itself).
+export function getTodayStart(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
 // ── Helper: get Deriv journal transactions (cache-first, one-shot fallback) ────
 async function getDerivTransactions(token: string): Promise<any[]> {
   // Return cached data if fresh (within 20s — short window so force-refreshed data lands quickly)
@@ -110,8 +123,7 @@ router.get("/stats", async (_req, res): Promise<void> => {
 });
 
 router.get("/daily-summary", async (_req, res): Promise<void> => {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const today = getTodayStart();
 
   const settings = await db.select().from(settingsTable).limit(1);
   const accounts = await db.select().from(accountsTable).limit(1);
@@ -122,23 +134,28 @@ router.get("/daily-summary", async (_req, res): Promise<void> => {
   const balance = accounts.length > 0 ? Number(accounts[0].balance) : 0;
 
   if (!token) {
-    // No Deriv connection — use local DB for engine-tracked trades only
+    // No Deriv connection — use local DB for engine-tracked trades only. Reuse
+    // computeJournalStats so this stays numerically identical to /deriv-journal's
+    // todayStats if the app is ever queried on the same local-DB fallback path.
     const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
-    const closed = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
-    const totalProfit = closed.reduce((s, t) => s + Number(t.profit ?? 0), 0);
-    const won = closed.filter((t) => t.status === "won").length;
+    const closed = todayTrades
+      .filter((t) => t.status === "won" || t.status === "lost")
+      .map((t) => ({ won: t.status === "won", profit: Number(t.profit ?? 0), createdAt: t.createdAt }));
+    const { totalProfit, wonTrades, lostTrades, totalTrades, currentStreak } = computeStatsCore(closed);
     res.json({
       date: today.toISOString().split("T")[0],
-      tradesCount: closed.length, wonCount: won, lostCount: closed.length - won,
+      tradesCount: totalTrades, wonCount: wonTrades, lostCount: lostTrades,
       totalProfit, dailyTarget, dailyLossLimit,
       targetProgress: dailyTarget > 0 ? Math.min(totalProfit / dailyTarget, 1) : 0,
       isTargetMet: totalProfit >= dailyTarget, isLossLimitHit: totalProfit <= -dailyLossLimit,
-      balanceStart: balance - totalProfit, balanceNow: balance, currentStreak: 0,
+      balanceStart: balance - totalProfit, balanceNow: balance, currentStreak,
     });
     return;
   }
 
-  // Use Deriv journal as source of truth
+  // Use Deriv journal as source of truth — same computeJournalStats() call the
+  // /deriv-journal endpoint uses, so this widget's numbers can never drift from
+  // the Dashboard/Journal/Analytics stat cards.
   const transactions = await getDerivTransactions(token);
   const allMapped = transactions.map((t: any) => {
     const buyPrice = Number(t.buy_price ?? 0);
@@ -147,18 +164,14 @@ router.get("/daily-summary", async (_req, res): Promise<void> => {
     return { won: profit > 0, profit, createdAt: t.purchase_time ? new Date(t.purchase_time * 1000).toISOString() : new Date().toISOString() };
   });
 
-  const todayMapped = allMapped.filter((t) => new Date(t.createdAt) >= today);
-  const totalProfit = Math.round(todayMapped.reduce((s, t) => s + t.profit, 0) * 100) / 100;
-  const won = todayMapped.filter((t) => t.won).length;
-
-  // Streak from ALL recent trades (newest first from Deriv API — most accurate)
-  const allStats = computeJournalStats(allMapped);
+  const { todayStats, currentStreak } = computeJournalStats(allMapped);
+  const totalProfit = todayStats.totalProfit;
 
   res.json({
     date: today.toISOString().split("T")[0],
-    tradesCount: todayMapped.length,
-    wonCount: won,
-    lostCount: todayMapped.length - won,
+    tradesCount: todayStats.totalTrades,
+    wonCount: todayStats.wonTrades,
+    lostCount: todayStats.lostTrades,
     totalProfit,
     dailyTarget,
     dailyLossLimit,
@@ -167,7 +180,9 @@ router.get("/daily-summary", async (_req, res): Promise<void> => {
     isLossLimitHit: totalProfit <= -dailyLossLimit,
     balanceStart: balance - totalProfit,
     balanceNow: balance,
-    currentStreak: allStats.currentStreak,
+    // Streak from ALL recent trades (newest first from Deriv API — most accurate),
+    // same field computeJournalStats().currentStreak returns for the all-time view.
+    currentStreak,
   });
 });
 
@@ -546,8 +561,10 @@ function computeStatsCore(trades: any[]) {
 function computeJournalStats(trades: any[]) {
   const allTime = computeStatsCore(trades);
 
-  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-  const today = trades.filter((t) => new Date(t.createdAt) >= todayStart);
+  const todayStart = getTodayStart();
+  const today = trades
+    .filter((t) => new Date(t.createdAt) >= todayStart)
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   const todayStats = computeStatsCore(today);
 
   return {
@@ -558,7 +575,40 @@ function computeJournalStats(trades: any[]) {
     todayLost: todayStats.lostTrades,
     // Clean-slate view for Dashboard/Journal — everything scoped to "today" only.
     todayStats,
+    // The actual today-scoped trade list (oldest → newest), so every consumer
+    // (Analytics charts/timeline included) renders the exact same rows the
+    // stats above were computed from, instead of re-deriving its own filter.
+    todayTradesList: today,
   };
+}
+
+// Deriv's profit_table has no structured "barrier" field for digit contracts, so
+// the barrier has to be parsed out of the longcode sentence. The naive approach —
+// "grab the last digit anywhere in the string" — is WRONG: longcodes end with a
+// duration clause ("...after 3 ticks."), so a contract barrier of 8 traded with a
+// 3-tick duration would read back as barrier 3. Match the specific phrase the
+// barrier actually appears in instead of scanning the whole sentence.
+//   DIGITOVER:  "...is strictly higher than 8 after 5 ticks."
+//   DIGITUNDER: "...is strictly lower than 8 after 5 ticks."
+//   DIGITMATCH: "...is 5 after 5 ticks."
+//   DIGITDIFF:  "...is not 5 after 5 ticks."
+//   DIGITEVEN/DIGITODD have no barrier — none of these patterns match, correctly.
+const BARRIER_PATTERNS: RegExp[] = [
+  /strictly higher than (\d)/i,
+  /strictly lower than (\d)/i,
+  /is not (\d) after \d+ tick/i,
+  /is (\d) after \d+ tick/i,
+  /matches (\d)/i,
+  /differs from (\d)/i,
+];
+
+function extractBarrierFromLongcode(longcode: unknown): number | null {
+  if (typeof longcode !== "string") return null;
+  for (const pattern of BARRIER_PATTERNS) {
+    const match = longcode.match(pattern);
+    if (match) return Number(match[1]);
+  }
+  return null;
 }
 
 function normalizeDerivContractType(ct: string): string {
@@ -573,7 +623,8 @@ router.get("/deriv-journal", async (_req, res): Promise<void> => {
   const accounts = await db.select().from(accountsTable).limit(1);
   const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
 
-  const emptyResponse = { source: "none" as const, trades: [], stats: computeJournalStats([]) };
+  const emptyStats = computeJournalStats([]);
+  const emptyResponse = { source: "none" as const, trades: [], todayTrades: emptyStats.todayTradesList, stats: emptyStats };
 
   if (!token) {
     res.json(emptyResponse);
@@ -583,7 +634,7 @@ router.get("/deriv-journal", async (_req, res): Promise<void> => {
   const transactions = await getDerivTransactions(token);
 
   if (transactions.length === 0) {
-    res.json({ source: "deriv" as const, trades: [], stats: computeJournalStats([]) });
+    res.json({ source: "deriv" as const, trades: [], todayTrades: emptyStats.todayTradesList, stats: emptyStats });
     return;
   }
 
@@ -592,11 +643,10 @@ router.get("/deriv-journal", async (_req, res): Promise<void> => {
     const sellPrice = Number(t.sell_price ?? 0);
     const profit = Math.round((sellPrice - buyPrice) * 100) / 100;
     const market = DERIV_MARKETS.find((m) => m.symbol === t.underlying_symbol);
-    // Deriv's profit_table doesn't return a structured barrier field for digit
-    // contracts — approximate it from the longcode's trailing digit
-    // (e.g. "...last digit is strictly higher than 5." → barrier 5).
-    const longcodeBarrierMatch = typeof t.longcode === "string" ? t.longcode.match(/(\d)(?!.*\d)/) : null;
-    const barrier = longcodeBarrierMatch ? Number(longcodeBarrierMatch[1]) : null;
+    // See extractBarrierFromLongcode() — parses the specific barrier phrase,
+    // not just "the last digit anywhere in the sentence" (which used to pick up
+    // the duration's tick count instead of the actual barrier).
+    const barrier = extractBarrierFromLongcode(t.longcode);
     return {
       id: t.transaction_id,
       symbol: t.underlying_symbol ?? "—",
@@ -619,7 +669,8 @@ router.get("/deriv-journal", async (_req, res): Promise<void> => {
     };
   });
 
-  res.json({ source: "deriv" as const, trades: mapped, stats: computeJournalStats(mapped) });
+  const journalStats = computeJournalStats(mapped);
+  res.json({ source: "deriv" as const, trades: mapped, todayTrades: journalStats.todayTradesList, stats: journalStats });
 });
 
 router.get("/:id", async (req, res): Promise<void> => {

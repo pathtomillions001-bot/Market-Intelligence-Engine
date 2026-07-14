@@ -120,13 +120,16 @@ export function isInRecovery(): boolean {
  * SPLIT mode (default): cap stake at `baseStake × recoveryMultiplier`.
  *   If the required stake exceeds this cap, partial recovery happens —
  *   the remaining debt persists until the next winning recovery trade.
- *   The multiplier comes from settings (default 1.5×), meaning the
- *   recovery stake is at most 1.5× the original trade stake.
+ *   The multiplier comes from settings (default 1.62×), meaning the
+ *   recovery stake is at most 1.62× the original trade stake per step.
  *
- * INSTANT mode: no multiplier cap — use exactly the minimum stake needed
- *   to recover the full unrecovered amount in one trade. Only the
- *   profile-based exposure cap (% of balance) limits the stake.
- *   The AI will attempt to recover everything in the very next win.
+ * INSTANT mode: use the SAME recoveryMultiplier as Split whenever that's enough
+ *   to cover the debt in one trade (i.e. it behaves exactly like Split's step 1,
+ *   just always attempted in a single shot instead of progressively). Only when
+ *   the accumulated debt is too large for that multiplier to fully cover does the
+ *   stake grow beyond it — and even then, only up to the exact minimum needed to
+ *   recover the debt, never more. This keeps Instant from ever over-exposing the
+ *   user's capital chasing a bigger win than the debt requires.
  *
  * In both modes the stake is floored at $0.35 and capped at maxTradeStake.
  *
@@ -141,8 +144,14 @@ export function isInRecovery(): boolean {
  *   Step 2: cap = base × 2.62;  win profit = 2.62 × 0.62 = 1.624 × base ✓
  *   Step 3: cap = base × 3.62;  win profit = 3.62 × 0.62 = 2.244 × base
  *
- * Example (INSTANT): same loss
- *   stake = minRecovery = unrecoveredAmount / netPayout × 1.02 → full recovery in one winning trade.
+ * Example (INSTANT, small loss — the standard multiplier is enough):
+ *   base=$10, lost $10, payout 1.62× → splitEquivalentStake = $16.20;
+ *   $16.20 × 0.62 = $10.04 ≥ $10 debt → use $16.20 (same as Split step 1, not larger).
+ *
+ * Example (INSTANT, larger accumulated debt — standard multiplier isn't enough):
+ *   base=$10, debt=$40, payout 1.62× → $16.20 × 0.62 = $10.04 < $40, so scale up to
+ *   minRecovery = $40 / 0.62 × 1.02 ≈ $65.80 — the exact minimum to win back ~$41
+ *   (debt + small buffer), not an oversized stake chasing a much bigger profit.
  */
 function computeDynamicStake(
   unrecoveredAmount: number,
@@ -171,19 +180,21 @@ function computeDynamicStake(
   const maxExposure = Math.min(balance * maxExposurePct, maxTradeStake);
 
   if (recoveryMethod === "instant") {
-    // Instant: stake exactly what is needed to recover the full loss in ONE winning trade,
-    // but bounded by the SAME worst-case exposure ceiling as Split mode
-    // (baseStake × (recoveryMultiplier + maxRecoverySteps)) so Instant can never
-    // stake more, relative to the original loss, than Split's worst case would.
-    // This keeps "protect the stake" true for both modes — Instant just reaches
-    // full recovery in fewer trades when the loss is small enough to allow it.
+    // Instant: use the SAME reasonable multiplier Split mode uses (recoveryMultiplier,
+    // e.g. 1.62×) whenever that's enough to cover the loss in one trade — Instant
+    // should never stake more than Split's own step-1 stake just because it's
+    // "instant". Only when the accumulated debt is too large for that multiplier to
+    // cover in one shot does the stake grow — and even then, only up to the exact
+    // minimum needed to fully recover (plus a 2% rounding buffer), never further.
     //
-    // Example: base=$1, loss=$1, payout=1.62x → minRecovery=$1.65 → use $1.65 (full recovery)
-    // Example: base=$1, loss=$40, payout=1.62x → minRecovery=$65.8, but instantCeiling
-    //   (e.g. base=$1, multiplier=1.62, steps=3 → ceiling=$4.62) caps it well below that —
-    //   partial recovery this trade; remaining debt carries forward to the next win(s).
-    const instantCeiling = baseStake > 0 ? baseStake * (recoveryMultiplier + maxRecoverySteps) : maxTradeStake;
-    return Math.max(0.35, Math.min(minRecovery, maxExposure, maxTradeStake, instantCeiling));
+    // Example: lose $40 with $1.62x-equivalent stake sized to cover exactly that —
+    // this should win back ~$42 (loss + small profit), not a large stake sized to
+    // win $75, which would needlessly expose more capital than the debt requires.
+    const splitEquivalentStake = baseStake > 0 ? baseStake * recoveryMultiplier : minRecovery;
+    const stake = (splitEquivalentStake * netPayout >= unrecoveredAmount)
+      ? splitEquivalentStake   // the standard multiplier already covers the debt — use it, nothing bigger
+      : minRecovery;           // debt exceeds what the standard multiplier covers — use the exact minimum needed instead
+    return Math.max(0.35, Math.min(stake, maxExposure, maxTradeStake));
   }
 
   // Split: progressive cap grows by 1× base stake per consecutive recovery loss.
@@ -206,9 +217,11 @@ function computeDynamicStake(
  * contract type the AI has selected for this trade (recovery is not tied to a
  * specific contract type).
  *
- * @param recoveryMultiplier  From settings — controls the split-mode base multiplier (default 1.62 for OVER 3 / UNDER 6).
- *                            Calibrate to the recovery barrier payout so step 1 recovers exactly one base-stake loss.
- *                            Auto-suggested: multiplier ≈ 10/(9-overDigit) × 0.972.
+ * @param recoveryMultiplier  From settings — controls the split-mode base multiplier (and Instant's floor, see
+ *                            computeDynamicStake above). Must be calibrated to the REAL payout of the recovery
+ *                            barrier so step 1 recovers exactly one base-stake loss: multiplier ≈ 1/(payout-1) × 1.02.
+ *                            The frontend's "Auto" button computes this from the actual Deriv payout table —
+ *                            a generic barrier-index formula disconnected from real payouts was the previous bug.
  * @param recoveryMethod      "split" (progressive, non-exponential) or "instant" (full recovery in one trade)
  */
 export function getDynamicRecoveryStake(

@@ -193,13 +193,22 @@ export default function Settings() {
 
   if (isLoading) return <div className="p-8 text-muted-foreground text-sm animate-pulse">Loading settings…</div>;
 
-  // Auto-suggest a recovery multiplier calibrated to the selected recovery barrier payout.
-  // Formula: payout ≈ (10 / winDigits) × 0.972, where winDigits = 9 - overDigit.
-  // At OVER 3 / UNDER 6 this yields 1.62, meaning a 1.62× stake exactly covers 1 base-stake loss.
+  // Auto-suggest a recovery multiplier calibrated to the selected recovery barrier's REAL
+  // Deriv payout (mirrors DIGIT_PAYOUTS in api-server/src/lib/agents/digit-probability.ts).
+  // Using a generic formula disconnected from the actual payout table silently mismatched
+  // the multiplier to the barrier — e.g. OVER 3's real payout is 1.37× (needs ~2.76× stake
+  // to cover one loss), not the 1.62× a rough approximation suggested. That mismatch was
+  // the true cause of "instant recovery uses way more than expected" reports: the stake
+  // math was correct, but the multiplier fed into it didn't match the barrier being traded.
+  const DIGITOVER_PAYOUTS: Record<number, number> = {
+    0: 1.04, 1: 1.08, 2: 1.19, 3: 1.37, 4: 1.63, 5: 1.96, 6: 2.45, 7: 3.27, 8: 4.90,
+  };
   const suggestedMultiplier = (() => {
-    const winDigits = 9 - form.recoveryOverDigit;
-    if (winDigits <= 0) return 9.0;
-    return Math.round((10 / winDigits) * 0.972 * 100) / 100;
+    const payout = DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63;
+    const netPayout = payout - 1;
+    if (netPayout <= 0) return 9.0;
+    // Minimum multiplier so that one win at this payout exactly covers one base-stake loss.
+    return Math.round((1 / netPayout) * 1.02 * 100) / 100;
   })();
 
   return (
@@ -391,19 +400,19 @@ export default function Settings() {
           </SettingRow>
           <SettingRow
             label="Recovery — OVER digit"
-            description={`Barrier for DIGITOVER while recovering. Default: OVER 3 (~60% win rate, payout ≈${(() => { const w = 9 - form.recoveryOverDigit; return w > 0 ? (Math.round((10/w)*0.972*100)/100).toFixed(2) : "9.00"; })()}×). Adjust Recovery Multiplier to match.`}
+            description={`Barrier for DIGITOVER while recovering. Real payout ≈${(DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63).toFixed(2)}× — use the Auto button above to keep Recovery Multiplier calibrated to it.`}
           >
             <NumInput value={form.recoveryOverDigit} onChange={(v) => { set("recoveryOverDigit", v); }} min={0} max={8} />
           </SettingRow>
           <SettingRow
             label="Recovery — UNDER digit"
-            description={`Barrier for DIGITUNDER while recovering. Default: UNDER 6 (~60% win rate, payout ≈${(() => { const w = form.recoveryUnderDigit; return w > 0 ? (Math.round((10/w)*0.972*100)/100).toFixed(2) : "9.00"; })()}×). Adjust Recovery Multiplier to match.`}
+            description={`Barrier for DIGITUNDER while recovering. Real payout ≈${(DIGITOVER_PAYOUTS[9 - form.recoveryUnderDigit] ?? 1.63).toFixed(2)}× — use the Auto button above to keep Recovery Multiplier calibrated to it.`}
           >
             <NumInput value={form.recoveryUnderDigit} onChange={(v) => { set("recoveryUnderDigit", v); }} min={1} max={9} />
           </SettingRow>
           <div className="mt-2 p-2.5 bg-secondary/20 rounded-lg text-[11px] text-muted-foreground space-y-1">
             <p><strong className="text-foreground">Tip:</strong> Normal digits OVER 1 / UNDER 8 give ~80% win rate with smaller payout — high frequency, steady income.</p>
-            <p>Recovery digits OVER 3 / UNDER 6 give ~60% win rate with 1.62× payout — the recovery multiplier (1.62) is calibrated so one win covers the full loss. Use the <strong className="text-foreground">Auto</strong> button above to keep them in sync.</p>
+            <p>Lower recovery barriers pay out less per win, so they need a <em>bigger</em> multiplier to cover one loss. The Recovery Multiplier must match whichever barrier you pick — use the <strong className="text-foreground">Auto</strong> button above any time you change the barrier.</p>
           </div>
         </CardContent>
       </Card>
