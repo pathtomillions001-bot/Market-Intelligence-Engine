@@ -23,13 +23,14 @@
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface RecoveryState {
-  inRecovery:          boolean;
-  recoveryStep:        number;       // 0 = not in recovery; increments per consecutive recovery loss
-  unrecoveredAmount:   number;       // dollars still owed before returning to normal mode
-  baseStake:           number;       // normal stake the engine recovers back to
-  streakLossCount:     number;       // consecutive losses in the current streak (drives dashboard + cooldown gate)
-  streakStartAmount:   number;       // total lost in this streak (display)
-  resetDate:           string;       // local YYYY-MM-DD this state belongs to — drives the daily auto-reset
+  inRecovery:               boolean;
+  recoveryStep:             number;       // 0 = not in recovery; increments per consecutive recovery loss
+  unrecoveredAmount:        number;       // dollars still owed before returning to normal mode
+  baseStake:                number;       // normal stake the engine recovers back to
+  streakLossCount:          number;       // consecutive losses in the current streak (drives dashboard + cooldown gate)
+  streakStartAmount:        number;       // total lost in this streak (display)
+  resetDate:                string;       // local YYYY-MM-DD this state belongs to — drives the daily auto-reset
+  consecutiveMatchLosses:   number;       // DIGITMATCH losses in a row while in recovery — triggers DIFF fallback at ≥2
 }
 
 /** Local calendar date (server time) in YYYY-MM-DD, matching how "today" is computed elsewhere (daily P&L, daily stats). */
@@ -41,13 +42,14 @@ function todayKey(): string {
 
 function freshState(): RecoveryState {
   return {
-    inRecovery:          false,
-    recoveryStep:        0,
-    unrecoveredAmount:   0,
-    baseStake:           0,
-    streakLossCount:     0,
-    streakStartAmount:   0,
-    resetDate:           todayKey(),
+    inRecovery:               false,
+    recoveryStep:             0,
+    unrecoveredAmount:        0,
+    baseStake:                0,
+    streakLossCount:          0,
+    streakStartAmount:        0,
+    resetDate:                todayKey(),
+    consecutiveMatchLosses:   0,
   };
 }
 
@@ -266,8 +268,11 @@ export function recordOutcome(
   profit: number,
   stakeUsed: number,
   maxRecoverySteps: number,
+  contractType?: string,
 ): RecoveryState {
   ensureFreshDay();
+  const isMatch = contractType === "DIGITMATCH";
+
   if (won) {
     if (state.inRecovery) {
       const recovered = Math.max(0, profit);
@@ -283,24 +288,36 @@ export function recordOutcome(
       } else {
         state.unrecoveredAmount = remaining;
         // Streak is broken by a win, but the debt (and recovery mode) persists
-        // until it is fully covered.
+        // until it is fully covered. Reset consecutive MATCH loss counter on any win.
         state.streakLossCount = 0;
+        state.consecutiveMatchLosses = 0;
       }
     }
   } else {
     if (!state.inRecovery) {
-      state.inRecovery        = true;
-      state.recoveryStep      = 1;
-      state.baseStake         = state.baseStake > 0 ? state.baseStake : stakeUsed;
-      state.unrecoveredAmount = stakeUsed;
-      state.streakLossCount   = 1;
-      state.streakStartAmount = stakeUsed;
+      state.inRecovery               = true;
+      state.recoveryStep             = 1;
+      state.baseStake                = state.baseStake > 0 ? state.baseStake : stakeUsed;
+      state.unrecoveredAmount        = stakeUsed;
+      state.streakLossCount          = 1;
+      state.streakStartAmount        = stakeUsed;
+      // If the very first loss was a MATCH trade, start the counter
+      state.consecutiveMatchLosses   = isMatch ? 1 : 0;
     } else {
       const cap                = maxRecoverySteps > 0 ? maxRecoverySteps : 3;
       state.recoveryStep       = Math.min(state.recoveryStep + 1, cap);
       state.unrecoveredAmount += stakeUsed;
       state.streakLossCount++;
       state.streakStartAmount += stakeUsed;
+      // Track consecutive MATCH losses during recovery for the DIFF fallback gate.
+      // Reset to 0 when any non-MATCH trade loses (we're already on a DIFF attempt).
+      if (isMatch) {
+        state.consecutiveMatchLosses++;
+      } else {
+        // A non-MATCH loss during recovery — reset the MATCH counter so the next
+        // recovery cycle restarts with MATCH before falling back to DIFF again.
+        state.consecutiveMatchLosses = 0;
+      }
     }
   }
 
@@ -351,16 +368,18 @@ export function loadState(json: string): void {
     }
 
     state = {
-      inRecovery:          !!parsed.inRecovery,
-      recoveryStep:        Number(parsed.recoveryStep)       || 0,
-      unrecoveredAmount:   Number(parsed.unrecoveredAmount)  || 0,
-      baseStake:           Number(parsed.baseStake)          || 0,
-      streakLossCount:     Number(parsed.streakLossCount)    || 0,
-      streakStartAmount:   Number(parsed.streakStartAmount)  || 0,
+      inRecovery:               !!parsed.inRecovery,
+      recoveryStep:             Number(parsed.recoveryStep)       || 0,
+      unrecoveredAmount:        Number(parsed.unrecoveredAmount)  || 0,
+      baseStake:                Number(parsed.baseStake)          || 0,
+      streakLossCount:          Number(parsed.streakLossCount)    || 0,
+      streakStartAmount:        Number(parsed.streakStartAmount)  || 0,
       // Older/legacy saved rows never had resetDate — treat as "not today" so a
       // pre-existing carry-over debt from before this feature existed is cleared
       // immediately on load rather than silently resurrected.
-      resetDate:           typeof parsed.resetDate === "string" ? parsed.resetDate : "",
+      resetDate:                typeof parsed.resetDate === "string" ? parsed.resetDate : "",
+      // New field — default to 0 for rows saved before this feature existed
+      consecutiveMatchLosses:   Number(parsed.consecutiveMatchLosses) || 0,
     };
   } catch {
     /* ignore malformed state — start fresh */

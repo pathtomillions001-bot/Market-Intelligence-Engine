@@ -375,7 +375,7 @@ router.post("/", async (req, res): Promise<void> => {
     // recovery state, regardless of which contract type caused the original loss.
     {
       const maxSteps = settings.length > 0 ? (settings[0] as any).maxRecoverySteps ?? 3 : 3;
-      if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps);
+      if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps, contractType);
     }
 
     // actualPayout = total returned to account when won (stake + net profit), 0 when lost
@@ -448,7 +448,7 @@ router.post("/", async (req, res): Promise<void> => {
   // Update recovery engine for paper/demo manual trades too (global state)
   {
     const maxSteps = settings.length > 0 ? (settings[0] as any).maxRecoverySteps ?? 3 : 3;
-    if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps);
+    if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps, contractType);
   }
 
   const [trade] = await db.insert(tradesTable).values({

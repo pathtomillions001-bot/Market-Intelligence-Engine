@@ -531,15 +531,19 @@ async function runAutonomousLoop() {
               if (m.digitEnabled && ouTypes.length > 0)  families.push({ name: "overunder", types: ouTypes });
               if (m.digitEnabled && eoTypes.length > 0)  families.push({ name: "evenodd",   types: eoTypes });
               if (m.digitEnabled && mdTypes.length > 0) {
-                // Strategy: trade DIGITDIFF in normal mode (coldest digit, ~96% win rate).
-                //           trade DIGITMATCH in recovery mode (hottest digit, 9× payout —
-                //           a $1.28 stake on MATCH recovers a $10 DIFF loss).
-                // If user only enabled one of the two, use whichever is enabled.
+                // Strategy:
+                //   Normal mode  → DIGITDIFF (coldest digit, ~96% win rate, 1.04× payout)
+                //   Recovery 1–2 → DIGITMATCH (hottest digit, 9× payout — tiny stake covers full DIFF loss)
+                //   Recovery 3+  → DIGITDIFF  (2 consecutive MATCH losses means MATCH isn't hitting;
+                //                              fall back to DIFF so the debt can still be recovered)
+                // If the user only enabled one of the two, use whichever is enabled.
                 const inRecovery = recoveryEngine.isInRecovery();
-                const activeMdTypes = (inRecovery && mdTypes.includes("DIGITMATCH"))
-                  ? ["DIGITMATCH"]   // recovery: high payout covers full DIFF loss cheaply
+                const consecutiveMatchLosses = recoveryEngine.getState().consecutiveMatchLosses;
+                const matchFallbackToDiff = inRecovery && consecutiveMatchLosses >= 2;
+                const activeMdTypes = (inRecovery && !matchFallbackToDiff && mdTypes.includes("DIGITMATCH"))
+                  ? ["DIGITMATCH"]   // recovery attempt 1–2: high payout covers full DIFF loss cheaply
                   : mdTypes.includes("DIGITDIFF")
-                    ? ["DIGITDIFF"]  // normal: near-certain wins on the cold digit
+                    ? ["DIGITDIFF"]  // normal mode OR match-fallback: near-certain wins on cold digit
                     : mdTypes;       // fallback: whatever the user enabled
                 families.push({ name: "matchdiff", types: activeMdTypes });
               }
@@ -790,11 +794,16 @@ async function runAutonomousLoop() {
     const rec = output.recommendation;
     const effectiveContractType = rec.product;
     const effectiveBarrier = rec.barrier;
-    // Enforce minimum 5 ticks for DIGITEVEN/DIGITODD — Deriv rejects < 5t for these types
+    // Enforce minimum 5 ticks for DIGITEVEN/DIGITODD — Deriv rejects < 5t for these types.
+    // Enforce exactly 5 ticks for DIGITMATCH/DIGITDIFF — these settle on the LAST digit so
+    // longer durations add time exposure without improving accuracy. The Markov analysis
+    // predicts the next digit distribution; capping at 5t keeps execution tight and accurate.
     const rawDuration = rec.duration ?? 5;
     const duration = (effectiveContractType === "DIGITEVEN" || effectiveContractType === "DIGITODD")
       ? Math.max(5, rawDuration)
-      : rawDuration;
+      : (effectiveContractType === "DIGITMATCH" || effectiveContractType === "DIGITDIFF")
+        ? 5
+        : rawDuration;
 
     // ── Recovery Mode stake override ─────────────────────────────────────────
     // Single global recovery state — ANY tracked contract type uses the exact
@@ -836,7 +845,7 @@ async function runAutonomousLoop() {
       // Paper trades: insert completed record immediately
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
       if (isTracked) {
-        recoveryEngine.recordOutcome(won, profit, stake, settings?.maxRecoverySteps ?? 3);
+        recoveryEngine.recordOutcome(won, profit, stake, settings?.maxRecoverySteps ?? 3, effectiveContractType);
       }
 
       const [paperTrade] = await db.insert(tradesTable).values({
@@ -961,7 +970,7 @@ async function runAutonomousLoop() {
       // Update the open record to Deriv-confirmed final status
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
       if (isTracked) {
-        recoveryEngine.recordOutcome(won, profit, stake, settings?.maxRecoverySteps ?? 3);
+        recoveryEngine.recordOutcome(won, profit, stake, settings?.maxRecoverySteps ?? 3, effectiveContractType);
       }
 
       await db.update(tradesTable).set({

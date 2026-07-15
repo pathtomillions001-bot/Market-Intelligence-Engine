@@ -172,11 +172,14 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     const isDigitMatch = bestEV.product === "DIGITMATCH";
 
     if (isDigitMatch) {
-      // DIGITMATCH → ~10% theoretical win, 9.0x payout — require positive EV
-      // (positive EV only when the matched digit appears >11.1% of the time)
-      if (bestEV.expectedValue <= 0) {
+      // DIGITMATCH → ~10% theoretical win, 9.0x payout.
+      // Breakeven frequency = 1/9 ≈ 11.1%. Require EV > -0.05 (i.e. the digit appears
+      // at roughly fair odds or better). Strict positive-EV here was too aggressive —
+      // in recovery mode the priority is to execute the high-payout trade; the 9×
+      // payout means even near-fair digit frequency is worth trading to cover the debt.
+      if (bestEV.expectedValue < -0.05) {
         rejectReasons.push(
-          `DIGITMATCH digit=${bestEV.barrier}: EV ${(bestEV.expectedValue * 100).toFixed(1)}% — digit not hot enough to trade`,
+          `DIGITMATCH digit=${bestEV.barrier}: EV ${(bestEV.expectedValue * 100).toFixed(1)}% — digit too cold (need > -5%)`,
         );
       }
     } else if (isDigitTier1) {
