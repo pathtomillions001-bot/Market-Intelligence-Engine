@@ -56,7 +56,9 @@ function discoverPattern(
 ): PatternResult {
   const relevant = snapshots.filter(s => s.symbol === symbol && s.contractType === contractType);
 
-  if (relevant.length < 5) {
+  // Require 20 historical trades for this symbol/contractType before generating any signal.
+  // At < 20 trades there is not enough data to distinguish a real pattern from random variance.
+  if (relevant.length < 20) {
     return {
       patternScore: 50,
       similarHistoricWinRate: 0.5,
@@ -70,13 +72,17 @@ function discoverPattern(
   const current = { ...currentState, symbol, contractType, won: false, barrier: undefined, timestamp: Date.now() };
   const similar = relevant.filter(s => stateDistance(s, current) < SIMILARITY_THRESHOLD);
 
-  if (similar.length < 3) {
+  // Require 15 similar states minimum — 3 was statistically insignificant
+  // (e.g. 2/3 wins = 66% score = 66 on the pattern score, pure noise at 3 samples).
+  // At 15 similar trades, a 2/3 win rate is still not significant, but outlier wins
+  // can't inflate the score to the degree they could at n=3.
+  if (similar.length < 15) {
     return {
       patternScore: 50,
       similarHistoricWinRate: 0.5,
       similarTradeCount: similar.length,
       clusterLabel: "novel_state",
-      dominantPattern: "Novel market state — no historical match",
+      dominantPattern: "Novel market state — insufficient similar historical setups",
     };
   }
 
@@ -118,7 +124,9 @@ export function runPatternDiscoveryAgent(
   return {
     agentId: "patternDiscovery",
     score: Math.min(95, Math.max(10, result.patternScore)),
-    confidence: Math.min(80, result.similarTradeCount * 10),
+    // Confidence grows gradually from the minimum threshold (15 trades) upward.
+    // At exactly 15 similar trades: confidence = 5. At 29 trades: ~75. At 30+: capped at 80.
+    confidence: Math.min(80, Math.max(0, (result.similarTradeCount - 14) * 5)),
     signal: scoreToSignal(result.patternScore),
     reasoning,
     data: { patternResult: result },

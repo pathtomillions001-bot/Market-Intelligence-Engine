@@ -233,11 +233,24 @@ export function runEVCalculatorAgent(
   const isDigitTier1Result = !!bestEVResult && bestEVResult.barrier !== undefined &&
     (DIGIT_TIERS[bestEVResult.product]?.[bestEVResult.barrier] ?? 2) <= 1;
 
-  const score = bestEVResult
+  // Scale digit EV scores by sample size to prevent small-sample inflation.
+  // A 5% edge computed from 30 digits is mostly statistical noise — the same
+  // edge from 100+ digits is a genuine signal. Blend toward neutral (50) for
+  // small samples so marginal setups don't look stronger than they really are.
+  const isDigitResult = bestEVResult ? bestEVResult.product.startsWith("DIGIT") : false;
+  const digitSampleSize = isDigitResult ? (ctx.digits?.length ?? 0) : 100;
+  const sampleFactor = Math.min(1, Math.sqrt(digitSampleSize / 100));
+
+  const rawScore = bestEVResult
     ? isDigitTier1Result
-      ? Math.min(95, Math.round(50 + bestEVResult.edge * 500))   // edge-based
+      ? Math.min(95, Math.round(50 + bestEVResult.edge * 500))
       : Math.min(95, Math.round(50 + bestEVResult.expectedValue * 300))
     : 10;
+  // At 25 digits: sampleFactor≈0.5 → score halfway between neutral and rawScore.
+  // At 100+ digits: sampleFactor=1.0 → full rawScore used unchanged.
+  const score = (isDigitResult && bestEVResult)
+    ? Math.round(rawScore * sampleFactor + 50 * (1 - sampleFactor))
+    : rawScore;
 
   const allEVCount = allEV.length;
   const positiveEVCount = strictPositiveEV.length;

@@ -56,24 +56,54 @@ export interface BarrierOption {
 // ── Markov chain ───────────────────────────────────────────────────────────────
 
 interface MarkovMatrix {
-  transitions: number[][];  // 10×10 transition counts
-  nextProb: number[];       // P(next digit = d | current digit)
+  transitions:  number[][];    // 10×10 first-order transition counts
+  transitions2: number[][][];  // 10×10×10 second-order transition counts
+  nextProb:     number[];      // P(next | last digit) — 1st-order with Laplace smoothing
+  nextProb2:    number[];      // P(next | last 2 digits) — 2nd-order with Laplace smoothing
 }
 
 function buildMarkov(digits: number[]): MarkovMatrix {
+  // 1st-order: transitions[from][to] = count of (from → to)
   const mat = Array.from({ length: 10 }, () => Array(10).fill(0));
+  // 2nd-order: transitions2[prev2][prev1][to] = count of (prev2,prev1 → to)
+  // 10×10×10 = 1000 states, trivially small in memory, captures multi-digit patterns.
+  const mat2: number[][][] = Array.from({ length: 10 }, () =>
+    Array.from({ length: 10 }, () => Array(10).fill(0))
+  );
+
   for (let i = 1; i < digits.length; i++) {
     const from = digits[i - 1];
-    const to = digits[i];
-    if (from >= 0 && from <= 9 && to >= 0 && to <= 9) mat[from][to]++;
+    const to   = digits[i];
+    if (from >= 0 && from <= 9 && to >= 0 && to <= 9) {
+      mat[from][to]++;
+      if (i >= 2) {
+        const prev2 = digits[i - 2];
+        if (prev2 >= 0 && prev2 <= 9) mat2[prev2][from][to]++;
+      }
+    }
   }
 
   const last = digits[digits.length - 1] ?? 5;
-  const row = mat[last];
-  const rowSum = row.reduce((a, b) => a + b, 0) || 10;
-  const nextProb = row.map(v => v / rowSum);
+  const row  = mat[last];
+  // Laplace smoothing (α=1 per digit): add 1 to every count before normalising.
+  // This prevents zero-probability on unseen transitions — without smoothing the
+  // old code defaulted to a flat 10% for any unobserved row, which is wrong for
+  // transitions that ARE possible but just haven't appeared in the sample window.
+  const rowRaw = row.reduce((a, b) => a + b, 0);
+  const nextProb = row.map(v => (v + 1) / (rowRaw + 10));
 
-  return { transitions: mat, nextProb };
+  // 2nd-order: P(next | last two digits) with the same Laplace smoothing.
+  let nextProb2: number[];
+  if (digits.length >= 2) {
+    const prev2   = digits[digits.length - 2] ?? 5;
+    const row2    = mat2[prev2][last] as number[];
+    const row2Raw = row2.reduce((a, b) => a + b, 0);
+    nextProb2 = row2.map(v => (v + 1) / (row2Raw + 10));
+  } else {
+    nextProb2 = Array(10).fill(0.1);  // uniform fallback when history is too short
+  }
+
+  return { transitions: mat, transitions2: mat2, nextProb, nextProb2 };
 }
 
 // ── Chi-square test for uniform distribution ───────────────────────────────────
@@ -133,8 +163,15 @@ export function analyzeDigits(digits: number[]): {
   const isUniform = chiSquarePValue > 0.05; // can't reject uniform
 
   const avgFreq = 0.1;
-  const hotDigits = frequency.map((f, i) => ({ d: i, f })).filter(x => x.f > avgFreq * 1.15).map(x => x.d);
-  const coldDigits = frequency.map((f, i) => ({ d: i, f })).filter(x => x.f < avgFreq * 0.85).map(x => x.d);
+  // Scale hot/cold thresholds with sample size: at low n the variance is huge
+  // so we require a larger deviation from 10% to call a digit genuinely hot/cold.
+  //   n < 50:  hot > 15% (1.50×), cold < 5%  (0.50×) — stringent (noisy data)
+  //   n < 100: hot > 13% (1.30×), cold < 7%  (0.70×) — moderate
+  //   n ≥ 100: hot > 11.5%(1.15×), cold < 8.5%(0.85×) — standard (data sufficient)
+  const hotMult  = n < 50 ? 1.50 : n < 100 ? 1.30 : 1.15;
+  const coldMult = n < 50 ? 0.50 : n < 100 ? 0.70 : 0.85;
+  const hotDigits  = frequency.map((f, i) => ({ d: i, f })).filter(x => x.f > avgFreq * hotMult).map(x => x.d);
+  const coldDigits = frequency.map((f, i) => ({ d: i, f })).filter(x => x.f < avgFreq * coldMult).map(x => x.d);
 
   // Recent streak
   const lastDigit = digits[digits.length - 1] ?? -1;
@@ -159,8 +196,9 @@ function winProbForBarrier(
   contractType: "DIGITOVER" | "DIGITUNDER",
   barrier: number,
   analysis: ReturnType<typeof analyzeDigits>,
+  sampleSize: number,
 ): number {
-  // Bayesian base probability
+  // Bayesian base probability (always reliable — Dirichlet α=2 smoothing handles small n)
   let bayesianWinP = 0;
   if (contractType === "DIGITOVER") {
     for (let d = barrier + 1; d <= 9; d++) bayesianWinP += analysis.bayesianProb[d];
@@ -168,16 +206,33 @@ function winProbForBarrier(
     for (let d = 0; d < barrier; d++) bayesianWinP += analysis.bayesianProb[d];
   }
 
-  // Markov adjustment: use the next-digit distribution from Markov chain
-  let markovWinP = 0;
+  // 1st-order Markov (now Laplace-smoothed — no zero-probability on unseen transitions)
+  let markov1WinP = 0;
   if (contractType === "DIGITOVER") {
-    for (let d = barrier + 1; d <= 9; d++) markovWinP += analysis.markov.nextProb[d];
+    for (let d = barrier + 1; d <= 9; d++) markov1WinP += analysis.markov.nextProb[d];
   } else {
-    for (let d = 0; d < barrier; d++) markovWinP += analysis.markov.nextProb[d];
+    for (let d = 0; d < barrier; d++) markov1WinP += analysis.markov.nextProb[d];
   }
 
-  // Ensemble: 70% Bayesian, 30% Markov
-  return bayesianWinP * 0.7 + markovWinP * 0.3;
+  // 2nd-order Markov — captures multi-digit sequence patterns, but needs more data
+  let markov2WinP = 0;
+  if (contractType === "DIGITOVER") {
+    for (let d = barrier + 1; d <= 9; d++) markov2WinP += analysis.markov.nextProb2[d];
+  } else {
+    for (let d = 0; d < barrier; d++) markov2WinP += analysis.markov.nextProb2[d];
+  }
+
+  // Sample-size-dependent weights. Markov predictions are unreliable at low n —
+  // at 30 digits a 10×10 transition matrix has mostly empty cells, so Laplace
+  // smoothing dominates and the Markov contribution is noise. Weight it down.
+  //   < 50 samples:  Bayesian 95%, Markov1  5%, Markov2  0%
+  //   < 100 samples: Bayesian 80%, Markov1 15%, Markov2  5%
+  //   ≥ 100 samples: Bayesian 65%, Markov1 25%, Markov2 10%
+  const m1w = sampleSize < 50 ? 0.05 : sampleSize < 100 ? 0.15 : 0.25;
+  const m2w = sampleSize < 50 ? 0.00 : sampleSize < 100 ? 0.05 : 0.10;
+  const bw  = 1 - m1w - m2w;
+
+  return bayesianWinP * bw + markov1WinP * m1w + markov2WinP * m2w;
 }
 
 // ── Barrier option builder ─────────────────────────────────────────────────────
@@ -194,6 +249,7 @@ const ALLOWED_BARRIERS: Record<"DIGITOVER" | "DIGITUNDER", number> = {
 
 function buildBarrierOptions(
   analysis: ReturnType<typeof analyzeDigits>,
+  sampleSize: number,
   allowedBarriers: Record<"DIGITOVER" | "DIGITUNDER", number> = ALLOWED_BARRIERS,
 ): BarrierOption[] {
   const options: BarrierOption[] = [];
@@ -208,7 +264,7 @@ function buildBarrierOptions(
       // or OVER 4 / UNDER 5 while this family is in Recovery Mode.
       if (barrier !== allowedBarriers[contractType]) continue;
 
-      const winP = winProbForBarrier(contractType, barrier, analysis);
+      const winP = winProbForBarrier(contractType, barrier, analysis, sampleSize);
       const ev = winP * (payout - 1) - (1 - winP);
       const edge = winP - (1 / payout);
       const tier = DIGIT_TIERS[contractType]?.[barrier] ?? 2;
@@ -258,9 +314,17 @@ export function analyzeMatchDiffers(
   const DIFF_PAYOUT  = 1.04;
 
   // For DIGITMATCH: use ensemble of Bayesian + Markov next-digit probability
+  // Sample-size-dependent ensemble: same tiered weighting as winProbForBarrier —
+  // lean on Bayesian at low n, add Markov weight progressively as sample grows.
+  const n = digits.length;
+  const m1w = n < 50 ? 0.05 : n < 100 ? 0.15 : 0.25;
+  const m2w = n < 50 ? 0.00 : n < 100 ? 0.05 : 0.10;
+  const bw  = 1 - m1w - m2w;
+
   const ensembleProb = analysis.bayesianProb.map((bayP, d) => {
-    const markovP = analysis.markov.nextProb[d] ?? 0.1;
-    return bayP * 0.7 + markovP * 0.3;
+    const markov1P = analysis.markov.nextProb[d]  ?? 0.1;
+    const markov2P = analysis.markov.nextProb2[d] ?? 0.1;
+    return bayP * bw + markov1P * m1w + markov2P * m2w;
   });
 
   // Best DIGITMATCH: digit with highest ensemble probability
@@ -398,7 +462,7 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
   }
 
   const analysis = analyzeDigits(digits);
-  const barrierOptions = buildBarrierOptions(analysis, ctx.recoveryBarrierOverride);
+  const barrierOptions = buildBarrierOptions(analysis, digits.length, ctx.recoveryBarrierOverride);
   const evenAnalysis = analyzeEvenOdd(digits);
   const matchDiffersAnalysis = analyzeMatchDiffers(digits, analysis);
 

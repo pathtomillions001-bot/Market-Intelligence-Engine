@@ -774,6 +774,18 @@ async function runAutonomousLoop() {
       return;
     }
 
+    // ── Fix 12: Absolute quality floor ────────────────────────────────────────
+    // Even when shouldTrade is true, skip the cycle if the tournament winner's
+    // quality score is below 60. A score that low means the agents collectively
+    // have borderline confidence — the engine is reaching for a marginal trade
+    // rather than a genuinely strong setup. Waiting costs nothing; a bad trade costs real money.
+    if (output.qualityScore < 60) {
+      logger.info({ symbol: bestMarket.symbol, quality: output.qualityScore },
+        "Quality floor not met (< 60) — holding off this scan cycle");
+      scheduleNext(false, 500);
+      return;
+    }
+
     // ── Advance family rotation hint for the NEXT scan ───────────────────────
     {
       const allEnabledFamilies = [
@@ -804,6 +816,22 @@ async function runAutonomousLoop() {
       : (effectiveContractType === "DIGITMATCH" || effectiveContractType === "DIGITDIFF")
         ? 5
         : rawDuration;
+
+    // ── Fix 7: Regime gate on digit recovery trades ───────────────────────────
+    // Digit contracts (OVER/UNDER/EVEN/ODD/MATCH/DIFF) assume the terminal digit
+    // is drawn from a roughly uniform distribution. In a trending regime this
+    // assumption breaks — directional price momentum skews which digits appear at
+    // expiry. Executing digit recovery trades in a trend compounds debt rather
+    // than recovering it. Hold and rescan in 8s when regime may have normalised.
+    if (recoveryEngine.isInRecovery() && effectiveContractType.startsWith("DIGIT")) {
+      const regime = output.regime;
+      if (regime === "trending_up" || regime === "trending_down") {
+        logger.info({ symbol: bestMarket.symbol, regime, contractType: effectiveContractType },
+          "Recovery: digit trade blocked in trending regime — rescanning in 8s");
+        scheduleNext(false, 8000);
+        return;
+      }
+    }
 
     // ── Recovery Mode stake override ─────────────────────────────────────────
     // Single global recovery state — ANY tracked contract type uses the exact

@@ -63,6 +63,16 @@ export function runMarketScannerAgent(ctx: ScanContext): AgentOutput & { scanner
   if (wantEvenOdd && hasDigitCapability) enabledFamilies.push("evenodd");
   if (wantMatchDiff && hasDigitCapability) enabledFamilies.push("matchdiff");
 
+  // Hard-block direction when tick count is insufficient for trend/momentum analysis.
+  // Markets with 10–19 ticks pass the MIN_TICKS=10 initial filter but direction agents
+  // (tick intelligence, rise-fall model) need ≥20 ticks for reliable momentum and
+  // autocorrelation calculations. Feeding them 15 ticks produces garbage scores.
+  // Remove direction from enabled families rather than marking the whole market
+  // ineligible — it may still be tradeable on digit contracts if digit data is present.
+  if (tickCount < 20 && enabledFamilies.includes("direction")) {
+    enabledFamilies.splice(enabledFamilies.indexOf("direction"), 1);
+  }
+
   // Skip if no enabled families for this market
   if (enabledFamilies.length === 0) {
     const result: ScannerResult = {

@@ -65,8 +65,30 @@ let state: RecoveryState = freshState();
 function ensureFreshDay(): void {
   const today = todayKey();
   if (state.resetDate !== today) {
-    const hadCarryOver = state.inRecovery || state.unrecoveredAmount > 0 || state.streakLossCount > 0;
+    const prevDebt      = state.unrecoveredAmount;
+    const prevBaseStake = state.baseStake;
+    const hadCarryOver  = state.inRecovery || prevDebt > 0 || state.streakLossCount > 0;
+
     state = freshState();
+
+    // Carry 50% of any unrecovered debt into the new day (capped at 3× base stake).
+    // Problem: the old hard midnight reset silently wiped real account losses — if the
+    // engine was mid-recovery at 11:59 PM, a loss at that minute was never recovered.
+    // Fix: preserve half the debt so the new day acknowledges it without creating a
+    // full next-day spiral. Carry-over enters at step 1 so the previous day's
+    // escalating multipliers don't compound — it behaves like a fresh first recovery step.
+    if (prevDebt > 0 && prevBaseStake > 0) {
+      const carryDebt = Math.min(prevDebt * 0.5, prevBaseStake * 3);
+      if (carryDebt >= 0.35) {
+        state.inRecovery        = true;
+        state.unrecoveredAmount = carryDebt;
+        state.baseStake         = prevBaseStake;
+        state.recoveryStep      = 1;
+        state.streakLossCount   = 1;
+        state.streakStartAmount = carryDebt;
+      }
+    }
+
     if (hadCarryOver) persistToDb().catch(() => {});
   }
 }
@@ -172,8 +194,10 @@ function computeDynamicStake(
   if (netPayout <= 0) return 0.35;
 
   // Exact minimum stake to recover the full unrecovered amount in one win,
-  // plus a 2% buffer for Deriv's decimal rounding.
-  const minRecovery = (unrecoveredAmount / netPayout) * 1.02;
+  // plus a 5% buffer for Deriv's decimal rounding and near-1.0 payout edge cases.
+  // 5% (vs the old 2%) ensures net profit genuinely covers the debt even when the
+  // live Deriv payout differs slightly from the cached proposal value.
+  const minRecovery = (unrecoveredAmount / netPayout) * 1.05;
 
   // Profile-based safety cap: never risk more than this fraction of balance.
   const maxExposurePct = riskProfile === "conservative" ? 0.08

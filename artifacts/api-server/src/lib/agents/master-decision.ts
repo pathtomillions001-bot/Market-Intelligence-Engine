@@ -205,33 +205,52 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   }
   // requirePositiveEv is now advisory only (logged as a warning, not a blocker)
 
-  // ── Gate 3: Timing ────────────────────────────────────────────────────────
-  // Advisory-only: poor timing is logged as a warning but never blocks execution.
-  // The tournament already picked the best-timing market across all groups;
-  // hard-blocking here would freeze the engine in normal market conditions.
-  // Only veto on an extreme outlier tick (z-score) to avoid chasing a spike.
-  if (!timingResult.notOnExtreme) {
-    rejectReasons.push(`Outlier tick — waiting for normalisation (z=${timingResult.waitReason})`);
+  // ── Gate 3: Timing — NOW A HARD GATE ─────────────────────────────────────
+  // Direction trades: blocked when timingScore < 48. Entering at the wrong momentum
+  // phase or during velocity spikes is a primary source of avoidable losses.
+  // Digit trades: blocked when timingScore < 45. Less velocity-sensitive but still
+  // needs stable tick conditions for digit predictions to be reliable.
+  // Both: always veto on extreme z-score outlier tick to avoid chasing spikes.
+  {
+    const timingHardThreshold = isDirProduct ? 48 : 45;
+    if (!timingResult.notOnExtreme) {
+      rejectReasons.push(`Outlier tick — waiting for normalisation (z=${timingResult.waitReason ?? "extreme"})`);
+    } else if (timingResult.timingScore < timingHardThreshold) {
+      rejectReasons.push(`Timing gate: score ${timingResult.timingScore}/100 below ${timingHardThreshold} — suboptimal entry conditions`);
+    }
   }
 
   // ── Gate 4: Weighted consensus score ─────────────────────────────────────
-  // Use the lower of the user setting and 50 so the engine keeps trading even
-  // if the user accidentally set a very high threshold.
-  // During a loss streak, raise the minimum threshold proportionally — each consecutive
-  // loss adds 3 points (max +15), demanding stronger multi-agent consensus before trading.
+  // Use the ACTUAL user-configured threshold — the old Math.min(..., 50) cap was
+  // silently ignoring any setting above 50, which defeated the purpose of the control.
+  // During a loss streak, raise the bar aggressively — each consecutive loss now adds
+  // 5 points (max +30), demanding much stronger multi-agent consensus before trading.
   {
     const sessionLosses = ctx.daily.consecutiveLosses;
-    const lossStreakBoost = Math.min(sessionLosses * 3, 15);
-    const minScore = Math.min(settings.minConfidenceThreshold, 50) + lossStreakBoost;
+    const lossStreakBoost = Math.min(sessionLosses * 5, 30);
+    const minScore = (settings.minConfidenceThreshold ?? 50) + lossStreakBoost;
     if (weightedScore < minScore) {
       const streakNote = sessionLosses >= 2 ? ` (incl. +${lossStreakBoost}pt loss-streak guard)` : "";
       rejectReasons.push(`Consensus score ${weightedScore.toFixed(0)} below threshold ${minScore}${streakNote}`);
     }
   }
 
-  // ── Gate 5: Drifting strategy — advisory only ─────────────────────────────
-  // Drifting is a warning, not a hard stop. The engine should keep trading and
-  // let the recovery mechanism handle underperforming strategies.
+  // ── Gate 5: Strategy drift — semi-hard gate ───────────────────────────────
+  // Mild drift (recent WR ≥ 40%): advisory warning only — engine keeps trading.
+  // Severe drift (recent WR < 40%, ≥20 trades): hard block — this setup is
+  // demonstrably broken and continuing will compound losses, not recover them.
+  if (
+    strategyStats.isDrifting &&
+    strategyStats.hasEnoughData &&
+    strategyStats.recentWinRate < 0.40 &&
+    strategyStats.totalTrades >= 20
+  ) {
+    rejectReasons.push(
+      `Severe drift gate: recent WR ${(strategyStats.recentWinRate * 100).toFixed(1)}% ` +
+      `vs long-term ${(strategyStats.longTermWinRate * 100).toFixed(1)}% ` +
+      `over ${strategyStats.totalTrades} trades — blocked until WR recovers above 40%`
+    );
+  }
 
   const shouldTrade = rejectReasons.length === 0;
 
