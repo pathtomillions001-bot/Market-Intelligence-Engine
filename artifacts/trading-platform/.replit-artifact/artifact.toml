@@ -13,9 +13,11 @@ version = "1.0.0"
 name = "web"
 paths = [ "/" ]
 localPort = 21210
+autoStart = true
 
 [services.development]
 run = "pnpm --filter @workspace/trading-platform run dev"
+autoStart = true
 
 [services.production]
 build = [ "pnpm", "--filter", "@workspace/trading-platform", "run", "build" ]

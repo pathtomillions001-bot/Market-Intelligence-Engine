@@ -19,18 +19,18 @@ path = "scripts/post-merge.sh"
 timeoutMs = 20000
 
 [[ports]]
-localPort = 8080
-externalPort = 8080
+localPort = 5000
+externalPort = 80
 
 [[ports]]
-localPort = 21210
-externalPort = 80
+localPort = 8080
+externalPort = 8080
 
 [userenv]
 
 [userenv.shared]
 DERIV_APP_ID = "1089"
-PORT = "21210"
+PORT = "5000"
 BASE_PATH = "/"
 
 [nix]

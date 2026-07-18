@@ -4,9 +4,8 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
 
-// Default to 21210 so the app starts correctly on a fresh import/export
-// even before the artifact runtime injects env vars.
-const rawPort = process.env.PORT ?? "21210";
+// Default to 5000 — Replit's standard webview port, required for autoStart preview.
+const rawPort = process.env.PORT ?? "5000";
 const port = Number(rawPort);
 if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
