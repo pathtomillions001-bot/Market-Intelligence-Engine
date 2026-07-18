@@ -5,7 +5,6 @@ import { sql } from "drizzle-orm";
 import { tradesTable } from "@workspace/db";
 import { tickManager, DERIV_MARKETS, getMarketInfo, getCachedToken, analyzeDigits } from "../lib/deriv";
 import { runCoordinator, buildLegacyAnalysis } from "../lib/agent-coordinator";
-import * as recoveryEngine from "../lib/agents/recovery-engine";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 import { GetMarketsQueryParams } from "@workspace/api-zod";
 
@@ -92,26 +91,10 @@ function buildScanContext(
   daily: DailyStats,
   token: string | null,
   currency: string,
-  barrierOverride?: { DIGITOVER: number; DIGITUNDER: number },
 ): ScanContext {
   const prices = tickManager.getTicks(market.symbol, 100);
   const digits = market.digitEnabled ? tickManager.getDigits(market.symbol, 300) : [];
-  return {
-    symbol: market.symbol,
-    displayName: market.displayName,
-    category: market.category,
-    prices,
-    digits,
-    balance,
-    settings,
-    daily,
-    token,
-    currency,
-    // Wire user-configured barriers through to the digit probability agent.
-    // Without this, buildBarrierOptions falls back to the hardcoded OVER 2 / UNDER 7
-    // regardless of what the user has configured in Settings.
-    recoveryBarrierOverride: barrierOverride,
-  };
+  return { symbol: market.symbol, displayName: market.displayName, category: market.category, prices, digits, balance, settings, daily, token, currency };
 }
 
 // ── Background scan ───────────────────────────────────────────────────────────
@@ -126,21 +109,13 @@ async function analyzeAllMarkets() {
     const daily = await getDailyStats();
     const now = new Date();
 
-    // Bust cache when preferred contract types OR recovery state changes.
-    // Recovery mode switches the Over/Under barriers (e.g. OVER 4 instead of OVER 2),
-    // so cached scan results from normal mode recommend the wrong barrier in recovery.
-    const isRecovering = recoveryEngine.isInRecovery();
-    const prefKey = [...preferred].sort().join(",") + "|" + (isRecovering ? "rec" : "norm");
+    // If preferred contract types changed (user updated settings), clear the cache
+    // so all markets are re-evaluated with the new types immediately.
+    const prefKey = [...preferred].sort().join(",");
     if (prefKey !== lastPreferredKey) {
       analysisCache.clear();
       lastPreferredKey = prefKey;
     }
-
-    // Compute the user-configured barriers for this scan iteration.
-    // Normal mode uses normalOverDigit/normalUnderDigit; recovery uses the recovery pair.
-    const activeBarrierOverride = isRecovering
-      ? { DIGITOVER: tradingSettings.recoveryOverDigit, DIGITUNDER: tradingSettings.recoveryUnderDigit }
-      : { DIGITOVER: tradingSettings.normalOverDigit, DIGITUNDER: tradingSettings.normalUnderDigit };
 
     // Only re-analyze markets stale (> 15s old)
     const staleMarkets = DERIV_MARKETS.filter((m) => {
@@ -150,7 +125,7 @@ async function analyzeAllMarkets() {
 
     await Promise.all(staleMarkets.map(async (market) => {
       try {
-        const ctx = buildScanContext(market, balance, tradingSettings, daily, token, currency, activeBarrierOverride);
+        const ctx = buildScanContext(market, balance, tradingSettings, daily, token, currency);
         // For background scans: use a "no live payout" context to avoid 17× WS round-trips
         const ctxNoPayout = { ...ctx, token: null };
         const output = await runCoordinator(ctxNoPayout);
@@ -186,16 +161,11 @@ router.get("/", async (req, res): Promise<void> => {
   const tradingSettings = buildTradingSettings(settings, preferred);
   const daily = await getDailyStats();
 
-  const isRecovering = recoveryEngine.isInRecovery();
-  const activeBarrierOverride = isRecovering
-    ? { DIGITOVER: tradingSettings.recoveryOverDigit, DIGITUNDER: tradingSettings.recoveryUnderDigit }
-    : { DIGITOVER: tradingSettings.normalOverDigit, DIGITUNDER: tradingSettings.normalUnderDigit };
-
   const ranked = await Promise.all(
     DERIV_MARKETS.slice(0, limit).map(async (m) => {
       let cached = analysisCache.get(m.symbol);
       if (!cached) {
-        const ctx = buildScanContext(m, balance, tradingSettings, daily, token, currency, activeBarrierOverride);
+        const ctx = buildScanContext(m, balance, tradingSettings, daily, token, currency);
         const output = await runCoordinator({ ...ctx, token: null });
         cached = { symbol: m.symbol, displayName: m.displayName, category: m.category, output, prices: ctx.prices, lastUpdated: new Date() };
         analysisCache.set(m.symbol, cached);
@@ -232,11 +202,6 @@ router.get("/top", async (req, res): Promise<void> => {
   const tradingSettings = buildTradingSettings(settings, preferred);
   const daily = await getDailyStats();
 
-  const isRecovering = recoveryEngine.isInRecovery();
-  const activeBarrierOverride = isRecovering
-    ? { DIGITOVER: tradingSettings.recoveryOverDigit, DIGITUNDER: tradingSettings.recoveryUnderDigit }
-    : { DIGITOVER: tradingSettings.normalOverDigit, DIGITUNDER: tradingSettings.normalUnderDigit };
-
   // Optional contract-type filter: e.g. ?contractTypeFilter=CALL,PUT
   const contractTypeFilter = req.query.contractTypeFilter as string | undefined;
   const allowedTypes = contractTypeFilter ? new Set(contractTypeFilter.split(",").map(s => s.trim())) : null;
@@ -252,7 +217,7 @@ router.get("/top", async (req, res): Promise<void> => {
 
   if (!best) {
     const market = DERIV_MARKETS[0];
-    const ctx = buildScanContext(market, balance, tradingSettings, daily, token, currency, activeBarrierOverride);
+    const ctx = buildScanContext(market, balance, tradingSettings, daily, token, currency);
     const output = await runCoordinator(ctx);
     best = { symbol: market.symbol, displayName: market.displayName, category: market.category, output, prices: ctx.prices, lastUpdated: new Date() };
     analysisCache.set(market.symbol, best);
@@ -286,12 +251,7 @@ router.get("/:symbol", async (req, res): Promise<void> => {
   const tradingSettings = buildTradingSettings(settings, preferred);
   const daily = await getDailyStats();
 
-  const isRecovering = recoveryEngine.isInRecovery();
-  const activeBarrierOverride = isRecovering
-    ? { DIGITOVER: tradingSettings.recoveryOverDigit, DIGITUNDER: tradingSettings.recoveryUnderDigit }
-    : { DIGITOVER: tradingSettings.normalOverDigit, DIGITUNDER: tradingSettings.normalUnderDigit };
-
-  const ctx = buildScanContext(market, balance, tradingSettings, daily, token, currency, activeBarrierOverride);
+  const ctx = buildScanContext(market, balance, tradingSettings, daily, token, currency);
   const output = await runCoordinator(ctx);
   analysisCache.set(symbol, { symbol, displayName: market.displayName, category: market.category, output, prices: ctx.prices, lastUpdated: new Date() });
 
