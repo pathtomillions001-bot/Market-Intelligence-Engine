@@ -198,14 +198,21 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
         );
       }
     } else if (isDigitTier1) {
-      // Tier-1 (user's normal barriers): gate on positive edge (actual win > theoretical).
-      // edge = winProbability - 1/payout. If edge > 0, the digit distribution is
-      // currently favouring this barrier more than the payout break-even requires.
-      if (bestEV.edge <= 0) {
+      // Tier-1 (user's normal barriers): use a lenient EV gate instead of strict edge > 0.
+      //
+      // WHY: in near-uniform Deriv synthetic markets the theoretical win probability for
+      // safe barriers sits ~70–80 % while the payout breakeven sits at 84–92 %. Requiring
+      // edge > 0 (win > breakeven) is therefore mathematically impossible unless the digit
+      // distribution is heavily skewed — causing the engine to NEVER fire for these barriers.
+      //
+      // The EV > -0.08 gate instead allows trades when the configured barrier is showing
+      // at least partial statistical favourability from the Bayesian + Markov ensemble.
+      // Example: OVER 1 (payout 1.08×) passes when digits 0+1 combined appear ≤ 14.8 %
+      // of the time (i.e. both are somewhat cold), giving P(win) ≥ 85.2 %.
+      if (bestEV.expectedValue < -0.08) {
         rejectReasons.push(
-          `No edge on ${bestEV.product} barrier=${bestEV.barrier}: ` +
-          `win rate ${(bestEV.winProbability * 100).toFixed(1)}% not above theoretical ` +
-          `${(bestEV.breakevenWinRate * 100).toFixed(0)}%`
+          `Normal barrier EV too weak: ${bestEV.product} barrier=${bestEV.barrier}: ` +
+          `EV ${(bestEV.expectedValue * 100).toFixed(1)}% < -8% — wait for digit skew`,
         );
       }
     } else if (isDigitTier2) {
@@ -221,13 +228,15 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   // requirePositiveEv is now advisory only (logged as a warning, not a blocker)
 
   // ── Gate 3: Timing — NOW A HARD GATE ─────────────────────────────────────
-  // Direction trades: blocked when timingScore < 48. Entering at the wrong momentum
-  // phase or during velocity spikes is a primary source of avoidable losses.
+  // Direction trades: blocked when timingScore < 52. Entering at the wrong momentum
+  // phase or during velocity spikes is a primary source of avoidable losses on
+  // Rise/Fall contracts; raising from 48 → 52 requires meaningfully better entry
+  // conditions to reduce consecutive-loss exposure.
   // Digit trades: blocked when timingScore < 45. Less velocity-sensitive but still
   // needs stable tick conditions for digit predictions to be reliable.
   // Both: always veto on extreme z-score outlier tick to avoid chasing spikes.
   {
-    const timingHardThreshold = isDirProduct ? 48 : 45;
+    const timingHardThreshold = isDirProduct ? 52 : 45;
     if (!timingResult.notOnExtreme) {
       rejectReasons.push(`Outlier tick — waiting for normalisation (z=${timingResult.waitReason ?? "extreme"})`);
     } else if (timingResult.timingScore < timingHardThreshold) {
@@ -238,14 +247,22 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   // ── Gate 4: Weighted consensus score ─────────────────────────────────────
   // Use the ACTUAL user-configured threshold — the old Math.min(..., 50) cap was
   // silently ignoring any setting above 50, which defeated the purpose of the control.
-  // During a loss streak, raise the bar aggressively — each consecutive loss now adds
+  // During a loss streak, raise the bar aggressively — each consecutive loss adds
   // 5 points (max +30), demanding much stronger multi-agent consensus before trading.
+  //
+  // EXCEPTION — DIGITMATCH recovery: the streak boost must NOT apply when the engine
+  // has specifically selected DIGITMATCH to recover a loss. The boost raises the
+  // threshold at exactly the moment DIGITMATCH is meant to fire, making recovery
+  // nearly impossible. DIGITMATCH already has its own EV gate (-5%) and its
+  // naturally lower confidence scores are accounted for by the 45-pt threshold cap
+  // set in the matchdiff family context.
   {
     const sessionLosses = ctx.daily.consecutiveLosses;
-    const lossStreakBoost = Math.min(sessionLosses * 5, 30);
+    const isMatchRecovery = candidateProduct === "DIGITMATCH";
+    const lossStreakBoost = isMatchRecovery ? 0 : Math.min(sessionLosses * 5, 30);
     const minScore = (settings.minConfidenceThreshold ?? 50) + lossStreakBoost;
     if (weightedScore < minScore) {
-      const streakNote = sessionLosses >= 2 ? ` (incl. +${lossStreakBoost}pt loss-streak guard)` : "";
+      const streakNote = (!isMatchRecovery && sessionLosses >= 2) ? ` (incl. +${lossStreakBoost}pt loss-streak guard)` : "";
       rejectReasons.push(`Consensus score ${weightedScore.toFixed(0)} below threshold ${minScore}${streakNote}`);
     }
   }

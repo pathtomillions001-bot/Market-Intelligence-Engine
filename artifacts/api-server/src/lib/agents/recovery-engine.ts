@@ -30,7 +30,7 @@ export interface RecoveryState {
   streakLossCount:          number;       // consecutive losses in the current streak (drives dashboard + cooldown gate)
   streakStartAmount:        number;       // total lost in this streak (display)
   resetDate:                string;       // local YYYY-MM-DD this state belongs to — drives the daily auto-reset
-  consecutiveMatchLosses:   number;       // DIGITMATCH losses in a row while in recovery — triggers DIFF fallback at ≥2
+  consecutiveMatchLosses:   number;       // DIGITMATCH losses in a row while in recovery — triggers DIFF fallback at ≥3
 }
 
 /** Local calendar date (server time) in YYYY-MM-DD, matching how "today" is computed elsewhere (daily P&L, daily stats). */

@@ -539,9 +539,14 @@ async function runAutonomousLoop() {
                 // If the user only enabled one of the two, use whichever is enabled.
                 const inRecovery = recoveryEngine.isInRecovery();
                 const consecutiveMatchLosses = recoveryEngine.getState().consecutiveMatchLosses;
-                const matchFallbackToDiff = inRecovery && consecutiveMatchLosses >= 2;
+                // Allow up to 3 consecutive MATCH losses before falling back to DIFF.
+                // 3 attempts gives the high-payout MATCH contract enough chances to fire
+                // (each attempt independently has ~10–15 % win probability); after 3
+                // misses the engine switches to DIFF which wins ~96 % of the time to
+                // at least partially rebuild the balance before retrying MATCH.
+                const matchFallbackToDiff = inRecovery && consecutiveMatchLosses >= 3;
                 const activeMdTypes = (inRecovery && !matchFallbackToDiff && mdTypes.includes("DIGITMATCH"))
-                  ? ["DIGITMATCH"]   // recovery attempt 1–2: high payout covers full DIFF loss cheaply
+                  ? ["DIGITMATCH"]   // recovery attempt 1–3: high payout covers full DIFF loss cheaply
                   : mdTypes.includes("DIGITDIFF")
                     ? ["DIGITDIFF"]  // normal mode OR match-fallback: near-certain wins on cold digit
                     : mdTypes;       // fallback: whatever the user enabled

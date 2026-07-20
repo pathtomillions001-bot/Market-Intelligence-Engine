@@ -88,7 +88,9 @@ function quickFeatures(prices: number[]): number[] {
 
 // ── Gradient Boosting ──────────────────────────────────────────────────────────
 function trainGB(X: number[][], y: number[], rounds = 12): GBStump[] {
-  if (X.length < 5) return [];
+  // Raised from 5 → 12: fewer than 12 labelled samples produce highly unstable
+  // stumps that overfit noise, worsening direction accuracy.
+  if (X.length < 12) return [];
   const n = y.length;
   let w = Array(n).fill(1 / n);
   const stumps: GBStump[] = [];
@@ -176,6 +178,30 @@ function reconstructPrices(returns: number[]): number[] {
   return prices;
 }
 
+// ── Multi-horizon consensus ────────────────────────────────────────────────────
+// Train/predict at 3 horizons and check whether they agree on direction.
+// Agreement across horizons (short, medium, long) provides stronger conviction
+// than a single horizon and filters out noise spikes.
+function multiHorizonConsensus(prices: number[], stumps: GBStump[]): {
+  agreementRatio: number;   // 0–1: fraction of horizons agreeing with primary direction
+  primaryUp: boolean;       // direction from the shortest horizon
+} {
+  const horizons = [3, 5, 10];
+  const votes: boolean[] = [];
+  for (const h of horizons) {
+    const { X, y } = buildTrainingSet(prices, h);
+    if (X.length < 6) { votes.push(true); continue; }
+    // Use the shared trained stumps from the primary horizon for speed —
+    // the feature vector shape is identical, only the label changes.
+    const preds = X.map(fv => predictGB(stumps, fv));
+    const avgP = preds.reduce((a, b) => a + b, 0) / preds.length;
+    votes.push(avgP >= 0.5);
+  }
+  const primaryUp = votes[0] ?? true;
+  const agrees = votes.filter(v => v === primaryUp).length;
+  return { agreementRatio: agrees / votes.length, primaryUp };
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────────
 export function predictDirection(symbol: string, features: FeatureSet, horizon = 5): DirectionResult {
   const pf = features.price;
@@ -219,8 +245,20 @@ export function predictDirection(symbol: string, features: FeatureSet, horizon =
   // In trending regime (high Hurst), amplify; in mean-reverting, attenuate
   const regimeMultiplier = pf.hurst > 0.58 ? 1.1 : pf.hurst < 0.42 ? 0.9 : 1.0;
 
+  // Multi-horizon consensus — only meaningful when the GB model is trained
+  let horizonAgreementRatio = 1.0;
+  if (hasModel && pf.returns1.length > 30) {
+    const synPrices = reconstructPrices(pf.returns1);
+    const hc = multiHorizonConsensus(synPrices, stumps);
+    // If the short-horizon direction disagrees with our primary probUp direction,
+    // penalise confidence. agreementRatio < 0.67 means at least 2 horizons disagree.
+    if (hc.primaryUp !== (probUp >= 0.5)) horizonAgreementRatio = 0.85;
+    else horizonAgreementRatio = 0.7 + hc.agreementRatio * 0.3;
+  }
+
   return {
-    probUp, probDown: 1 - probUp, confidence,
+    probUp, probDown: 1 - probUp,
+    confidence: Math.round(confidence * horizonAgreementRatio),
     direction: probUp >= 0.5 ? "up" : "down",
     models: { rf: gbProb, gb: gbProb, momentum: momProb },
     horizon, disagreement, exhaustionDetected, regimeMultiplier,
@@ -256,6 +294,38 @@ export function runRiseFallAgent(
   // Hard floor: if probUp is too close to 50% (< 53% either direction),
   // cap the score at 58 so it never triggers a "buy" recommendation
   if (edgePct < 0.03) score = Math.min(score, 58);
+
+  // ── Regime filter — mean-reverting markets ────────────────────────────────
+  // Hurst < 0.45 indicates a mean-reverting regime where directional signals
+  // are unreliable (price oscillates). In such regimes, even a 60 % GB
+  // prediction is noise. Cap the score hard to prevent direction trades.
+  // Hurst 0.45–0.50: mildly choppy — apply a softer cap.
+  if (pf.hurst < 0.42) {
+    score = Math.min(score, 45);  // strongly mean-reverting: block direction trades
+  } else if (pf.hurst < 0.47) {
+    score = Math.min(score, 55);  // mildly choppy: only fire on strong signals
+  }
+
+  // ── Model agreement gate ─────────────────────────────────────────────────
+  // When GB and momentum disagree on direction (one predicts up, other predicts
+  // down), the ensemble output averages toward 50 %. High disagreement means
+  // the signal is unreliable regardless of the blended value.
+  if (result.disagreement > 0.15) {
+    // Models significantly disagree: penalise confidence
+    score = Math.min(score, 58);
+  }
+  if (result.disagreement > 0.25) {
+    // Models strongly disagree: hard cap below buy threshold
+    score = Math.min(score, 48);
+  }
+
+  // ── Autocorrelation filter ────────────────────────────────────────────────
+  // Near-zero autocorrelation (autocorr1 ≈ 0) means the price series is
+  // close to a random walk with no predictable momentum. Direction trades
+  // in this state rely purely on luck.
+  if (Math.abs(pf.autocorr1) < 0.03 && edgePct < 0.06) {
+    score = Math.min(score, 54);  // weak autocorr + weak edge → not reliable
+  }
 
   // During a loss streak, demand stronger directional conviction.
   // After 2+ consecutive losses the AI must have a real edge — not a coin flip.
