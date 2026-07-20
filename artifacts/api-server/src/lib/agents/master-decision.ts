@@ -154,38 +154,53 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   if (!bestEV) {
     rejectReasons.push("No EV data — market data insufficient to evaluate");
   } else {
+    // ── Dynamic tier classification using user-configured barriers ───────────
+    // Always use the settings-configured barrier values so any digit the user
+    // picks gets the right EV gate treatment — not just hardcoded 2/7/4/5.
+    const normalOverBarrier  = ctx.settings.normalOverDigit   ?? 2;
+    const normalUnderBarrier = ctx.settings.normalUnderDigit  ?? 7;
+    const recoveryOverBarrier  = ctx.settings.recoveryOverDigit  ?? 4;
+    const recoveryUnderBarrier = ctx.settings.recoveryUnderDigit ?? 5;
+
     const isDigitTier1 = (
-      // OVER 2  → ~70% theoretical win, 1.19x payout — positive EV impossible; gate on edge
-      (bestEV.product === "DIGITOVER"  && bestEV.barrier === 2) ||
-      // UNDER 7 → ~70% theoretical win, 1.19x payout — mirrors OVER 2 (digit-probability.ts normal mode)
-      // NOTE: barrier 7 not 8; digit-probability.ts uses UNDER 7 as the normal-mode barrier
-      (bestEV.product === "DIGITUNDER" && bestEV.barrier === 7) ||
-      // DIGITDIFF → ~90% theoretical win, 1.04x payout — gate on edge (win rate > 96.2% for positive EV)
-      bestEV.product === "DIGITDIFF"
+      // User's normal-mode OVER barrier — gate on edge (actual win > theoretical)
+      (bestEV.product === "DIGITOVER"  && bestEV.barrier === normalOverBarrier) ||
+      // User's normal-mode UNDER barrier — same edge gate
+      (bestEV.product === "DIGITUNDER" && bestEV.barrier === normalUnderBarrier)
     );
     const isDigitTier2 = (
-      // OVER 4  → ~50% theoretical win, 1.50x payout — recovery mode barrier
-      (bestEV.product === "DIGITOVER"  && bestEV.barrier === 4) ||
-      // UNDER 5 → ~50% theoretical win, 1.50x payout — recovery mode barrier
-      (bestEV.product === "DIGITUNDER" && bestEV.barrier === 5)
+      // User's recovery-mode OVER barrier — wider EV gate (higher payout)
+      (bestEV.product === "DIGITOVER"  && bestEV.barrier === recoveryOverBarrier) ||
+      // User's recovery-mode UNDER barrier — wider EV gate
+      (bestEV.product === "DIGITUNDER" && bestEV.barrier === recoveryUnderBarrier)
     );
     const isDigitMatch = bestEV.product === "DIGITMATCH";
+    const isDigitDiff  = bestEV.product === "DIGITDIFF";
 
     if (isDigitMatch) {
       // DIGITMATCH → ~10% theoretical win, 9.0x payout.
-      // Breakeven frequency = 1/9 ≈ 11.1%. Require EV > -0.05 (i.e. the digit appears
-      // at roughly fair odds or better). Strict positive-EV here was too aggressive —
-      // in recovery mode the priority is to execute the high-payout trade; the 9×
-      // payout means even near-fair digit frequency is worth trading to cover the debt.
+      // Breakeven frequency = 1/9 ≈ 11.1%. Require EV > -0.05 (digit appears
+      // at roughly fair odds or better). The 9× payout in recovery mode means
+      // even a near-fair digit frequency is worth trading to cover the debt cheaply.
       if (bestEV.expectedValue < -0.05) {
         rejectReasons.push(
           `DIGITMATCH digit=${bestEV.barrier}: EV ${(bestEV.expectedValue * 100).toFixed(1)}% — digit too cold (need > -5%)`,
         );
       }
+    } else if (isDigitDiff) {
+      // DIGITDIFF → ~90-96% theoretical win, 1.04x payout.
+      // Positive EV requires >96.2% win rate — nearly impossible in practice.
+      // Gate on EV > -0.05 instead of edge > 0: even at 93% win the near-certain
+      // wins provide strong portfolio stability and pair well with MATCH recovery.
+      if (bestEV.expectedValue < -0.05) {
+        rejectReasons.push(
+          `DIGITDIFF digit=${bestEV.barrier}: win rate ${(bestEV.winProbability * 100).toFixed(1)}% too low (EV ${(bestEV.expectedValue * 100).toFixed(1)}%, need > -5%)`,
+        );
+      }
     } else if (isDigitTier1) {
-      // Tier-1: only require positive edge (win rate above theoretical).
-      // edge = winProbability - 1/payout. For OVER 2: theoretical win rate = 70%,
-      // so edge > 0 means the market has ≥70% digits in range 3-9 right now.
+      // Tier-1 (user's normal barriers): gate on positive edge (actual win > theoretical).
+      // edge = winProbability - 1/payout. If edge > 0, the digit distribution is
+      // currently favouring this barrier more than the payout break-even requires.
       if (bestEV.edge <= 0) {
         rejectReasons.push(
           `No edge on ${bestEV.product} barrier=${bestEV.barrier}: ` +
@@ -194,7 +209,7 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
         );
       }
     } else if (isDigitTier2) {
-      // Tier-2 (recovery): slightly wider EV gate — these pay more (1.50x) so bar is lower
+      // Tier-2 (user's recovery barriers): slightly wider EV gate — higher payouts
       if (bestEV.expectedValue < -0.15) {
         rejectReasons.push(`Recovery barrier EV too negative: ${(bestEV.expectedValue * 100).toFixed(1)}%`);
       }

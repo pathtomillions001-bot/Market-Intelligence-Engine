@@ -154,7 +154,9 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   const candidateProduct = wantDigit
     ? (bestBarrier?.contractType ?? "DIGITOVER")
     : wantMatchDiff
-      ? "DIGITMATCH"
+      // Normal mode → DIGITDIFF (coldest digit, ~96% win); recovery → DIGITMATCH (9× payout).
+      // Use whichever type is actually in the preferred list for this family scan.
+      ? (preferred.includes("DIGITDIFF") ? "DIGITDIFF" : "DIGITMATCH")
       : wantDirection
         ? (dirResult.direction === "up" ? "CALL" : "PUT")
         : wantEvenOdd ? "DIGITEVEN" : "DIGITOVER";
@@ -192,7 +194,12 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   // Remove those gates — always include the options and let the EV calculator + confidence
   // fusion decide. DIGITMATCH is added in recovery mode (9× payout covers losses cheaply);
   // DIGITDIFF is added in normal mode (coldest digit gives ~96% win rate, near-certain win).
-  const allBarrierOptions = [...barrierOptions];
+  //
+  // IMPORTANT: only seed the list with OVER/UNDER barrier options when the user actually
+  // wants OVER/UNDER. If this is a pure matchdiff-family scan (wantDigit = false), start
+  // empty so that OVER/UNDER options can never "win" the EV tournament and hijack the
+  // recommendation away from DIGITDIFF/DIGITMATCH.
+  const allBarrierOptions = wantDigit ? [...barrierOptions] : [];
   if (wantMatchDiff && digitAgent.matchDiffersAnalysis && ctx.digits.length >= 30) {
     const md = digitAgent.matchDiffersAnalysis;
     if (preferred.includes("DIGITMATCH")) {
