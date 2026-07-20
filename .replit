@@ -42,11 +42,10 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "pnpm --filter @workspace/trading-platform run dev"
-waitForPort = 5000
+args = "PORT=21210 BASE_PATH=/ pnpm --filter @workspace/trading-platform run dev"
 
 [workflows.workflow.metadata]
-outputType = "webview"
+outputType = "console"
 
 [agent]
 stack = "BEST_EFFORT_FALLBACK"
