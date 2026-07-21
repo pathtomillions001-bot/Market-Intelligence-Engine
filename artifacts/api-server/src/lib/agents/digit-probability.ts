@@ -237,30 +237,23 @@ function winProbForBarrier(
 
 // ── Barrier option builder ─────────────────────────────────────────────────────
 //
-// ADAPTIVE BARRIER POLICY (replaces old single-barrier restriction):
+// STRICT BARRIER POLICY:
 //
-//   Rather than locking to a single configured barrier, scan a small range of
-//   barriers around the user's configured value so the EV tournament can find the
-//   best live opportunity:
+//   Only the exact barrier the user has configured in Settings is used.
+//   No range scanning, no "riskier neighbours" — the engine trades the digit
+//   the user chose, nothing else.
 //
-//     DIGITOVER : configured barrier  →  configured + 2  (e.g. OVER 1, 2, 3)
-//     DIGITUNDER: configured barrier  →  configured - 2  (e.g. UNDER 8, 7, 6)
+//   Normal mode  → normalOverDigit  / normalUnderDigit   (defaults: OVER 1 / UNDER 8)
+//   Recovery mode→ recoveryOverDigit / recoveryUnderDigit (defaults: OVER 3 / UNDER 6)
 //
-//   "Higher index" for OVER means slightly more risk / higher payout.
-//   "Lower index" for UNDER means slightly more risk / higher payout.
-//   The user's configured barrier is always included; the two adjacent riskier
-//   options are added so the engine can capitalise when those digits are cold.
-//
-// Default (when no override is supplied by ai.ts) uses OVER 2 / UNDER 7 as the
-// centre of the range, matching the original safe defaults.
+//   The correct values are always passed in from ai.ts via activeBarrierOverride.
+//   The fallback here matches the DB schema defaults so a cold-start with no
+//   settings row behaves consistently with a freshly created settings row.
 
 const ALLOWED_BARRIERS: Record<"DIGITOVER" | "DIGITUNDER", number> = {
-  DIGITOVER:  2,
-  DIGITUNDER: 7,
+  DIGITOVER:  1,
+  DIGITUNDER: 8,
 };
-
-/** How many additional riskier barriers to scan beyond the configured centre. */
-const BARRIER_SCAN_RADIUS = 2;
 
 function buildBarrierOptions(
   analysis: ReturnType<typeof analyzeDigits>,
@@ -271,22 +264,13 @@ function buildBarrierOptions(
 
   for (const [ct, payoutMap] of Object.entries(DIGIT_PAYOUTS)) {
     const contractType = ct as "DIGITOVER" | "DIGITUNDER";
-    const centre = allowedBarriers[contractType];
+    const exactBarrier = allowedBarriers[contractType];
 
     for (const [bStr, payout] of Object.entries(payoutMap)) {
       const barrier = Number(bStr);
 
-      // Accept the configured barrier and up to BARRIER_SCAN_RADIUS additional
-      // adjacent barriers that are slightly more risky (higher payout).
-      //
-      // OVER: higher barrier = more risk/payout  → accept [centre, centre+1, centre+2]
-      // UNDER: lower barrier = more risk/payout  → accept [centre, centre-1, centre-2]
-      const inRange =
-        contractType === "DIGITOVER"
-          ? barrier >= centre && barrier <= centre + BARRIER_SCAN_RADIUS
-          : barrier <= centre && barrier >= centre - BARRIER_SCAN_RADIUS;
-
-      if (!inRange) continue;
+      // Accept ONLY the exact barrier the user configured. No range scanning.
+      if (barrier !== exactBarrier) continue;
 
       const winP = winProbForBarrier(contractType, barrier, analysis, sampleSize);
       const ev = winP * (payout - 1) - (1 - winP);

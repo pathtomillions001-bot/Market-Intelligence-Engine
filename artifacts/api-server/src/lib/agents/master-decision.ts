@@ -155,38 +155,26 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     rejectReasons.push("No EV data — market data insufficient to evaluate");
   } else {
     // ── Dynamic tier classification using user-configured barriers ───────────
-    // Always use the settings-configured barrier values so any digit the user
-    // picks gets the right EV gate treatment — not just hardcoded 2/7/4/5.
-    const normalOverBarrier  = ctx.settings.normalOverDigit   ?? 2;
-    const normalUnderBarrier = ctx.settings.normalUnderDigit  ?? 7;
-    const recoveryOverBarrier  = ctx.settings.recoveryOverDigit  ?? 4;
-    const recoveryUnderBarrier = ctx.settings.recoveryUnderDigit ?? 5;
+    // Use the exact barriers the user configured — no range scanning.
+    // Defaults match the DB schema so a missing settings row behaves consistently.
+    const normalOverBarrier    = ctx.settings.normalOverDigit   ?? 1;
+    const normalUnderBarrier   = ctx.settings.normalUnderDigit  ?? 8;
+    const recoveryOverBarrier  = ctx.settings.recoveryOverDigit  ?? 3;
+    const recoveryUnderBarrier = ctx.settings.recoveryUnderDigit ?? 6;
 
-    // Tier classification now covers the full adaptive scanning RANGE, not just the
-    // single configured barrier. buildBarrierOptions() scans [centre, centre+1, centre+2]
-    // for OVER and [centre, centre-1, centre-2] for UNDER so the EV tournament can pick
-    // the best live opportunity within the user's risk envelope. Any barrier selected
-    // from within that range should receive the same EV gate as the configured centre.
-    const SCAN_RADIUS = 2;
+    // Exact match: the EV tournament now only ever produces the one barrier the
+    // user chose, so tier classification is a simple equality check.
     const isDigitTier1 = (
       (bestEV.product === "DIGITOVER"  &&
-        bestEV.barrier !== undefined   &&
-        bestEV.barrier >= normalOverBarrier &&
-        bestEV.barrier <= normalOverBarrier + SCAN_RADIUS) ||
+        bestEV.barrier === normalOverBarrier) ||
       (bestEV.product === "DIGITUNDER" &&
-        bestEV.barrier !== undefined   &&
-        bestEV.barrier <= normalUnderBarrier &&
-        bestEV.barrier >= normalUnderBarrier - SCAN_RADIUS)
+        bestEV.barrier === normalUnderBarrier)
     );
     const isDigitTier2 = (
       (bestEV.product === "DIGITOVER"  &&
-        bestEV.barrier !== undefined   &&
-        bestEV.barrier >= recoveryOverBarrier &&
-        bestEV.barrier <= recoveryOverBarrier + SCAN_RADIUS) ||
+        bestEV.barrier === recoveryOverBarrier) ||
       (bestEV.product === "DIGITUNDER" &&
-        bestEV.barrier !== undefined   &&
-        bestEV.barrier <= recoveryUnderBarrier &&
-        bestEV.barrier >= recoveryUnderBarrier - SCAN_RADIUS)
+        bestEV.barrier === recoveryUnderBarrier)
     );
     const isDigitMatch = bestEV.product === "DIGITMATCH";
     const isDigitDiff  = bestEV.product === "DIGITDIFF";
