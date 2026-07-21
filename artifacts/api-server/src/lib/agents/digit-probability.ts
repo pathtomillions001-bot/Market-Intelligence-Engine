@@ -237,15 +237,30 @@ function winProbForBarrier(
 
 // ── Barrier option builder ─────────────────────────────────────────────────────
 //
-// STRICT BARRIER POLICY:
-//   Always → ONLY OVER 2  and UNDER 7  (safe, consistent barriers)
+// ADAPTIVE BARRIER POLICY (replaces old single-barrier restriction):
 //
-// All other barriers are excluded regardless of edge or EV score.
+//   Rather than locking to a single configured barrier, scan a small range of
+//   barriers around the user's configured value so the EV tournament can find the
+//   best live opportunity:
+//
+//     DIGITOVER : configured barrier  →  configured + 2  (e.g. OVER 1, 2, 3)
+//     DIGITUNDER: configured barrier  →  configured - 2  (e.g. UNDER 8, 7, 6)
+//
+//   "Higher index" for OVER means slightly more risk / higher payout.
+//   "Lower index" for UNDER means slightly more risk / higher payout.
+//   The user's configured barrier is always included; the two adjacent riskier
+//   options are added so the engine can capitalise when those digits are cold.
+//
+// Default (when no override is supplied by ai.ts) uses OVER 2 / UNDER 7 as the
+// centre of the range, matching the original safe defaults.
 
 const ALLOWED_BARRIERS: Record<"DIGITOVER" | "DIGITUNDER", number> = {
   DIGITOVER:  2,
   DIGITUNDER: 7,
 };
+
+/** How many additional riskier barriers to scan beyond the configured centre. */
+const BARRIER_SCAN_RADIUS = 2;
 
 function buildBarrierOptions(
   analysis: ReturnType<typeof analyzeDigits>,
@@ -256,13 +271,22 @@ function buildBarrierOptions(
 
   for (const [ct, payoutMap] of Object.entries(DIGIT_PAYOUTS)) {
     const contractType = ct as "DIGITOVER" | "DIGITUNDER";
+    const centre = allowedBarriers[contractType];
 
     for (const [bStr, payout] of Object.entries(payoutMap)) {
       const barrier = Number(bStr);
 
-      // STRICT: only allow the one permitted barrier — OVER 2 / UNDER 7 normally,
-      // or OVER 4 / UNDER 5 while this family is in Recovery Mode.
-      if (barrier !== allowedBarriers[contractType]) continue;
+      // Accept the configured barrier and up to BARRIER_SCAN_RADIUS additional
+      // adjacent barriers that are slightly more risky (higher payout).
+      //
+      // OVER: higher barrier = more risk/payout  → accept [centre, centre+1, centre+2]
+      // UNDER: lower barrier = more risk/payout  → accept [centre, centre-1, centre-2]
+      const inRange =
+        contractType === "DIGITOVER"
+          ? barrier >= centre && barrier <= centre + BARRIER_SCAN_RADIUS
+          : barrier <= centre && barrier >= centre - BARRIER_SCAN_RADIUS;
+
+      if (!inRange) continue;
 
       const winP = winProbForBarrier(contractType, barrier, analysis, sampleSize);
       const ev = winP * (payout - 1) - (1 - winP);
@@ -470,22 +494,47 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
   const sorted = [...barrierOptions].sort((a, b) => b.adjustedEvScore - a.adjustedEvScore);
   const bestBarrier = sorted[0] ?? null;
 
-  // Score based on best barrier edge and data quality
+  // ── Score based on win-rate deviation from theoretical (uniform) baseline ──
+  //
+  // WHY NOT EDGE: "edge" = winP - 1/payout is always deeply negative for safe
+  // low-payout OVER/UNDER barriers (e.g. OVER 1 has edge ≈ -0.13 even when the
+  // digit distribution is perfectly normal). Using edge * 300 as a score produced
+  // values of 10–15 for ALL safe barriers, making the consensus gate impossible to
+  // pass and blocking every OVER/UNDER trade regardless of digit skew.
+  //
+  // CORRECT APPROACH: score the deviation of the ACTUAL win probability from the
+  // THEORETICAL win probability in a perfectly uniform market.
+  //
+  //   theoreticalWinP for OVER N = (9 - N) / 10  (fraction of digits > N)
+  //   theoreticalWinP for UNDER N = N / 10        (fraction of digits < N)
+  //
+  // A deviation of +5pp (digits skewing cold) → score 75. Uniform → score 50.
+  // A deviation of -5pp (digits skewing hot) → score 25.  Clean and intuitive.
   const dataSufficiency = Math.min(1, digits.length / 100);
+
+  let theoreticalWinP = 0.5;
+  if (bestBarrier) {
+    theoreticalWinP = bestBarrier.contractType === "DIGITOVER"
+      ? (9 - bestBarrier.barrier) / 10
+      : bestBarrier.barrier / 10;
+  }
+  const winDeviation = bestBarrier ? (bestBarrier.winProbability - theoreticalWinP) : 0;
+  // Scale: ±10pp deviation maps to ±50 score points.
   const edgeScore = bestBarrier
-    ? Math.min(95, Math.round(50 + bestBarrier.edge * 300))
+    ? Math.min(95, Math.round(50 + winDeviation * 500))
     : 50;
   let score = Math.round(edgeScore * dataSufficiency + 50 * (1 - dataSufficiency));
 
-  // During a loss streak, penalise zero or negative edge strongly.
-  // The AI should never repeat a trade with no statistical edge after consecutive losses.
+  // During a loss streak, demand above-theoretical win probability.
+  // The AI should only repeat OVER/UNDER after consecutive losses when digits
+  // are genuinely skewing in the trade's favour.
   const sessionLosses = ctx.daily.consecutiveLosses;
   if (sessionLosses >= 2 && bestBarrier) {
-    if (bestBarrier.edge <= 0) {
-      // No edge at all — strong penalty: effectively blocks this barrier in recovery
+    if (winDeviation < 0) {
+      // Digits skewing against the barrier — strong penalty during a streak
       score = Math.max(10, score - 20);
-    } else if (sessionLosses >= 3 && bestBarrier.edge < 0.02) {
-      // Weak edge during a deeper streak — require at least 2% edge
+    } else if (sessionLosses >= 3 && winDeviation < 0.02) {
+      // Weak advantage during a deeper streak — need at least 2pp positive deviation
       score = Math.max(10, score - 12);
     }
   }

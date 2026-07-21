@@ -162,17 +162,31 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     const recoveryOverBarrier  = ctx.settings.recoveryOverDigit  ?? 4;
     const recoveryUnderBarrier = ctx.settings.recoveryUnderDigit ?? 5;
 
+    // Tier classification now covers the full adaptive scanning RANGE, not just the
+    // single configured barrier. buildBarrierOptions() scans [centre, centre+1, centre+2]
+    // for OVER and [centre, centre-1, centre-2] for UNDER so the EV tournament can pick
+    // the best live opportunity within the user's risk envelope. Any barrier selected
+    // from within that range should receive the same EV gate as the configured centre.
+    const SCAN_RADIUS = 2;
     const isDigitTier1 = (
-      // User's normal-mode OVER barrier — gate on edge (actual win > theoretical)
-      (bestEV.product === "DIGITOVER"  && bestEV.barrier === normalOverBarrier) ||
-      // User's normal-mode UNDER barrier — same edge gate
-      (bestEV.product === "DIGITUNDER" && bestEV.barrier === normalUnderBarrier)
+      (bestEV.product === "DIGITOVER"  &&
+        bestEV.barrier !== undefined   &&
+        bestEV.barrier >= normalOverBarrier &&
+        bestEV.barrier <= normalOverBarrier + SCAN_RADIUS) ||
+      (bestEV.product === "DIGITUNDER" &&
+        bestEV.barrier !== undefined   &&
+        bestEV.barrier <= normalUnderBarrier &&
+        bestEV.barrier >= normalUnderBarrier - SCAN_RADIUS)
     );
     const isDigitTier2 = (
-      // User's recovery-mode OVER barrier — wider EV gate (higher payout)
-      (bestEV.product === "DIGITOVER"  && bestEV.barrier === recoveryOverBarrier) ||
-      // User's recovery-mode UNDER barrier — wider EV gate
-      (bestEV.product === "DIGITUNDER" && bestEV.barrier === recoveryUnderBarrier)
+      (bestEV.product === "DIGITOVER"  &&
+        bestEV.barrier !== undefined   &&
+        bestEV.barrier >= recoveryOverBarrier &&
+        bestEV.barrier <= recoveryOverBarrier + SCAN_RADIUS) ||
+      (bestEV.product === "DIGITUNDER" &&
+        bestEV.barrier !== undefined   &&
+        bestEV.barrier <= recoveryUnderBarrier &&
+        bestEV.barrier >= recoveryUnderBarrier - SCAN_RADIUS)
     );
     const isDigitMatch = bestEV.product === "DIGITMATCH";
     const isDigitDiff  = bestEV.product === "DIGITDIFF";

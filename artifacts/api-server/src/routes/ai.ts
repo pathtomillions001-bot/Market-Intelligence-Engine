@@ -581,7 +581,13 @@ async function runAutonomousLoop() {
                           // DIGITDIFF: ~96% win rate but low payout → scores may vary; keep same floor.
                           : fam.name === "matchdiff"
                             ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 45)
-                            : baseCtx.settings.minConfidenceThreshold,
+                            // OVER/UNDER: safe low-payout barriers have naturally lower agent scores
+                            // because their "edge" vs breakeven is always negative in near-uniform
+                            // markets. Cap at 48 (same as evenodd) so the EV gate and digit skew
+                            // do the real filtering, not an artificially high consensus threshold.
+                            : fam.name === "overunder"
+                              ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 48)
+                              : baseCtx.settings.minConfidenceThreshold,
                     },
                     recoveryBarrierOverride: fam.name === "overunder" ? activeBarrierOverride : undefined,
                   };
