@@ -550,6 +550,21 @@ export default function Dashboard() {
       setPendingResults([]);
     });
 
+    // New day — hard-reset all daily stats so the dashboard shows 0 immediately
+    // instead of waiting for the next polling interval.
+    es.addEventListener("day_reset", () => {
+      setPendingResults([]);
+      setGroupScans({});
+      setIsScanningGroups(false);
+      setTournamentWinner(null);
+      queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
+      queryClient.invalidateQueries({ queryKey: ["getDailySummary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ai/engine/status"] });
+      queryClient.invalidateQueries({ queryKey: ["getAiEngineStatus"] });
+      queryClient.invalidateQueries({ queryKey: ["markets-top-signals"] });
+      queryClient.invalidateQueries({ queryKey: ["markets", "ranked-all"] });
+    });
+
     // When the user saves Settings, immediately refetch all market + engine data
     // so the dashboard reflects the new contract types without needing a page reload.
     es.addEventListener("settings_updated", () => {

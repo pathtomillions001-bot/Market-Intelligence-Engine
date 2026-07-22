@@ -1,8 +1,8 @@
 import { Switch, Route, Router as WouterRouter, useLocation } from "wouter";
-import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import NotFound from "@/pages/not-found";
 import { Layout } from "@/components/layout";
 import LandingPage from "./pages/landing";
@@ -24,6 +24,73 @@ const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 function getApiUrl(path: string) {
   return `${BASE}/api${path}`;
+}
+
+// ── Global midnight-reset hook ────────────────────────────────────────────────
+// 1. On mount: tells the server the browser's timezone offset so all "today"
+//    boundaries (daily stats, recovery state, session counters) align with the
+//    user's local clock rather than server UTC.
+// 2. Schedules a setTimeout that fires at EXACTLY local midnight → calls
+//    POST /api/ai/day-reset?reset=true which clears all in-memory counters on
+//    the server and broadcasts a `day_reset` SSE event.
+// 3. Listens for the `day_reset` SSE event (may come from the server-side
+//    scheduler when the browser is not the trigger) and invalidates every
+//    daily-data React Query cache so all pages re-fetch immediately with no lag.
+function useMidnightReset() {
+  const qc = useQueryClient();
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const tzOffsetMin = new Date().getTimezoneOffset(); // UTC − local, browser convention
+
+    // ── Tell the server our timezone ────────────────────────────────────────
+    fetch(getApiUrl("/ai/day-reset"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tzOffsetMin, reset: false }),
+    }).catch(() => { /* non-critical */ });
+
+    // ── SSE listener for day_reset (server fires this at midnight) ──────────
+    const es = new EventSource(getApiUrl("/ai/events"));
+    es.addEventListener("day_reset", () => {
+      qc.invalidateQueries(); // invalidate everything — new day, fresh slate
+    });
+
+    // ── Compute ms until next local midnight ────────────────────────────────
+    function msUntilLocalMidnight(): number {
+      const now = new Date();
+      const tomorrow = new Date(now);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      tomorrow.setHours(0, 0, 0, 0);
+      return Math.max(tomorrow.getTime() - now.getTime(), 1_000);
+    }
+
+    // ── Schedule the client-side midnight trigger ────────────────────────────
+    function scheduleReset() {
+      const ms = msUntilLocalMidnight();
+      timerRef.current = setTimeout(() => {
+        // Tell the server to perform the reset + broadcast SSE
+        fetch(getApiUrl("/ai/day-reset"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tzOffsetMin: new Date().getTimezoneOffset(), reset: true }),
+        }).catch(() => { /* non-critical — server-side scheduler is the fallback */ });
+
+        // Also invalidate locally in case SSE delivery is delayed
+        qc.invalidateQueries();
+
+        // Reschedule for the next midnight
+        scheduleReset();
+      }, ms);
+    }
+    scheduleReset();
+
+    return () => {
+      es.close();
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 }
 
 function useLandingGate() {
@@ -49,6 +116,7 @@ function useLandingGate() {
 }
 
 function Router() {
+  useMidnightReset();
   const { showLanding, dismiss } = useLandingGate();
   const [, setLocation] = useLocation();
 

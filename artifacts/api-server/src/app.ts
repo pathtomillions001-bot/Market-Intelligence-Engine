@@ -10,7 +10,8 @@ import { tickManager, DERIV_MARKETS, APP_ID } from "./lib/deriv";
 import { loadWinRatesFromDb } from "./lib/win-rate-store";
 import { seedFromDb as seedLearningAgent } from "./lib/agents/learning-agent";
 import { loadCalibrationCache } from "./lib/calibration";
-import { loadRecoveryStateFromDb } from "./routes/ai";
+import { loadRecoveryStateFromDb, forceDayReset } from "./routes/ai";
+import { registerMidnightCallback, scheduleNextMidnight } from "./lib/tz";
 import { loadFromDb as loadDynamicConfidence } from "./lib/agents/dynamic-confidence";
 import { pool, db, marketWinRatesTable } from "@workspace/db";
 
@@ -80,6 +81,20 @@ bootstrapDb().then(() => {
     logger.info({ count: rows.length }, "Learning agent seeded from historical win rates");
   }).catch((err: unknown) => logger.warn({ err }, "Learning agent seed from DB failed"));
 });
+
+// ── Server-side midnight reset scheduler ─────────────────────────────────────
+// Fires forceDayReset() at the user's local midnight (timezone known once the
+// frontend connects via POST /api/ai/day-reset).  Defaults to UTC until then.
+// This is the fallback that keeps the server correct even when the browser is
+// closed overnight.
+registerMidnightCallback(() => {
+  try {
+    forceDayReset(true);
+  } catch (err) {
+    logger.warn({ err }, "Server-side midnight reset failed");
+  }
+});
+scheduleNextMidnight();
 
 // Start persistent Deriv tick subscription for all synthetic markets
 tickManager.start(DERIV_MARKETS.map((m) => m.symbol));

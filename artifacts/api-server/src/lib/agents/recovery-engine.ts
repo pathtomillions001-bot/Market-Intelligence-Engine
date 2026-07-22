@@ -20,6 +20,8 @@
  * State persisted to DB (recoveryStateJson) so recovery survives restarts.
  */
 
+import { getLocalTodayKey } from "../tz";
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface RecoveryState {
@@ -33,11 +35,9 @@ export interface RecoveryState {
   consecutiveMatchLosses:   number;       // DIGITMATCH losses in a row while in recovery — triggers DIFF fallback at ≥3
 }
 
-/** Local calendar date (server time) in YYYY-MM-DD, matching how "today" is computed elsewhere (daily P&L, daily stats). */
+/** Local calendar date in user's timezone in YYYY-MM-DD. Uses the tz offset stored in lib/tz so it agrees with the daily stats on the frontend. */
 function todayKey(): string {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.toISOString().slice(0, 10);
+  return getLocalTodayKey();
 }
 
 function freshState(): RecoveryState {
@@ -56,41 +56,53 @@ function freshState(): RecoveryState {
 let state: RecoveryState = freshState();
 
 /**
+ * Inner new-day transition: resets state and applies 50%-debt carry-over.
+ * Extracted so both `ensureFreshDay` (lazy check) and `forceNewDay`
+ * (midnight scheduler) share identical logic.
+ */
+function applyNewDay(): void {
+  const prevDebt      = state.unrecoveredAmount;
+  const prevBaseStake = state.baseStake;
+  const hadCarryOver  = state.inRecovery || prevDebt > 0 || state.streakLossCount > 0;
+
+  state = freshState();
+
+  // Carry 50% of any unrecovered debt into the new day (capped at 3× base stake).
+  // A hard wipe would silently discard real account losses from late-night trades.
+  // Half-carry enters at step 1 so previous escalating multipliers don't compound.
+  if (prevDebt > 0 && prevBaseStake > 0) {
+    const carryDebt = Math.min(prevDebt * 0.5, prevBaseStake * 3);
+    if (carryDebt >= 0.35) {
+      state.inRecovery        = true;
+      state.unrecoveredAmount = carryDebt;
+      state.baseStake         = prevBaseStake;
+      state.recoveryStep      = 1;
+      state.streakLossCount   = 1;
+      state.streakStartAmount = carryDebt;
+    }
+  }
+
+  if (hadCarryOver) persistToDb().catch(() => {});
+}
+
+/**
  * Every day starts on a clean slate — no unrecovered debt, streak, or recovery
  * mode carries over from a previous day, regardless of whether it was fully
  * covered or not. Called at the top of every read/write entry point so the
- * rollover is detected the instant the calendar day changes (no separate
- * cron/timer needed), whether the engine is idle, mid-recovery, or mid-loop.
+ * rollover is detected the instant the calendar day changes, whether the engine
+ * is idle, mid-recovery, or mid-loop.
  */
 function ensureFreshDay(): void {
-  const today = todayKey();
-  if (state.resetDate !== today) {
-    const prevDebt      = state.unrecoveredAmount;
-    const prevBaseStake = state.baseStake;
-    const hadCarryOver  = state.inRecovery || prevDebt > 0 || state.streakLossCount > 0;
+  if (state.resetDate !== todayKey()) applyNewDay();
+}
 
-    state = freshState();
-
-    // Carry 50% of any unrecovered debt into the new day (capped at 3× base stake).
-    // Problem: the old hard midnight reset silently wiped real account losses — if the
-    // engine was mid-recovery at 11:59 PM, a loss at that minute was never recovered.
-    // Fix: preserve half the debt so the new day acknowledges it without creating a
-    // full next-day spiral. Carry-over enters at step 1 so the previous day's
-    // escalating multipliers don't compound — it behaves like a fresh first recovery step.
-    if (prevDebt > 0 && prevBaseStake > 0) {
-      const carryDebt = Math.min(prevDebt * 0.5, prevBaseStake * 3);
-      if (carryDebt >= 0.35) {
-        state.inRecovery        = true;
-        state.unrecoveredAmount = carryDebt;
-        state.baseStake         = prevBaseStake;
-        state.recoveryStep      = 1;
-        state.streakLossCount   = 1;
-        state.streakStartAmount = carryDebt;
-      }
-    }
-
-    if (hadCarryOver) persistToDb().catch(() => {});
-  }
+/**
+ * Force an immediate new-day transition without checking the date.
+ * Called by the midnight scheduler exactly at 00:00 in the user's local
+ * timezone — avoids any lag waiting for the next trade/request to arrive.
+ */
+export function forceNewDay(): void {
+  applyNewDay();
 }
 
 // ── DB persistence (auto, on every outcome) ────────────────────────────────────

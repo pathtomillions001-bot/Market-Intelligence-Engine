@@ -14,11 +14,41 @@ import { trackRejectedTrade, getMissedOpportunitySummary, getRecentMissed } from
 import { getStatus as getDynamicConfidenceStatus, loadFromDb as loadDynamicConfidence } from "../lib/agents/dynamic-confidence";
 import { broadcastSSE, addSSEClient, removeSSEClient } from "../lib/sse";
 import { getTodayStart } from "./trades";
+import { setTzOffset } from "../lib/tz";
 
 const router = Router();
 
 // ── Recovery state persistence ────────────────────────────────────────────────
 /** Load persisted recovery state from DB on server startup. */
+/**
+ * Resets every in-memory daily counter at midnight.
+ *
+ * Clears:  tradesExecutedToday, sessionLossCount, lastTradeCompletedAt,
+ *          recentTradesBySymbol, active cooldown timer + cooldownUntil.
+ * Also forces the recovery engine into a new-day state (50%-debt carry logic).
+ * Broadcasts `day_reset` SSE so all open browser tabs re-fetch immediately.
+ *
+ * Called by:
+ *  1. The server-side midnight scheduler (lib/tz) — fires even when the browser is closed.
+ *  2. POST /api/ai/day-reset from the frontend — fires at the user's exact local midnight.
+ */
+export function forceDayReset(broadcast = true): void {
+  tradesExecutedToday  = 0;
+  sessionLossCount     = 0;
+  lastTradeCompletedAt = null;
+  recentTradesBySymbol.clear();
+
+  if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
+  cooldownUntil = null;
+
+  recoveryEngine.forceNewDay();
+
+  if (broadcast) {
+    broadcastSSE("day_reset", { ts: new Date().toISOString() });
+  }
+  logger.info("Midnight day-reset fired — all in-memory daily counters cleared");
+}
+
 export async function loadRecoveryStateFromDb(): Promise<void> {
   try {
     const rows = await db.select().from(settingsTable).limit(1);
@@ -1577,6 +1607,26 @@ router.get("/recovery/evaluation", async (_req, res): Promise<void> => {
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch recovery evaluation" });
   }
+});
+
+// ── Day-reset handshake ───────────────────────────────────────────────────────
+// Called by the frontend on every page-load with the browser's tzOffsetMin
+// (Date.prototype.getTimezoneOffset() — UTC minus local, in minutes).
+// On first load: just stores the timezone and reschedules the midnight timer.
+// At exactly local midnight: frontend also sets `reset: true` which triggers
+// the full in-memory reset immediately (before the server-side timer fires).
+router.post("/day-reset", (req, res): void => {
+  const { tzOffsetMin, reset } = req.body ?? {};
+
+  if (typeof tzOffsetMin === "number" && Number.isFinite(tzOffsetMin)) {
+    setTzOffset(tzOffsetMin); // stores offset + reschedules the server-side midnight timer
+  }
+
+  if (reset === true) {
+    forceDayReset(true);               // resets in-memory state + broadcasts SSE day_reset
+  }
+
+  res.json({ ok: true });
 });
 
 export default router;

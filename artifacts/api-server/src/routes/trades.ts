@@ -9,6 +9,7 @@ import * as recoveryEngine from "../lib/agents/recovery-engine";
 import { analyzeCompletedTrade } from "../lib/agents/trade-intelligence";
 import { logger } from "../lib/logger";
 import { broadcastSSE } from "../lib/sse";
+import { getLocalTodayStart } from "../lib/tz";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 
 const router = Router();
@@ -55,15 +56,12 @@ function buildDailyStatsForManual(closedToday: any[]): DailyStats {
 
 // ── Single source of truth for "today" boundary ─────────────────────────────
 // Every endpoint that reports today's win rate/profit/trade-count MUST call
-// this instead of rolling its own `new Date(); setHours(0,0,0,0)` — a second
-// independent copy of this logic is exactly how Dashboard/Journal/Analytics
-// drifted out of sync before. Server-local midnight; resets naturally at
-// midnight since it's computed fresh on every request (no caching of the
-// boundary itself).
+// this instead of rolling its own `new Date(); setHours(0,0,0,0)`.
+// Uses the user's timezone (stored in lib/tz via the day-reset handshake on
+// page-load) so "today" on the server always matches the user's local calendar
+// date.  Falls back to UTC if the client hasn't connected yet.
 export function getTodayStart(): Date {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
+  return getLocalTodayStart();
 }
 
 // ── Helper: get Deriv journal transactions (cache-first, one-shot fallback) ────
