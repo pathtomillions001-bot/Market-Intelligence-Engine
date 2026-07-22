@@ -462,6 +462,27 @@ export function analyzeTrend(prices: number[]) {
 const TICK_BUFFER_SIZE = 500;
 const DIGIT_BUFFER_SIZE = 300;
 
+// ── Simulated price parameters (used when app_id has no symbols) ──────────────
+const SIM_PARAMS: Record<string, { base: number; vol: number }> = {
+  R_10:    { base: 4865.000,  vol: 0.00018 },
+  R_25:    { base: 2592.726,  vol: 0.00035 },
+  R_50:    { base: 6200.0000, vol: 0.00065 },
+  R_75:    { base: 6800.0000, vol: 0.00095 },
+  R_100:   { base: 1800.00,   vol: 0.00140 },
+  "1HZ10V":  { base: 1000.00, vol: 0.00018 },
+  "1HZ25V":  { base: 1000.00, vol: 0.00035 },
+  "1HZ50V":  { base: 1000.00, vol: 0.00065 },
+  "1HZ75V":  { base: 1000.00, vol: 0.00095 },
+  "1HZ100V": { base: 1000.00, vol: 0.00140 },
+  RDBULL:  { base: 5000.0000, vol: 0.00080 },
+  RDBEAR:  { base: 5000.0000, vol: 0.00080 },
+  JD10:    { base: 1000.00,  vol: 0.00025 },
+  JD25:    { base: 1000.00,  vol: 0.00055 },
+  JD50:    { base: 1000.00,  vol: 0.00100 },
+  JD75:    { base: 1000.00,  vol: 0.00150 },
+  JD100:   { base: 1000.00,  vol: 0.00200 },
+};
+
 export interface TickEvent {
   symbol: string;
   price: number;
@@ -510,6 +531,11 @@ class DerivTickManager extends EventEmitter {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private staleTimer: ReturnType<typeof setInterval> | null = null;
   private lastPongMs = Date.now();
+
+  // Price simulation (used when app_id has no Deriv symbols)
+  private simInterval: ReturnType<typeof setInterval> | null = null;
+  private simPrices = new Map<string, number>();
+  private usingSimulated = false;
 
   // Auth callbacks routed through the shared WS
   private pendingAuth: PendingAuth[] = [];
@@ -596,7 +622,7 @@ class DerivTickManager extends EventEmitter {
       liveSymbols: live,
       totalSymbols: valid.length,
       invalidSymbols: this.invalidSymbols.size,
-      usingSimulated: false, // real data only
+      usingSimulated: this.usingSimulated,
     };
   }
 
@@ -671,8 +697,10 @@ class DerivTickManager extends EventEmitter {
       logger.warn(
         { appId: APP_ID },
         "TickManager: active_symbols returned empty — DERIV_APP_ID has no registered symbols. " +
-          "Register your app at https://app.deriv.com/account/api-token and set DERIV_APP_ID env var.",
+          "Register your app at https://app.deriv.com/apps and set a valid numeric DERIV_APP_ID env var.",
       );
+      // Start simulated prices so digit analysers have data while awaiting a real app_id
+      this.startSimulation();
       // Subscribe to desired symbols anyway; each one will tell us individually if it's invalid
       this.subscribeSymbols(this.desiredSymbols);
     } else if (toSubscribe.length === 0) {
@@ -719,6 +747,9 @@ class DerivTickManager extends EventEmitter {
 
     const market = getMarketInfo(symbol);
     if (!market) return;
+
+    // First real tick from Deriv — stop simulation
+    if (this.usingSimulated) this.stopSimulation();
 
     // Buffer price
     const prices = this.tickBuffers.get(symbol) ?? [];
@@ -856,6 +887,96 @@ class DerivTickManager extends EventEmitter {
   private stopTimers() {
     if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
     if (this.staleTimer) { clearInterval(this.staleTimer); this.staleTimer = null; }
+  }
+
+  // ── Price simulation (fallback when app_id has no Deriv symbols) ─────────────
+
+  /** Box-Muller Gaussian random number (mean=0, std=1). */
+  private gaussianRandom(): number {
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+  }
+
+  /** Push one simulated price into the tick + digit buffers (no SSE emit). */
+  private pushSimulatedTick(market: (typeof DERIV_MARKETS)[0], price: number) {
+    const factor = Math.pow(10, market.pipSize);
+    const rounded = Math.round(price * factor) / factor;
+
+    const prices = this.tickBuffers.get(market.symbol) ?? [];
+    prices.push(rounded);
+    if (prices.length > TICK_BUFFER_SIZE) prices.shift();
+    this.tickBuffers.set(market.symbol, prices);
+    this.latestPrices.set(market.symbol, rounded);
+
+    if (market.digitEnabled) {
+      const digit = extractLastDigit(rounded, market.pipSize);
+      if (digit >= 0 && digit <= 9) {
+        const digits = this.digitBuffers.get(market.symbol) ?? [];
+        digits.push(digit);
+        if (digits.length > DIGIT_BUFFER_SIZE) digits.shift();
+        this.digitBuffers.set(market.symbol, digits);
+      }
+    }
+  }
+
+  /** Start synthetic price generation for every digit market. */
+  startSimulation() {
+    if (this.simInterval) return; // already running
+    this.usingSimulated = true;
+    logger.info(
+      { appId: APP_ID },
+      "TickManager: no live symbols — starting simulated prices for digit analysis (replace DERIV_APP_ID with a valid numeric app ID from app.deriv.com/apps)",
+    );
+
+    // Seed 150 initial ticks so analysers warm up immediately
+    for (const market of DERIV_MARKETS) {
+      const params = SIM_PARAMS[market.symbol];
+      if (!params || !market.digitEnabled) continue;
+      this.simPrices.set(market.symbol, params.base);
+      let price = params.base;
+      for (let i = 0; i < 150; i++) {
+        const delta = price * params.vol * this.gaussianRandom();
+        price = Math.max(price * 0.5, price + delta);
+        this.pushSimulatedTick(market, price);
+      }
+    }
+
+    // Continue generating one tick per market per second (staggered)
+    let idx = 0;
+    this.simInterval = setInterval(() => {
+      const digitMarkets = DERIV_MARKETS.filter((m) => m.digitEnabled);
+      const market = digitMarkets[idx % digitMarkets.length];
+      idx++;
+
+      const params = SIM_PARAMS[market.symbol];
+      if (!params) return;
+
+      let price = this.simPrices.get(market.symbol) ?? params.base;
+      const delta = price * params.vol * this.gaussianRandom();
+      price = Math.max(price * 0.5, price + delta);
+      this.simPrices.set(market.symbol, price);
+      this.pushSimulatedTick(market, price);
+
+      const factor = Math.pow(10, market.pipSize);
+      const rounded = Math.round(price * factor) / factor;
+      const lastDigit = extractLastDigit(rounded, market.pipSize);
+      this.emit("tick", {
+        symbol: market.symbol,
+        price: rounded,
+        lastDigit,
+        epoch: Math.floor(Date.now() / 1000),
+      } as TickEvent);
+    }, Math.ceil(1000 / DERIV_MARKETS.filter((m) => m.digitEnabled).length));
+  }
+
+  stopSimulation() {
+    if (!this.simInterval) return;
+    clearInterval(this.simInterval);
+    this.simInterval = null;
+    this.usingSimulated = false;
+    logger.info("TickManager: stopping simulation — real Deriv ticks taking over");
   }
 
   private cleanupWs() {

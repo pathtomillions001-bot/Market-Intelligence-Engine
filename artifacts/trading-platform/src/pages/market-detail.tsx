@@ -246,7 +246,22 @@ function EvenOddPanel({ digitStats, agentData, onTrade }: {
   agentData?: { weightedScore: number; shouldTrade: boolean; recommendedDuration: number };
   onTrade: (type: string, dir: "up" | "down", barrier?: number, duration?: number) => void;
 }) {
-  if (!digitStats) return null;
+  if (!digitStats) return (
+    <Card className="bg-card">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <span className="text-base leading-none">⚡</span>
+          Even &amp; Odd Analysis
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-center gap-2 text-xs text-muted-foreground py-6">
+          <div className="w-3 h-3 rounded-full border-2 border-primary border-t-transparent animate-spin flex-shrink-0" />
+          Collecting live digit data — panels appear once ticks arrive…
+        </div>
+      </CardContent>
+    </Card>
+  );
 
   const eoStats = digitStats.evenOddStats;
   const EVEN_DIGITS = [0, 2, 4, 6, 8];
@@ -732,6 +747,22 @@ export default function MarketDetail() {
       })()}
 
       {/* Digit Analysis (OVER/UNDER) — only for digit markets */}
+      {isDigitMarket && !digitStats && (
+        <Card className="bg-card">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Activity className="w-4 h-4 text-primary" />
+              Digit Analysis — OVER/UNDER Intelligence
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground py-6">
+              <div className="w-3 h-3 rounded-full border-2 border-primary border-t-transparent animate-spin flex-shrink-0" />
+              Collecting live digit data…
+            </div>
+          </CardContent>
+        </Card>
+      )}
       {isDigitMarket && digitStats && (
         <Card className="bg-card">
           <CardHeader className="pb-2">
@@ -842,6 +873,22 @@ export default function MarketDetail() {
 
 
       {/* Matches & Differs — only for digit markets */}
+      {isDigitMarket && !digitStats && (
+        <Card className="bg-card">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <span className="text-base leading-none">🎯</span>
+              Matches &amp; Differs Intelligence
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground py-6">
+              <div className="w-3 h-3 rounded-full border-2 border-primary border-t-transparent animate-spin flex-shrink-0" />
+              Collecting live digit data…
+            </div>
+          </CardContent>
+        </Card>
+      )}
       {isDigitMarket && digitStats && (
         <Card className="bg-card">
           <CardHeader className="pb-2">
