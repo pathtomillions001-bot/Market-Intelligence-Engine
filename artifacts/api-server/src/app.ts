@@ -98,6 +98,5 @@ scheduleNextMidnight();
 
 // Start persistent Deriv tick subscription for all synthetic markets
 tickManager.start(DERIV_MARKETS.map((m) => m.symbol));
-logger.info({ count: DERIV_MARKETS.length, appId: APP_ID }, "TickManager starting up");
 
 export default app;

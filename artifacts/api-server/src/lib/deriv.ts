@@ -14,13 +14,15 @@ import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { logger } from "./logger";
 
-// Deriv public tester app_id=1089 — required for demo API tokens
+// Deriv app_id — register your app at https://app.deriv.com/account/api-token
+// The old demo app_id=1089 is deprecated and no longer has access to synthetic indices.
 const rawAppId = process.env["DERIV_APP_ID"] ?? "1089";
 export const APP_ID = /^\d+$/.test(rawAppId) ? rawAppId : "1089";
 if (APP_ID !== rawAppId) {
   logger.warn({ rawAppId }, "DERIV_APP_ID must be numeric — using 1089");
 }
-const DERIV_WS_URL = `wss://ws.binaryws.com/websockets/v3?app_id=${APP_ID}`;
+// Updated to new official WebSocket endpoint (migrated from binaryws.com in Oct 2023)
+const DERIV_WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
 
 // ── Market definitions (synthetics only) ──────────────────────────────────────
 export const DERIV_MARKETS = [
@@ -456,7 +458,7 @@ export function analyzeTrend(prices: number[]) {
   };
 }
 
-// ── Persistent Tick Manager ───────────────────────────────────────────────────
+// ── Persistent Tick Manager (clean rewrite) ───────────────────────────────────
 const TICK_BUFFER_SIZE = 500;
 const DIGIT_BUFFER_SIZE = 300;
 
@@ -467,239 +469,64 @@ export interface TickEvent {
   epoch: number;
 }
 
+type PendingAuth = {
+  resolve: (info: DerivAccountInfo) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+/**
+ * DerivTickManager
+ *
+ * Maintains one persistent WebSocket connection to wss://ws.derivws.com.
+ * On connect it calls active_symbols to discover which markets are available
+ * for the configured DERIV_APP_ID, then subscribes only to those symbols.
+ * Symbols that return InvalidSymbol are permanently skipped (no retry loop).
+ * No simulated/fallback prices — real data only.
+ *
+ * NOTE: app_id=1089 is deprecated and returns 0 active symbols.
+ * Register your own app at https://app.deriv.com/account/api-token and set
+ * the DERIV_APP_ID environment variable.
+ */
 class DerivTickManager extends EventEmitter {
+  // Connection
   private ws: WebSocket | null = null;
+  private isConnected = false;
+  private reconnectDelay = 3_000;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Symbol state
+  private desiredSymbols: string[] = [];           // symbols we WANT to receive
+  private confirmedSymbols = new Set<string>();     // confirmed valid by active_symbols
+  private invalidSymbols = new Set<string>();       // permanently invalid — do NOT retry
+
+  // Data buffers
   private tickBuffers = new Map<string, number[]>();
   private digitBuffers = new Map<string, number[]>();
   private latestPrices = new Map<string, number>();
-  private lastRealTickMs = new Map<string, number>();
-  private isConnected = false;
-  private reconnectDelay = 3000;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private subscribedSymbols: string[] = [];
+  private lastTickMs = new Map<string, number>();
+
+  // Keep-alive
   private pingTimer: ReturnType<typeof setInterval> | null = null;
-  private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
-  private lastPongTime = Date.now();
-  private symbolRetryDelay = new Map<string, number>();
-  private symbolRetryTimer = new Map<string, ReturnType<typeof setTimeout>>();
-  // Pending authorize callbacks — reuse existing WS to avoid extra connections
-  private pendingAuth: Array<{ resolve: (info: DerivAccountInfo) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
+  private staleTimer: ReturnType<typeof setInterval> | null = null;
+  private lastPongMs = Date.now();
+
+  // Auth callbacks routed through the shared WS
+  private pendingAuth: PendingAuth[] = [];
+
+  // ── Public API ─────────────────────────────────────────────────────────────
 
   start(symbols: string[]) {
-    this.subscribedSymbols = symbols;
+    this.desiredSymbols = symbols;
     for (const sym of symbols) {
       if (!this.tickBuffers.has(sym)) this.tickBuffers.set(sym, []);
       if (!this.digitBuffers.has(sym)) this.digitBuffers.set(sym, []);
     }
+    logger.info({ count: symbols.length, appId: APP_ID }, "TickManager starting up");
     this.connect();
-    this.startStaleCheck();
   }
 
-  private startStaleCheck() {
-    if (this.staleCheckTimer) clearInterval(this.staleCheckTimer);
-    this.staleCheckTimer = setInterval(() => {
-      if (!this.isConnected || this.ws?.readyState !== WebSocket.OPEN) return;
-      const now = Date.now();
-      // Find how many symbols are actively receiving ticks (sanity reference)
-      const activeSym = this.subscribedSymbols.filter(s => {
-        const last = this.lastRealTickMs.get(s) ?? 0;
-        return now - last < 30_000;
-      });
-      // If at least some symbols are live, check for stale ones and re-subscribe them
-      if (activeSym.length > 0) {
-        for (const sym of this.subscribedSymbols) {
-          const last = this.lastRealTickMs.get(sym) ?? 0;
-          if (now - last > 45_000) {
-            logger.info({ symbol: sym }, "TickManager: re-subscribing stale market");
-            this.ws!.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
-          }
-        }
-      }
-    }, 30_000);
-  }
-
-  private connect() {
-    if (this.ws) {
-      try { this.ws.terminate(); } catch { /* ignore */ }
-    }
-
-    try {
-      this.ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
-    } catch (err) {
-      logger.warn({ err }, "TickManager: failed to create WebSocket, will retry");
-      this.scheduleReconnect();
-      return;
-    }
-
-    this.ws.on("open", () => {
-      this.isConnected = true;
-      this.reconnectDelay = 3000;
-      logger.info("TickManager: WebSocket connected to Deriv");
-      this.subscribeAll();
-      this.startPing();
-    });
-
-    this.ws.on("message", (data) => {
-      try {
-        this.handleMessage(JSON.parse(data.toString()));
-      } catch { /* ignore parse errors */ }
-    });
-
-    this.ws.on("error", (err) => {
-      logger.warn({ msg: (err as Error).message }, "TickManager: WS error");
-    });
-
-    this.ws.on("close", () => {
-      this.isConnected = false;
-      if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
-      logger.info("TickManager: WS closed, scheduling reconnect");
-      this.scheduleReconnect();
-    });
-  }
-
-  private subscribeAll() {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    // Clear per-symbol retry state on a fresh subscribe-all
-    this.symbolRetryDelay.clear();
-    for (const [, timer] of this.symbolRetryTimer) clearTimeout(timer);
-    this.symbolRetryTimer.clear();
-    // Stagger subscriptions 500ms apart to stay within Deriv rate limits
-    this.subscribedSymbols.forEach((symbol, i) => {
-      setTimeout(() => {
-        if (this.ws?.readyState === WebSocket.OPEN) {
-          this.ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
-        }
-      }, i * 500);
-    });
-    logger.info({ count: this.subscribedSymbols.length }, "TickManager: subscribing to all markets (staggered)");
-  }
-
-  private handleMessage(msg: any) {
-    if (msg.msg_type === "tick" && msg.tick) {
-      const { symbol, quote, epoch } = msg.tick;
-      const price = Number(quote);
-      const market = getMarketInfo(symbol);
-      if (!market) return;
-
-      // Subscription is healthy — reset any retry backoff for this symbol
-      if (this.symbolRetryDelay.has(symbol)) {
-        this.symbolRetryDelay.delete(symbol);
-      }
-
-      const lastDigit = market.digitEnabled ? extractLastDigit(price, market.pipSize) : -1;
-
-      // Buffer price
-      const prices = this.tickBuffers.get(symbol) ?? [];
-      prices.push(price);
-      if (prices.length > TICK_BUFFER_SIZE) prices.shift();
-      this.tickBuffers.set(symbol, prices);
-      this.latestPrices.set(symbol, price);
-      // Track real tick time per market for stale detection
-      this.lastRealTickMs.set(symbol, Date.now());
-
-      // Buffer digit
-      if (market.digitEnabled && lastDigit >= 0) {
-        const digits = this.digitBuffers.get(symbol) ?? [];
-        digits.push(lastDigit);
-        if (digits.length > DIGIT_BUFFER_SIZE) digits.shift();
-        this.digitBuffers.set(symbol, digits);
-      }
-
-      // Emit tick event for SSE broadcast
-      this.emit("tick", { symbol, price, lastDigit, epoch } as TickEvent);
-    }
-
-    if (msg.msg_type === "ping" || msg.msg_type === "pong") {
-      this.lastPongTime = Date.now();
-    }
-
-    // Resolve any pending authorize calls routed through this WS
-    if (msg.msg_type === "authorize" && msg.authorize) {
-      const info: DerivAccountInfo = {
-        loginid: msg.authorize.loginid,
-        currency: msg.authorize.currency,
-        balance: msg.authorize.balance,
-        is_virtual: msg.authorize.is_virtual,
-        email: msg.authorize.email,
-        fullname: msg.authorize.fullname,
-        country: msg.authorize.country,
-      };
-      for (const pending of this.pendingAuth) {
-        clearTimeout(pending.timer);
-        pending.resolve(info);
-      }
-      this.pendingAuth = [];
-    }
-
-    if (msg.error) {
-      const sym = msg.echo_req?.ticks ?? msg.echo_req?.symbol ?? "?";
-      const isRateLimit = msg.error.code === "RateLimit";
-
-      // Reject any pending authorize call that failed
-      if (msg.echo_req?.authorize !== undefined && this.pendingAuth.length > 0) {
-        const err = new Error(msg.error.message ?? "Authorization failed");
-        for (const pending of this.pendingAuth) {
-          clearTimeout(pending.timer);
-          pending.reject(err);
-        }
-        this.pendingAuth = [];
-        return;
-      }
-      logger.warn({ code: msg.error.code, message: msg.error.message, symbol: sym }, "TickManager: Deriv subscription error");
-      // Re-subscribe to the failed market with backoff
-      // Rate limit errors get a long backoff (60s → 120s → 240s → max 600s)
-      // Other errors get a short retry (5s)
-      if (sym !== "?" && this.subscribedSymbols.includes(sym)) {
-        // Cancel any existing retry timer for this symbol
-        const existingTimer = this.symbolRetryTimer.get(sym);
-        if (existingTimer) clearTimeout(existingTimer);
-
-        let delay: number;
-        if (isRateLimit) {
-          const current = this.symbolRetryDelay.get(sym) ?? 60_000;
-          delay = Math.min(current * 2, 600_000);
-          this.symbolRetryDelay.set(sym, delay);
-        } else {
-          delay = 5_000;
-          this.symbolRetryDelay.delete(sym);
-        }
-
-        const timer = setTimeout(() => {
-          this.symbolRetryTimer.delete(sym);
-          if (this.ws?.readyState === WebSocket.OPEN) {
-            logger.info({ symbol: sym, delayMs: delay }, "TickManager: re-subscribing after error");
-            this.ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
-          }
-        }, delay);
-        this.symbolRetryTimer.set(sym, timer);
-      }
-    }
-  }
-
-  private startPing() {
-    if (this.pingTimer) clearInterval(this.pingTimer);
-    this.pingTimer = setInterval(() => {
-      if (Date.now() - this.lastPongTime > 60000) {
-        logger.warn("TickManager: no pong for 60s, reconnecting");
-        this.connect();
-        return;
-      }
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ ping: 1 }));
-      }
-    }, 30000);
-  }
-
-  private scheduleReconnect() {
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, 30000);
-      logger.info({ delay: this.reconnectDelay }, "TickManager: reconnecting");
-      this.connect();
-    }, this.reconnectDelay);
-  }
-
-  /** Send authorize on the existing persistent WS — no new connection needed */
+  /** Send authorize on the shared persistent WS — avoids opening a competing connection. */
   authorizeViaWs(token: string, timeoutMs = 12_000): Promise<DerivAccountInfo> {
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -716,24 +543,19 @@ class DerivTickManager extends EventEmitter {
   }
 
   getTicks(symbol: string, count = 100): number[] {
-    const buf = this.tickBuffers.get(symbol) ?? [];
-    if (buf.length >= 5) return buf.slice(-count);
-    // Fall back to simulated if no live data yet
-    return generateSimulatedPrices(symbol, count);
+    return (this.tickBuffers.get(symbol) ?? []).slice(-count);
   }
 
   getDigits(symbol: string, count = 300): number[] {
     const buf = this.digitBuffers.get(symbol) ?? [];
     if (buf.length >= 30) return buf.slice(-count);
-    // Derive from tick buffer (real or simulated) to warm up digit analysis immediately
+    // Warm-up: derive digits from the tick buffer while it fills up
     const market = getMarketInfo(symbol);
     if (market?.digitEnabled) {
-      // Use getTicks which falls back to simulated prices if real ticks aren't buffered yet
       const ticks = this.getTicks(symbol, Math.max(count, 100));
       if (ticks.length >= 5) {
         const derived = ticks.map((p) => extractLastDigit(p, market.pipSize));
-        const combined = [...derived, ...buf];
-        return combined.slice(-count);
+        return [...derived, ...buf].slice(-count);
       }
     }
     return buf.slice(-count);
@@ -757,96 +579,361 @@ class DerivTickManager extends EventEmitter {
     return (this.tickBuffers.get(symbol) ?? []).length >= 5;
   }
 
-  getTickHealth(): { connected: boolean; liveSymbols: number; totalSymbols: number; usingSimulated: boolean } {
-    let liveSymbols = 0;
-    for (const m of DERIV_MARKETS) {
-      if (this.isLiveData(m.symbol)) liveSymbols++;
+  getTickHealth(): {
+    connected: boolean;
+    liveSymbols: number;
+    totalSymbols: number;
+    invalidSymbols: number;
+    usingSimulated: boolean;
+  } {
+    const valid = this.desiredSymbols.filter((s) => !this.invalidSymbols.has(s));
+    let live = 0;
+    for (const sym of valid) {
+      if (this.isLiveData(sym)) live++;
     }
     return {
       connected: this.isConnected,
-      liveSymbols,
-      totalSymbols: DERIV_MARKETS.length,
-      usingSimulated: liveSymbols < DERIV_MARKETS.length / 2,
+      liveSymbols: live,
+      totalSymbols: valid.length,
+      invalidSymbols: this.invalidSymbols.size,
+      usingSimulated: false, // real data only
     };
+  }
+
+  // ── Internal connection logic ──────────────────────────────────────────────
+
+  private connect() {
+    this.cleanupWs();
+    try {
+      this.ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
+    } catch (err) {
+      logger.warn({ err }, "TickManager: failed to create WebSocket, will retry");
+      this.scheduleReconnect();
+      return;
+    }
+
+    this.ws.on("open", () => {
+      this.isConnected = true;
+      this.reconnectDelay = 3_000;
+      this.lastPongMs = Date.now();
+      logger.info({ url: DERIV_WS_URL, appId: APP_ID }, "TickManager: WebSocket connected to Deriv");
+      // Step 1 — discover which symbols are actually available for this app_id
+      this.ws!.send(JSON.stringify({ active_symbols: "brief" }));
+      this.startPing();
+      this.startStaleCheck();
+    });
+
+    this.ws.on("message", (data) => {
+      try {
+        this.handleMessage(JSON.parse(data.toString()));
+      } catch { /* ignore parse errors */ }
+    });
+
+    this.ws.on("error", (err) => {
+      logger.warn({ msg: (err as Error).message }, "TickManager: WS error");
+    });
+
+    this.ws.on("close", () => {
+      this.isConnected = false;
+      this.stopTimers();
+      logger.info("TickManager: WS closed, scheduling reconnect");
+      this.scheduleReconnect();
+    });
+  }
+
+  private handleMessage(msg: any) {
+    switch (msg.msg_type) {
+      case "active_symbols":
+        this.onActiveSymbols(msg.active_symbols ?? []);
+        return;
+      case "tick":
+        if (msg.tick) this.onTick(msg.tick);
+        return;
+      case "ping":
+      case "pong":
+        this.lastPongMs = Date.now();
+        return;
+      case "authorize":
+        this.onAuthorize(msg);
+        return;
+    }
+    if (msg.error) this.onError(msg);
+  }
+
+  private onActiveSymbols(
+    symbols: Array<{ symbol: string; display_name: string; pip?: string }>,
+  ) {
+    const available = new Set(symbols.map((s) => s.symbol));
+    const toSubscribe = this.desiredSymbols.filter((s) => available.has(s));
+
+    if (symbols.length === 0) {
+      // app_id has no symbols — likely using deprecated demo app_id=1089
+      logger.warn(
+        { appId: APP_ID },
+        "TickManager: active_symbols returned empty — DERIV_APP_ID has no registered symbols. " +
+          "Register your app at https://app.deriv.com/account/api-token and set DERIV_APP_ID env var.",
+      );
+      // Subscribe to desired symbols anyway; each one will tell us individually if it's invalid
+      this.subscribeSymbols(this.desiredSymbols);
+    } else if (toSubscribe.length === 0) {
+      logger.warn(
+        {
+          availableSample: [...available].slice(0, 8),
+          desired: this.desiredSymbols.slice(0, 5),
+        },
+        "TickManager: none of our desired symbols found in active_symbols — " +
+          "Deriv may have renamed them. Subscribing anyway.",
+      );
+      this.subscribeSymbols(this.desiredSymbols);
+    } else {
+      this.confirmedSymbols = new Set(toSubscribe);
+      logger.info(
+        { confirmed: toSubscribe.length, total: this.desiredSymbols.length },
+        "TickManager: symbol discovery complete, subscribing",
+      );
+      this.subscribeSymbols(toSubscribe);
+    }
+  }
+
+  /** Subscribe to each symbol staggered 300 ms apart to respect Deriv rate limits. */
+  private subscribeSymbols(symbols: string[]) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const valid = symbols.filter((s) => !this.invalidSymbols.has(s));
+    valid.forEach((symbol, i) => {
+      setTimeout(() => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
+        }
+      }, i * 300);
+    });
+    logger.info(
+      { count: valid.length, staggerMs: 300 },
+      "TickManager: subscribing to markets (staggered)",
+    );
+  }
+
+  private onTick(tick: { symbol: string; quote: string; epoch: number }) {
+    const { symbol, quote, epoch } = tick;
+    const price = Number(quote);
+    if (!Number.isFinite(price) || price <= 0) return;
+
+    const market = getMarketInfo(symbol);
+    if (!market) return;
+
+    // Buffer price
+    const prices = this.tickBuffers.get(symbol) ?? [];
+    prices.push(price);
+    if (prices.length > TICK_BUFFER_SIZE) prices.shift();
+    this.tickBuffers.set(symbol, prices);
+    this.latestPrices.set(symbol, price);
+    this.lastTickMs.set(symbol, Date.now());
+
+    // Buffer digit
+    if (market.digitEnabled) {
+      const digit = extractLastDigit(price, market.pipSize);
+      if (digit >= 0 && digit <= 9) {
+        const digits = this.digitBuffers.get(symbol) ?? [];
+        digits.push(digit);
+        if (digits.length > DIGIT_BUFFER_SIZE) digits.shift();
+        this.digitBuffers.set(symbol, digits);
+      }
+    }
+
+    // Emit for real-time SSE broadcast
+    const lastDigit = market.digitEnabled ? extractLastDigit(price, market.pipSize) : -1;
+    this.emit("tick", { symbol, price, lastDigit, epoch } as TickEvent);
+  }
+
+  private onAuthorize(msg: any) {
+    if (msg.authorize) {
+      const info: DerivAccountInfo = {
+        loginid: msg.authorize.loginid,
+        currency: msg.authorize.currency,
+        balance: msg.authorize.balance,
+        is_virtual: msg.authorize.is_virtual,
+        email: msg.authorize.email,
+        fullname: msg.authorize.fullname,
+        country: msg.authorize.country,
+      };
+      for (const pending of this.pendingAuth) {
+        clearTimeout(pending.timer);
+        pending.resolve(info);
+      }
+      this.pendingAuth = [];
+    } else if (msg.error && this.pendingAuth.length > 0) {
+      const err = new Error(msg.error.message ?? "Authorization failed");
+      for (const pending of this.pendingAuth) {
+        clearTimeout(pending.timer);
+        pending.reject(err);
+      }
+      this.pendingAuth = [];
+    }
+  }
+
+  private onError(msg: any) {
+    const code: string = msg.error?.code ?? "Unknown";
+    const message: string = msg.error?.message ?? "";
+    const sym: string | undefined = msg.echo_req?.ticks;
+
+    // Reject any pending authorize that failed
+    if (msg.echo_req?.authorize !== undefined && this.pendingAuth.length > 0) {
+      const err = new Error(message || "Authorization failed");
+      for (const pending of this.pendingAuth) {
+        clearTimeout(pending.timer);
+        pending.reject(err);
+      }
+      this.pendingAuth = [];
+      return;
+    }
+
+    logger.warn({ code, message, symbol: sym }, "TickManager: Deriv error");
+
+    if (!sym || !this.desiredSymbols.includes(sym)) return;
+
+    if (code === "InvalidSymbol") {
+      // Permanently remove from retry loop — this symbol no longer exists on Deriv
+      this.invalidSymbols.add(sym);
+      logger.warn(
+        { symbol: sym, appId: APP_ID },
+        "TickManager: symbol permanently invalid — marking as unavailable (symbol may have been renamed by Deriv)",
+      );
+      return;
+    }
+
+    if (code === "RateLimit") {
+      // Back off 60 s before retrying
+      setTimeout(() => {
+        if (this.ws?.readyState === WebSocket.OPEN && !this.invalidSymbols.has(sym)) {
+          logger.info({ symbol: sym }, "TickManager: retrying after rate limit");
+          this.ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
+        }
+      }, 60_000);
+      return;
+    }
+
+    // Transient error — short retry
+    setTimeout(() => {
+      if (this.ws?.readyState === WebSocket.OPEN && !this.invalidSymbols.has(sym)) {
+        this.ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
+      }
+    }, 5_000);
+  }
+
+  // ── Keep-alive timers ──────────────────────────────────────────────────────
+
+  private startPing() {
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = setInterval(() => {
+      if (Date.now() - this.lastPongMs > 60_000) {
+        logger.warn("TickManager: no pong for 60 s, reconnecting");
+        this.connect();
+        return;
+      }
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ ping: 1 }));
+      }
+    }, 25_000);
+  }
+
+  private startStaleCheck() {
+    if (this.staleTimer) clearInterval(this.staleTimer);
+    this.staleTimer = setInterval(() => {
+      if (!this.isConnected || this.ws?.readyState !== WebSocket.OPEN) return;
+      const now = Date.now();
+      // Only re-subscribe symbols that WERE receiving ticks but went stale (> 45 s)
+      const liveSymbols = this.desiredSymbols.filter(
+        (s) => !this.invalidSymbols.has(s) && (this.lastTickMs.get(s) ?? 0) > 0,
+      );
+      for (const sym of liveSymbols) {
+        if (now - (this.lastTickMs.get(sym) ?? 0) > 45_000) {
+          logger.info({ symbol: sym }, "TickManager: re-subscribing stale symbol");
+          this.ws!.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
+        }
+      }
+    }, 30_000);
+  }
+
+  private stopTimers() {
+    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+    if (this.staleTimer) { clearInterval(this.staleTimer); this.staleTimer = null; }
+  }
+
+  private cleanupWs() {
+    this.stopTimers();
+    if (this.ws) {
+      try { this.ws.terminate(); } catch { /* ignore */ }
+      this.ws = null;
+    }
+  }
+
+  private scheduleReconnect() {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, 30_000);
+      logger.info({ delayMs: this.reconnectDelay }, "TickManager: reconnecting");
+      this.connect();
+    }, this.reconnectDelay);
   }
 }
 
 export const tickManager = new DerivTickManager();
 
-// ── Simulated price fallback ──────────────────────────────────────────────────
-function generateSimulatedPrices(symbol: string, count: number): number[] {
-  const baseMap: Record<string, number> = {
-    R_10: 6500, R_25: 3200, R_50: 1850, R_75: 950, R_100: 1200,
-    "1HZ10V": 6480, "1HZ25V": 3190, "1HZ50V": 1840, "1HZ75V": 945, "1HZ100V": 1195,
-    RDBULL: 3500, RDBEAR: 3500,
-    JD10: 4200, JD25: 4300, JD50: 4400, JD75: 4500, JD100: 4600,
-  };
-  const base = baseMap[symbol] ?? 1000;
-  const volPct = symbol.includes("R_100") || symbol.includes("1HZ100") ? 0.008
-    : symbol.includes("R_75") || symbol.includes("1HZ75") ? 0.005
-    : 0.002;
-
-  // Determine the decimal precision required for correct digit extraction.
-  // Markets with pipSize=4 need 4 decimal places; pipSize=2 need 2.
-  // Without sufficient precision, extractLastDigit() always returns 0 for pipSize=4 markets.
-  const market = getMarketInfo(symbol);
-  const pipSize = market?.pipSize ?? 2;
-  const decimalFactor = Math.pow(10, pipSize);
-
-  const prices: number[] = [base];
-  for (let i = 1; i < count; i++) {
-    const change = prices[i - 1] * volPct * (Math.random() - 0.5) * 2;
-    const raw = prices[i - 1] + change;
-    // Round to the market's pip precision so digit extraction is meaningful
-    const rounded = Math.round(raw * decimalFactor) / decimalFactor;
-    prices.push(Math.max(rounded, 0.0001));
-  }
-  return prices;
-}
-
-// ── Legacy getTickHistory shim (uses TickManager buffer + WS fallback) ────────
+// ── getTickHistory — fetches history via WS ticks_history endpoint ─────────
+// Returns ticks from the in-memory buffer if available, otherwise opens a
+// short-lived WS connection to fetch historical ticks from Deriv directly.
 export async function getTickHistory(symbol: string, count = 50): Promise<number[]> {
-  const live = tickManager.getTicks(symbol, count);
-  if (live.length >= 5) return live;
+  // Return buffered data if we already have enough
+  const buffered = tickManager.getTicks(symbol, count);
+  if (buffered.length >= 5) return buffered;
 
-  // Direct WS fetch as fallback when tick manager hasn't buffered enough
+  // Fetch from Deriv ticks_history endpoint
   return new Promise((resolve) => {
     try {
       const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
       const timeout = setTimeout(() => {
         ws.close();
-        resolve(generateSimulatedPrices(symbol, count));
-      }, 4000);
+        resolve([]); // no simulation — return empty if unavailable
+      }, 8_000);
 
       ws.on("open", () => {
-        ws.send(JSON.stringify({ ticks_history: symbol, count, end: "latest", style: "ticks" }));
+        ws.send(
+          JSON.stringify({
+            ticks_history: symbol,
+            count,
+            end: "latest",
+            style: "ticks",
+          }),
+        );
       });
+
       ws.on("message", (data) => {
         try {
           const msg = JSON.parse(data.toString());
-          if (msg.msg_type === "history" && msg.history) {
+          if (msg.error) {
             clearTimeout(timeout);
             ws.close();
-            const prices = msg.history.prices.map(Number);
-            // Feed into tick manager buffer
-            const market = getMarketInfo(symbol);
-            if (market) {
-              const buf = prices.slice(-TICK_BUFFER_SIZE) as number[];
-              // @ts-ignore — directly seed the buffer
-              tickManager["tickBuffers"].set(symbol, buf);
-              if (market.digitEnabled) {
-                const digits = buf.map((p) => extractLastDigit(p, market.pipSize));
-                // @ts-ignore
-                tickManager["digitBuffers"].set(symbol, digits.slice(-DIGIT_BUFFER_SIZE));
-              }
-            }
-            resolve(prices);
+            logger.warn(
+              { symbol, code: msg.error.code },
+              "getTickHistory: Deriv error",
+            );
+            resolve([]);
+            return;
+          }
+          if (msg.msg_type === "history" && msg.history?.prices) {
+            clearTimeout(timeout);
+            ws.close();
+            resolve(msg.history.prices.map(Number));
           }
         } catch { /* ignore */ }
       });
-      ws.on("error", () => { clearTimeout(timeout); ws.close(); resolve(generateSimulatedPrices(symbol, count)); });
+
+      ws.on("error", () => {
+        clearTimeout(timeout);
+        ws.close();
+        resolve([]);
+      });
     } catch {
-      resolve(generateSimulatedPrices(symbol, count));
+      resolve([]);
     }
   });
 }
