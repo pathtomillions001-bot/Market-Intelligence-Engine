@@ -69,6 +69,7 @@ externalPort = 8080
 [userenv.shared]
 DERIV_APP_ID = "1089"
 API_PORT = "8080"
+VITE_DERIV_APP_ID = "1089"
 
 [nix]
 channel = "stable-25_05"

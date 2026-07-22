@@ -19,7 +19,7 @@ import { logger } from "./logger";
 const rawAppId = process.env["DERIV_APP_ID"] ?? "1089";
 export const APP_ID = /^\d+$/.test(rawAppId) ? rawAppId : "1089";
 if (APP_ID !== rawAppId) {
-  logger.warn({ rawAppId }, "DERIV_APP_ID must be numeric — using 1089");
+  logger.warn({ rawAppId }, "DERIV_APP_ID must be numeric — falling back to 1089. Register a valid app at https://app.deriv.com/account/api-token");
 }
 // Updated to new official WebSocket endpoint (migrated from binaryws.com in Oct 2023)
 const DERIV_WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;

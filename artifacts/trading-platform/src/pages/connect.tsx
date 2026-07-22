@@ -11,7 +11,7 @@ import { Link, useLocation } from "wouter";
 import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
-const DERIV_APP_ID = "1089";
+const DERIV_APP_ID = import.meta.env.VITE_DERIV_APP_ID ?? "1089";
 const DERIV_OAUTH_URL = `https://oauth.deriv.com/oauth2/authorize?app_id=${DERIV_APP_ID}&l=EN&brand=deriv`;
 
 function buildOAuthRedirectUrl(): string {
