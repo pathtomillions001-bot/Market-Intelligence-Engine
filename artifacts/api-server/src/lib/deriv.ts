@@ -14,20 +14,24 @@ import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { logger } from "./logger";
 
-// Deriv app_id — register your app at https://app.deriv.com/apps
-// New format: alphanumeric string, e.g. "33TQEuMW21nTbCZ7Hfb0q"
-// Old numeric IDs (e.g. 1089) are deprecated — set DERIV_APP_ID to your new alphanumeric app ID.
+// Deriv app_id — register your app at https://app.deriv.com/account/api-token
+// The app_id for the WebSocket API is a NUMERIC value assigned when you register
+// an application at https://app.deriv.com. It is different from a user's PAT token.
+// Example: 36544  (your own numeric ID from Deriv — not 1089, that is deprecated)
 const rawAppId = (process.env["DERIV_APP_ID"] ?? "").trim();
-export const APP_ID: string = rawAppId;
+// Accept only non-empty numeric IDs for the WebSocket URL; fall back to demo ID with a warning.
+export const APP_ID: string = /^\d+$/.test(rawAppId) ? rawAppId : "";
 if (!APP_ID) {
   logger.warn(
-    "DERIV_APP_ID is not set. Set your alphanumeric Deriv app ID (e.g. 33TQEuMW21nTbCZ7Hfb0q) " +
-    "from app.deriv.com/apps in the DERIV_APP_ID environment variable. Live market data " +
-    "will be unavailable until a valid app ID is configured.",
+    { rawAppId: rawAppId || "(unset)" },
+    "DERIV_APP_ID is not set or is not a numeric value. " +
+    "Register your app at https://app.deriv.com to get a numeric app ID and set DERIV_APP_ID. " +
+    "Market data will be simulated until a valid numeric app ID is configured.",
   );
 }
-// Official Deriv WebSocket endpoint — accepts both legacy numeric and new alphanumeric app IDs
-const DERIV_WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID || "1089"}`;
+// Official Deriv WebSocket endpoint. app_id must be the numeric ID from app.deriv.com.
+// User authentication uses PAT tokens (pat_xxx) passed via the `authorize` WS call — separate from app_id.
+const DERIV_WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID || "36544"}`;
 
 // ── Market definitions (synthetics only) ──────────────────────────────────────
 export const DERIV_MARKETS = [
@@ -701,8 +705,8 @@ class DerivTickManager extends EventEmitter {
       // app_id has no symbols — likely using deprecated demo app_id=1089
       logger.warn(
         { appId: APP_ID },
-        "TickManager: active_symbols returned empty — DERIV_APP_ID may be invalid or unset. " +
-          "Register your app at https://app.deriv.com/apps and set DERIV_APP_ID to your alphanumeric app ID (e.g. 33TQEuMW21nTbCZ7Hfb0q).",
+        "TickManager: active_symbols returned empty — DERIV_APP_ID may be unset or invalid. " +
+          "Register your app at https://app.deriv.com to get a numeric app ID and set DERIV_APP_ID.",
       );
       // Start simulated prices so digit analysers have data while awaiting a real app_id
       this.startSimulation();
@@ -933,7 +937,7 @@ class DerivTickManager extends EventEmitter {
     logger.info(
       { appId: APP_ID || "(unset)" },
       "TickManager: no live symbols — starting simulated prices for digit analysis. " +
-      "Set DERIV_APP_ID to your alphanumeric app ID from app.deriv.com/apps to receive live prices.",
+      "Set DERIV_APP_ID to your numeric app ID from app.deriv.com to receive live prices.",
     );
 
     // Seed 150 initial ticks so analysers warm up immediately

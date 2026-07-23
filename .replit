@@ -57,18 +57,19 @@ path = "scripts/post-merge.sh"
 timeoutMs = 20000
 
 [[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
 localPort = 8080
 externalPort = 8080
 
-[[ports]]
-localPort = 21210
-externalPort = 80
-
 [userenv]
-# Set these to your Deriv app credentials.
-# DERIV_APP_ID: your alphanumeric app ID from app.deriv.com/apps (e.g. 33TQEuMW21nTbCZ7Hfb0q)
-# VITE_DERIV_APP_ID: same value — exposed to the frontend for the OAuth redirect
-# Users authenticate with a Personal Access Token (PAT) from app.deriv.com/account/api-token
+# DERIV_APP_ID: your NUMERIC app ID from app.deriv.com (e.g. 36544)
+#   - Register at https://app.deriv.com/account/api-token → "Manage account apps"
+#   - This is the WebSocket connection ID, NOT your personal API token
+# VITE_DERIV_APP_ID: same numeric value, exposed to the Vite frontend for OAuth redirects
+# Users connect their personal accounts with a PAT token (pat_xxx) at the /connect page
 
 [userenv.shared]
 DERIV_APP_ID = ""
