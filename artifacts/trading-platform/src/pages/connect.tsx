@@ -11,7 +11,9 @@ import { Link, useLocation } from "wouter";
 import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
-const DERIV_APP_ID = import.meta.env.VITE_DERIV_APP_ID ?? "1089";
+// Deriv now uses alphanumeric app IDs (e.g. 33TQEuMW21nTbCZ7Hfb0q).
+// Set VITE_DERIV_APP_ID to your registered alphanumeric app ID from app.deriv.com/apps.
+const DERIV_APP_ID = import.meta.env.VITE_DERIV_APP_ID ?? "";
 const DERIV_OAUTH_URL = `https://oauth.deriv.com/oauth2/authorize?app_id=${DERIV_APP_ID}&l=EN&brand=deriv`;
 
 function buildOAuthRedirectUrl(): string {
@@ -236,7 +238,7 @@ export default function Connect() {
       {/* Divider */}
       <div className="flex items-center gap-3">
         <div className="flex-1 h-px bg-border" />
-        <span className="text-xs text-muted-foreground">or use API token manually</span>
+        <span className="text-xs text-muted-foreground">or use a PAT token manually</span>
         <div className="flex-1 h-px bg-border" />
       </div>
 
@@ -245,10 +247,10 @@ export default function Connect() {
         <Card className="bg-card">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-sm">
-              <KeyRound className="w-4 h-4 text-muted-foreground" /> API Token
+              <KeyRound className="w-4 h-4 text-muted-foreground" /> Personal Access Token (PAT)
             </CardTitle>
             <CardDescription>
-              Paste a Deriv API token with <strong>Read</strong> and <strong>Trade</strong> permissions.
+              Paste your Deriv Personal Access Token (PAT) with <strong>Read</strong> and <strong>Trade</strong> permissions.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -258,7 +260,7 @@ export default function Connect() {
                   <Input
                     id="token"
                     type={showToken ? "text" : "password"}
-                    placeholder="Paste your token here…"
+                    placeholder="pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
                     value={token}
                     onChange={(e) => setToken(e.target.value)}
                     className="font-mono bg-secondary/50 border-border pr-16"
@@ -272,10 +274,11 @@ export default function Connect() {
                   </button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Get your token at{" "}
+                  Create a PAT at{" "}
                   <a href="https://app.deriv.com/account/api-token" target="_blank" rel="noopener noreferrer" className="text-primary underline">
                     app.deriv.com/account/api-token
                   </a>
+                  {" "}— tokens start with <span className="font-mono text-primary">pat_</span>
                 </p>
               </div>
               <div className="flex gap-2">
@@ -294,7 +297,7 @@ export default function Connect() {
           onClick={() => setShowManual(true)}
           className="w-full text-xs text-muted-foreground hover:text-foreground py-2 transition-colors"
         >
-          Use an API token instead →
+          Use a PAT token instead →
         </button>
       )}
 

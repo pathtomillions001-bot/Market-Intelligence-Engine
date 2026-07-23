@@ -29,8 +29,15 @@ router.post("/connect", async (req, res): Promise<void> => {
   }
   const token = parseResult.data.token.trim();
   if (!token) {
-    res.status(400).json({ error: "API token cannot be empty" });
+    res.status(400).json({ error: "Token cannot be empty" });
     return;
+  }
+  // Deriv Personal Access Tokens (PATs) start with "pat_".
+  // Old short tokens are no longer accepted by Deriv — generate a new PAT at
+  // app.deriv.com/account/api-token if authentication fails.
+  const looksLikePat = token.startsWith("pat_") || token.length > 30;
+  if (!looksLikePat) {
+    req.log.warn({ tokenPrefix: token.slice(0, 6) }, "Token may be an old short API key — Deriv now requires Personal Access Tokens (PAT) starting with pat_");
   }
 
   try {

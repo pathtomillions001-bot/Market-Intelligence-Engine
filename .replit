@@ -65,11 +65,15 @@ localPort = 21210
 externalPort = 80
 
 [userenv]
+# Set these to your Deriv app credentials.
+# DERIV_APP_ID: your alphanumeric app ID from app.deriv.com/apps (e.g. 33TQEuMW21nTbCZ7Hfb0q)
+# VITE_DERIV_APP_ID: same value — exposed to the frontend for the OAuth redirect
+# Users authenticate with a Personal Access Token (PAT) from app.deriv.com/account/api-token
 
 [userenv.shared]
-DERIV_APP_ID = "1089"
+DERIV_APP_ID = ""
 API_PORT = "8080"
-VITE_DERIV_APP_ID = "1089"
+VITE_DERIV_APP_ID = ""
 
 [nix]
 channel = "stable-25_05"

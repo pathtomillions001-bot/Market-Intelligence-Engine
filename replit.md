@@ -5,12 +5,14 @@ AI-driven trading platform connected to Deriv's WebSocket API with 8-agent auton
 ## Run & Operate
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 8080 → proxied at /api)
-- `pnpm --filter @workspace/trading-platform run dev` — run the frontend (port 21210 → proxied at /)
+- `pnpm --filter @workspace/trading-platform run dev` — run the frontend (port 5000 → proxied at /)
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required env: `DATABASE_URL` — Postgres connection string
+- Required env: `DERIV_APP_ID` — alphanumeric Deriv app ID from app.deriv.com/apps (e.g. `33TQEuMW21nTbCZ7Hfb0q`)
+- Required env: `VITE_DERIV_APP_ID` — same value, exposed to the frontend Vite build
 
 ## Stack
 
@@ -21,7 +23,7 @@ AI-driven trading platform connected to Deriv's WebSocket API with 8-agent auton
 - Validation: Zod (`zod/v4`), `drizzle-zod`
 - API codegen: Orval (from OpenAPI spec)
 - Build: esbuild (CJS bundle)
-- Deriv WebSocket API: `wss://ws.binaryws.com/websockets/v3?app_id=1089`
+- Deriv WebSocket API: `wss://ws.derivws.com/websockets/v3?app_id=<your-alphanumeric-app-id>`
 
 ## Where things live
 
@@ -58,10 +60,12 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 ## Gotchas
 
+- **Deriv App ID**: Must be the new alphanumeric format from app.deriv.com/apps (e.g. `33TQEuMW21nTbCZ7Hfb0q`). Old numeric IDs like `1089` are deprecated and return no symbols — the engine falls back to simulated prices automatically.
+- **Deriv PAT tokens**: Users must use Personal Access Tokens (format: `pat_xxxxxxxxxx`) from app.deriv.com/account/api-token. Old short API keys are no longer accepted by Deriv.
 - Deriv WebSocket connection may timeout in 8s — code falls back to simulated prices automatically
 - The `ws` package must be a `dependency` (not devDependency) since it's used at runtime in the bundled server
 - Market analysis cache lives in-memory — restarts clear it; first requests will be slower as cache warms up
-- Trade outcomes are simulated on the server (not real money movement without Deriv account integration)
+- `DERIV_APP_ID` and `VITE_DERIV_APP_ID` must both be set to the same alphanumeric app ID
 
 ## Pointers
 
