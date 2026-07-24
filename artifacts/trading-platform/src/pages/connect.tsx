@@ -5,21 +5,40 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { motion } from "framer-motion";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import { Link, useLocation } from "wouter";
 import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
-// Deriv now uses alphanumeric app IDs (e.g. 33TQEuMW21nTbCZ7Hfb0q).
-// Set VITE_DERIV_APP_ID to your registered alphanumeric app ID from app.deriv.com/apps.
-const DERIV_APP_ID = import.meta.env.VITE_DERIV_APP_ID ?? "";
-const DERIV_OAUTH_URL = `https://oauth.deriv.com/oauth2/authorize?app_id=${DERIV_APP_ID}&l=EN&brand=deriv`;
+// ── PKCE utilities ────────────────────────────────────────────────────────────
 
-function buildOAuthRedirectUrl(): string {
+function base64UrlEncode(buffer: ArrayBuffer): string {
+  return btoa(String.fromCharCode(...new Uint8Array(buffer)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+async function createPkce(): Promise<{ codeVerifier: string; codeChallenge: string }> {
+  const verifierBytes = crypto.getRandomValues(new Uint8Array(32));
+  const codeVerifier = base64UrlEncode(verifierBytes.buffer);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(codeVerifier));
+  const codeChallenge = base64UrlEncode(digest);
+  return { codeVerifier, codeChallenge };
+}
+
+function generateState(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return base64UrlEncode(bytes.buffer);
+}
+
+function buildRedirectUri(): string {
   const base = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
   return `${window.location.origin}${base}/connect`;
 }
+
+// ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Connect() {
   const { data: account } = useGetAccount({
@@ -38,13 +57,73 @@ export default function Connect() {
   const [showToken, setShowToken] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [oauthPending, setOauthPending] = useState(false);
+  const handledRef = useRef(false);
 
+  // ── Handle OAuth2 callback (new: code param; legacy: token1/acct1 params) ──
   useEffect(() => {
+    if (handledRef.current) return;
     const params = new URLSearchParams(window.location.search);
+
+    // ── New OAuth2 + PKCE callback ────────────────────────────────────────────
+    const code = params.get("code");
+    const state = params.get("state");
+
+    if (code && state) {
+      handledRef.current = true;
+
+      // Retrieve stored PKCE verifier for this state
+      const storedVerifier = sessionStorage.getItem(`pkce_verifier_${state}`);
+      const storedRedirectUri = sessionStorage.getItem(`pkce_redirect_${state}`);
+      sessionStorage.removeItem(`pkce_verifier_${state}`);
+      sessionStorage.removeItem(`pkce_redirect_${state}`);
+
+      if (!storedVerifier) {
+        toast.error("OAuth state mismatch — please try logging in again.");
+        window.history.replaceState({}, "", window.location.pathname);
+        return;
+      }
+
+      setOauthPending(true);
+      window.history.replaceState({}, "", window.location.pathname);
+
+      const BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
+      fetch(`${BASE}/api/auth/oauth/callback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code,
+          state,
+          redirect_uri: storedRedirectUri ?? buildRedirectUri(),
+          code_verifier: storedVerifier,
+        }),
+      })
+        .then(async (r) => {
+          if (!r.ok) {
+            const data = await r.json().catch(() => ({}));
+            throw new Error((data as any).error ?? "OAuth login failed");
+          }
+          return r.json();
+        })
+        .then(() => {
+          toast.success("Signed in with Deriv — live trading enabled!");
+          setOauthPending(false);
+          queryClient.invalidateQueries();
+        })
+        .catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : "OAuth login failed — please try again";
+          toast.error(msg);
+          setOauthPending(false);
+        });
+
+      return;
+    }
+
+    // ── Legacy Deriv OAuth callback (token1 / acct1 query params) ────────────
     const oauthToken = params.get("token1");
     const loginId = params.get("acct1");
 
     if (oauthToken && loginId) {
+      handledRef.current = true;
       setOauthPending(true);
       window.history.replaceState({}, "", window.location.pathname);
       connect.mutate({ data: { token: oauthToken } }, {
@@ -66,12 +145,41 @@ export default function Connect() {
     }
   }, []);
 
-  const handleDerivLogin = () => {
-    const redirectUri = buildOAuthRedirectUrl();
-    const url = `${DERIV_OAUTH_URL}&redirect_uri=${encodeURIComponent(redirectUri)}`;
-    window.location.href = url;
+  // ── Initiate OAuth2 + PKCE login ──────────────────────────────────────────
+  const handleDerivLogin = async () => {
+    try {
+      const { codeVerifier, codeChallenge } = await createPkce();
+      const state = generateState();
+      const redirectUri = buildRedirectUri();
+
+      // Store verifier server-side via the initiate endpoint, and also client-side
+      // as a fallback in case the session store misses it
+      sessionStorage.setItem(`pkce_verifier_${state}`, codeVerifier);
+      sessionStorage.setItem(`pkce_redirect_${state}`, redirectUri);
+
+      const BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
+      const initiateParams = new URLSearchParams({
+        code_challenge: codeChallenge,
+        code_challenge_method: "S256",
+        redirect_uri: redirectUri,
+        state,
+        code_verifier: codeVerifier,  // stored server-side, keyed by state
+      });
+
+      const r = await fetch(`${BASE}/api/auth/oauth/initiate?${initiateParams.toString()}`);
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        throw new Error((data as any).error ?? "Failed to initiate OAuth");
+      }
+      const { url } = await r.json() as { url: string };
+      window.location.href = url;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to start Deriv login";
+      toast.error(msg);
+    }
   };
 
+  // ── Manual PAT token connect ───────────────────────────────────────────────
   const handleConnect = (e: React.FormEvent) => {
     e.preventDefault();
     if (!token) return;
@@ -134,7 +242,7 @@ export default function Connect() {
           <CardContent className="space-y-4">
             <div className="grid grid-cols-2 gap-3 bg-secondary/30 p-4 rounded-lg">
               <div>
-                <Label className="text-muted-foreground text-xs uppercase">Login ID</Label>
+                <Label className="text-muted-foreground text-xs uppercase">Account ID</Label>
                 <div className="font-mono text-base md:text-lg mt-1">{account.loginId}</div>
               </div>
               <div>
@@ -197,7 +305,7 @@ export default function Connect() {
         <p className="text-muted-foreground mt-1 text-sm">Sign in with your Deriv account to enable live trading.</p>
       </div>
 
-      {/* Primary: OAuth Login */}
+      {/* Primary: OAuth2 + PKCE Login */}
       <Card className="bg-card border-primary/30 relative overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent pointer-events-none" />
         <CardHeader>
@@ -222,7 +330,7 @@ export default function Connect() {
 
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <ShieldCheck className="w-3.5 h-3.5 text-primary flex-shrink-0" />
-            <span>You'll be redirected to Deriv's secure login page. No passwords stored here.</span>
+            <span>You'll be redirected to Deriv's secure login page (auth.deriv.com). No passwords stored here.</span>
           </div>
 
           <div className="grid grid-cols-3 gap-2 pt-1">
@@ -238,7 +346,7 @@ export default function Connect() {
       {/* Divider */}
       <div className="flex items-center gap-3">
         <div className="flex-1 h-px bg-border" />
-        <span className="text-xs text-muted-foreground">or use a PAT token manually</span>
+        <span className="text-xs text-muted-foreground">or use a Bearer / PAT token manually</span>
         <div className="flex-1 h-px bg-border" />
       </div>
 
@@ -247,10 +355,11 @@ export default function Connect() {
         <Card className="bg-card">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-sm">
-              <KeyRound className="w-4 h-4 text-muted-foreground" /> Personal Access Token (PAT)
+              <KeyRound className="w-4 h-4 text-muted-foreground" /> Bearer / Personal Access Token
             </CardTitle>
             <CardDescription>
-              Paste your Deriv Personal Access Token (PAT) with <strong>Read</strong> and <strong>Trade</strong> permissions.
+              Paste your OAuth2 Bearer token or a Deriv Personal Access Token (PAT) with{" "}
+              <strong>Read</strong> and <strong>Trade</strong> permissions.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -260,7 +369,7 @@ export default function Connect() {
                   <Input
                     id="token"
                     type={showToken ? "text" : "password"}
-                    placeholder="pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                    placeholder="Bearer or PAT token…"
                     value={token}
                     onChange={(e) => setToken(e.target.value)}
                     className="font-mono bg-secondary/50 border-border pr-16"
@@ -274,11 +383,9 @@ export default function Connect() {
                   </button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Create a PAT at{" "}
-                  <a href="https://app.deriv.com/account/api-token" target="_blank" rel="noopener noreferrer" className="text-primary underline">
-                    app.deriv.com/account/api-token
-                  </a>
-                  {" "}— tokens start with <span className="font-mono text-primary">pat_</span>
+                  For full live trading, use{" "}
+                  <button type="button" onClick={handleDerivLogin} className="text-primary underline">Sign in with Deriv</button>
+                  {" "}above to get an OAuth Bearer token automatically.
                 </p>
               </div>
               <div className="flex gap-2">
@@ -297,10 +404,9 @@ export default function Connect() {
           onClick={() => setShowManual(true)}
           className="w-full text-xs text-muted-foreground hover:text-foreground py-2 transition-colors"
         >
-          Use a PAT token instead →
+          Use a token manually →
         </button>
       )}
-
     </motion.div>
   );
 }

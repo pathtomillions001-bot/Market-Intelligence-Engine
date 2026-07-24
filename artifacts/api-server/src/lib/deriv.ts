@@ -1,44 +1,150 @@
 /**
  * Deriv WebSocket Client + Persistent TickManager
  *
- * Architecture:
- *  - DerivTickManager maintains ONE persistent WS connection to Deriv
- *  - Subscribes to ALL synthetic market tick streams at startup
- *  - Buffers last 500 prices + last 300 digits per symbol in memory
- *  - Zero-latency data: no per-request WS opens; served from RAM
- *  - Auto-reconnects with exponential back-off
- *  - Separate one-shot WS connections for trade execution / auth
+ * NEW Architecture (Deriv Developer Platform):
+ *  ┌────────────────────────────────────────────────────────────────────┐
+ *  │ Surface              │ URL                                         │
+ *  │──────────────────────│─────────────────────────────────────────────│
+ *  │ Public market data   │ wss://api.derivws.com/trading/v1/options/   │
+ *  │ (ticks, symbols,     │   ws/public  (no auth, no app_id)           │
+ *  │  proposals)          │                                             │
+ *  │──────────────────────│─────────────────────────────────────────────│
+ *  │ Authenticated trading│ OTP-issued URL from                         │
+ *  │ (buy, portfolio,     │   POST /trading/v1/options/accounts/{id}/otp│
+ *  │  profit_table)       │   → wss://…/ws/real?otp=…                  │
+ *  └────────────────────────────────────────────────────────────────────┘
+ *
+ * Auth flow:
+ *  1. OAuth2 + PKCE → Bearer access token
+ *  2. GET /trading/v1/options/accounts  (Bearer) → accountId, balance
+ *  3. POST /trading/v1/options/accounts/{accountId}/otp (Bearer) → OTP WS URL
+ *  4. new WebSocket(otpUrl) — NO authorize message needed
  */
 
 import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { logger } from "./logger";
 
-// Deriv app_id — register your app at https://app.deriv.com/account/api-token
-// The app_id for the WebSocket API is a NUMERIC value assigned when you register
-// an application at https://app.deriv.com. It is different from a user's PAT token.
-// Example: 36544  (your own numeric ID from Deriv — not 1089, that is deprecated)
-const rawAppId = (process.env["DERIV_APP_ID"] ?? "").trim();
-// Accept only non-empty numeric IDs for the WebSocket URL; fall back to demo ID with a warning.
-export const APP_ID: string = /^\d+$/.test(rawAppId) ? rawAppId : "";
+// ── Deriv API base URLs ───────────────────────────────────────────────────────
+export const DERIV_REST_BASE = "https://api.derivws.com";
+export const DERIV_AUTH_BASE = "https://auth.deriv.com";
+
+/**
+ * Public WebSocket — no authentication, no app_id in URL.
+ * Use for: active_symbols, ticks, ticks_history, proposal (pricing).
+ */
+export const DERIV_PUBLIC_WS_URL =
+  "wss://api.derivws.com/trading/v1/options/ws/public";
+
+/**
+ * App ID — alphanumeric string from app.deriv.com/apps.
+ * Used as the `Deriv-App-ID` HTTP header on REST calls and as `client_id` in OAuth.
+ * NOT appended to the WebSocket URL (the new API doesn't use query-param app_id).
+ */
+export const APP_ID = (process.env["DERIV_APP_ID"] ?? "").trim();
 if (!APP_ID) {
   logger.warn(
-    { rawAppId: rawAppId || "(unset)" },
-    "DERIV_APP_ID is not set or is not a numeric value. " +
-    "Register your app at https://app.deriv.com to get a numeric app ID and set DERIV_APP_ID. " +
-    "Market data will be simulated until a valid numeric app ID is configured.",
+    "DERIV_APP_ID is not set. Register your app at https://app.deriv.com/apps and " +
+    "set DERIV_APP_ID to the alphanumeric app ID. Market data (public WS) will still work " +
+    "but OAuth-based authenticated trading requires this value.",
   );
 }
-// Official Deriv WebSocket endpoint. app_id must be the numeric ID from app.deriv.com.
-// User authentication uses PAT tokens (pat_xxx) passed via the `authorize` WS call — separate from app_id.
-const DERIV_WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID || "36544"}`;
+
+// ── REST helpers ──────────────────────────────────────────────────────────────
+
+function derivHeaders(bearerToken: string) {
+  return {
+    "Deriv-App-ID": APP_ID,
+    "Authorization": `Bearer ${bearerToken}`,
+    "Content-Type": "application/json",
+  };
+}
+
+/**
+ * Exchange an OAuth2 authorization code for Bearer + refresh tokens.
+ * Must be called from the backend (never the browser).
+ */
+export async function exchangeOAuthCode(
+  code: string,
+  redirectUri: string,
+  codeVerifier: string,
+): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: APP_ID,
+    code,
+    redirect_uri: redirectUri,
+    code_verifier: codeVerifier,
+  });
+  const res = await fetch(`${DERIV_AUTH_BASE}/oauth2/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`OAuth token exchange failed: ${res.status} ${text}`);
+  }
+  const data = await res.json() as any;
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token ?? "",
+    expiresIn: data.expires_in ?? 3600,
+  };
+}
+
+/**
+ * GET /trading/v1/options/accounts — list all trading accounts for the Bearer token.
+ */
+export async function getDerivAccounts(bearerToken: string): Promise<Array<{
+  account_id: string;
+  balance: number;
+  currency: string;
+  group: string;
+  status: string;
+  account_type: "demo" | "real";
+}>> {
+  const res = await fetch(`${DERIV_REST_BASE}/trading/v1/options/accounts`, {
+    headers: derivHeaders(bearerToken),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`GET /accounts failed: ${res.status} ${text}`);
+  }
+  const data = await res.json() as any;
+  return data.data ?? [];
+}
+
+/**
+ * POST /trading/v1/options/accounts/{accountId}/otp
+ * Returns a one-time-password WebSocket URL for authenticated trading.
+ * The OTP URL is single-use for establishing the WS connection; the connection
+ * itself stays alive for multiple messages.
+ */
+export async function getOtpWebSocketUrl(
+  bearerToken: string,
+  accountId: string,
+): Promise<string> {
+  const res = await fetch(
+    `${DERIV_REST_BASE}/trading/v1/options/accounts/${accountId}/otp`,
+    { method: "POST", headers: derivHeaders(bearerToken) },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`OTP request failed: ${res.status} ${text}`);
+  }
+  const data = await res.json() as any;
+  const url: string | undefined = data?.data?.url;
+  if (!url) throw new Error("OTP response did not contain a WebSocket URL");
+  return url;
+}
 
 // ── Market definitions (synthetics only) ──────────────────────────────────────
 export const DERIV_MARKETS = [
   // Pip sizes verified from live Deriv prices:
   // R_10  → pip=0.001 (3 d.p.) → pipSize=3   [confirmed: price like 4865.826]
   // R_25  → pip=0.001 (3 d.p.) → pipSize=3   [confirmed: price like 2592.726]
-  // 1HZ25V → pip=0.01  (2 d.p.) → pipSize=2   [confirmed: price like 830197.73, NOT 830197.730]
+  // 1HZ25V → pip=0.01  (2 d.p.) → pipSize=2   [confirmed: price like 830197.73]
   // R_50/R_75 → pip=0.0001 (4 d.p.) → pipSize=4
   // R_100/1HZ10V/1HZ50V/1HZ75V/1HZ100V → pip=0.01 (2 d.p.) → pipSize=2
   // ALL Jump indices → pip=0.01 (2 d.p.) → pipSize=2
@@ -73,22 +179,22 @@ export function extractLastDigit(price: number, pipSize: number): number {
 // ── Digit distribution analysis ───────────────────────────────────────────────
 export interface DigitStats {
   distribution: { digit: number; count: number; pct: number }[];
-  overPct: number;    // P(digit > 5) — recent last 50 ticks
-  underPct: number;   // P(digit < 5) — recent last 50 ticks
-  fivePct: number;    // P(digit == 5)
+  overPct: number;
+  underPct: number;
+  fivePct: number;
   recommendOver: boolean;
   recommendUnder: boolean;
   streakInfo: string;
-  hotDigits: number[];   // digits appearing more than expected (>12%)
-  coldDigits: number[];  // digits appearing less than expected (<8%)
+  hotDigits: number[];
+  coldDigits: number[];
   bias: "over" | "under" | "neutral";
   samples: number;
   evenOddStats: EvenOddStats;
 }
 
 export function analyzeDigits(digits: number[]): DigitStats {
-  const window = digits.slice(-100); // use last 100 ticks
-  const recent = digits.slice(-20);  // last 20 for streak detection
+  const window = digits.slice(-100);
+  const recent = digits.slice(-20);
 
   const counts = Array(10).fill(0);
   for (const d of window) counts[d]++;
@@ -100,7 +206,6 @@ export function analyzeDigits(digits: number[]): DigitStats {
     pct: Math.round((count / total) * 100),
   }));
 
-  // Over = digits 6,7,8,9 (40% expected), Under = digits 0,1,2,3,4 (50% expected), Five = 5 (10%)
   const overCount = counts.slice(6).reduce((s, c) => s + c, 0);
   const underCount = counts.slice(0, 5).reduce((s, c) => s + c, 0);
   const fiveCount = counts[5];
@@ -109,7 +214,6 @@ export function analyzeDigits(digits: number[]): DigitStats {
   const underPct = Math.round((underCount / total) * 100);
   const fivePct = Math.round((fiveCount / total) * 100);
 
-  // Recent streak detection (last 20)
   const recentOverCount = recent.filter((d) => d > 5).length;
   const recentUnderCount = recent.filter((d) => d < 5).length;
   const recentOverPct = recent.length > 0 ? (recentOverCount / recent.length) * 100 : 40;
@@ -118,36 +222,25 @@ export function analyzeDigits(digits: number[]): DigitStats {
   const hotDigits = distribution.filter((d) => d.pct > 12).map((d) => d.digit);
   const coldDigits = distribution.filter((d) => d.pct < 8).map((d) => d.digit);
 
-  // Smart signal: if a region (over/under) has been over-represented in LAST 20 ticks,
-  // probability suggests it may continue (momentum) OR revert (mean-reversion).
-  // Deriv 1s indices are pseudo-random, so mean-reversion is statistically valid.
   let bias: "over" | "under" | "neutral" = "neutral";
   let recommendOver = false;
   let recommendUnder = false;
 
-  // Primary: if RECENT over% >> historical over%, bet OVER continues (momentum)
-  // But if RECENT over% is too high (>70%), bet UNDER (over-extended)
   if (recentOverPct > 65) {
-    bias = "under"; // momentum over-extended, expect reversion
-    recommendUnder = true;
+    bias = "under"; recommendUnder = true;
   } else if (recentUnderPct > 65) {
-    bias = "over"; // under over-extended, expect reversion
-    recommendOver = true;
+    bias = "over"; recommendOver = true;
   } else if (overPct > 45) {
-    bias = "over"; // historical over is hot
-    recommendOver = true;
+    bias = "over"; recommendOver = true;
   } else if (underPct > 55) {
-    bias = "under"; // historical under is hot
-    recommendUnder = true;
+    bias = "under"; recommendUnder = true;
   } else {
-    // Use cold digits logic: if over-digits (6-9) are cold, bet UNDER
     const coldOverDigits = [6, 7, 8, 9].filter((d) => coldDigits.includes(d)).length;
     const coldUnderDigits = [0, 1, 2, 3, 4].filter((d) => coldDigits.includes(d)).length;
     if (coldOverDigits >= 2) { bias = "under"; recommendUnder = true; }
     else if (coldUnderDigits >= 2) { bias = "over"; recommendOver = true; }
   }
 
-  // Streak info for display
   const lastStreak: number[] = [];
   for (let i = recent.length - 1; i >= 0; i--) {
     if (lastStreak.length === 0) { lastStreak.push(recent[i]); continue; }
@@ -167,23 +260,22 @@ export function analyzeDigits(digits: number[]): DigitStats {
 export interface EvenOddStats {
   evenPct: number;
   oddPct: number;
-  recentEvenPct: number;     // last 20 ticks
+  recentEvenPct: number;
   recentOddPct: number;
-  recent50EvenPct: number;   // last 50 ticks
+  recent50EvenPct: number;
   recent50OddPct: number;
   bias: "even" | "odd" | "neutral";
   recommendEven: boolean;
   recommendOdd: boolean;
   streakInfo: string;
-  currentStreak: number;     // length of current run
+  currentStreak: number;
   currentStreakType: "even" | "odd";
-  chiSquarePvalue: number;   // p-value for deviation from 50%
-  chiSquareSignificant: boolean; // p < 0.05
+  chiSquarePvalue: number;
+  chiSquareSignificant: boolean;
   samples100: number;
   samples50: number;
   samples20: number;
-  edge: number;              // edge % (combination of Markov + streak)
-  // Markov chain fields
+  edge: number;
   markovEvenGivenEven?: number;
   markovEvenGivenOdd?: number;
   markovNextEvenProb?: number;
@@ -215,13 +307,11 @@ export function analyzeEvenOdd(digits: number[]): EvenOddStats {
   const recentEvenPct  = (even20 / total20) * 100;
   const recentOddPct   = 100 - recentEvenPct;
 
-  // ── Chi-square test against expected 50/50 ────────────────────────────────
   const expected100 = total100 / 2;
   const chi2 = ((even100 - expected100) ** 2 / expected100) + (((total100 - even100) - expected100) ** 2 / expected100);
   const chiSquarePvalue = chi2 > 6.635 ? 0.01 : chi2 > 3.841 ? 0.05 : chi2 > 2.706 ? 0.10 : 0.50;
-  const chiSquareSignificant = chi2 > 3.841; // p < 0.05
+  const chiSquareSignificant = chi2 > 3.841;
 
-  // ── Current streak detection ──────────────────────────────────────────────
   let currentStreak = 0;
   let currentStreakType: "even" | "odd" = EVEN.includes(digits[digits.length - 1] ?? 0) ? "even" : "odd";
   for (let i = digits.length - 1; i >= 0; i--) {
@@ -230,10 +320,6 @@ export function analyzeEvenOdd(digits: number[]): EvenOddStats {
     else break;
   }
 
-  // ── Markov Chain Analysis ─────────────────────────────────────────────────
-  // Compute transition probabilities: P(even|prev=even), P(even|prev=odd)
-  // For a truly 50/50 random process: both should be ~0.5
-  // Mean-reversion tendency: if P(even|prev=even) < 0.45 → streaks tend to reverse
   let eeCount = 0, eoCount = 0, oeCount = 0, ooCount = 0;
   for (let i = 1; i < window100.length; i++) {
     const prevEven = EVEN.includes(window100[i - 1]);
@@ -246,57 +332,42 @@ export function analyzeEvenOdd(digits: number[]): EvenOddStats {
   const pEvenGivenEven = eeCount + eoCount > 0 ? eeCount / (eeCount + eoCount) : 0.5;
   const pEvenGivenOdd  = oeCount + ooCount > 0 ? oeCount / (oeCount + ooCount) : 0.5;
 
-  // Determine last digit parity for Markov signal
   const lastIsEven = EVEN.includes(digits[digits.length - 1] ?? 0);
-  // Markov probability of NEXT digit being even
   const markovEvenProb = lastIsEven ? pEvenGivenEven : pEvenGivenOdd;
   const markovSignal = markovEvenProb > 0.55 ? "even" : markovEvenProb < 0.45 ? "odd" : "neutral";
 
-  // ── Intelligent Recommendation Logic ─────────────────────────────────────
-  // Key insight: Deriv synthetics use pseudo-random digit generation.
-  // Consecutive same-parity streaks tend to REVERSE, not continue.
-  // We should recommend the OPPOSITE when we see a strong streak.
-  // We also use Markov chain to detect systematic biases.
   let bias: "even" | "odd" | "neutral" = "neutral";
   let recommendEven = false;
   let recommendOdd = false;
 
-  // Signal 1: Streak reversal — after 3+ consecutive same parity, bet opposite
   const streakReversalSignal: "even" | "odd" | "neutral" =
     currentStreak >= 5
-      ? (currentStreakType === "even" ? "odd" : "even")   // strong reversal
+      ? (currentStreakType === "even" ? "odd" : "even")
       : currentStreak >= 3
-        ? (currentStreakType === "even" ? "odd" : "even") // moderate reversal
+        ? (currentStreakType === "even" ? "odd" : "even")
         : "neutral";
 
-  // Signal 2: Markov transition bias (lowered threshold for earlier signal)
   const markovBias: "even" | "odd" | "neutral" =
     markovEvenProb > 0.52 ? "even" : markovEvenProb < 0.48 ? "odd" : "neutral";
 
-  // Signal 3: Chi-square confirmed long-run bias (100+ ticks)
   const chiSignal: "even" | "odd" | "neutral" = chiSquareSignificant
     ? (evenPct > 50 ? "even" : "odd")
     : "neutral";
 
-  // Signal 4: Recent 20-tick pattern — lowered threshold to 60%
-  // If recent 20 ticks favor one side, the other is likely due
   const recentReversalSignal: "even" | "odd" | "neutral" =
-    recentEvenPct > 60 ? "odd" :    // even over-represented → bet odd
-    recentOddPct  > 60 ? "even" :   // odd over-represented → bet even
+    recentEvenPct > 60 ? "odd" :
+    recentOddPct  > 60 ? "even" :
     "neutral";
 
-  // Signal 5: Recent 50-tick pattern
   const mid50Signal: "even" | "odd" | "neutral" =
     recent50EvenPct > 57 ? "odd" :
     recent50OddPct  > 57 ? "even" :
     "neutral";
 
-  // Aggregate: need at least 1 strong signal OR 2 agreeing signals
   const allSignals = [streakReversalSignal, markovBias, chiSignal, recentReversalSignal, mid50Signal];
   const evenVotes = allSignals.filter((s) => s === "even").length;
   const oddVotes  = allSignals.filter((s) => s === "odd").length;
 
-  // Single very strong signals (streak ≥5 or markov strongly skewed) can fire alone
   const strongEven = currentStreak >= 5 && currentStreakType === "odd"
     || markovEvenProb > 0.58
     || (recentEvenPct > 65 && mid50Signal === "odd");
@@ -310,7 +381,6 @@ export function analyzeEvenOdd(digits: number[]): EvenOddStats {
     bias = "odd"; recommendOdd = true;
   }
 
-  // Edge = how far the Markov probability deviates from 50% + streak strength
   const markovEdge = Math.abs(markovEvenProb - 0.5) * 100;
   const streakEdge = currentStreak >= 4 ? Math.min(20, currentStreak * 3) : 0;
   const edge = Math.max(markovEdge, streakEdge, Math.abs(recentEvenPct - 50));
@@ -330,7 +400,6 @@ export function analyzeEvenOdd(digits: number[]): EvenOddStats {
     chiSquarePvalue, chiSquareSignificant,
     samples100: total100, samples50: total50, samples20: total20,
     edge,
-    // Extended Markov data (consumed by frontend)
     markovEvenGivenEven: pEvenGivenEven,
     markovEvenGivenOdd:  pEvenGivenOdd,
     markovNextEvenProb:  markovEvenProb,
@@ -339,19 +408,19 @@ export function analyzeEvenOdd(digits: number[]): EvenOddStats {
   } as EvenOddStats & Record<string, unknown>;
 }
 
-// ── Trend / Rise-Fall analysis (directional contracts) ───────────────────────
+// ── Trend / Rise-Fall analysis ────────────────────────────────────────────────
 export interface TrendStats {
-  risePct: number;      // % of recent ticks that went up
-  fallPct: number;      // % of recent ticks that went down
-  flatPct: number;      // % of ticks that were flat
-  strength: number;     // momentum strength 0-100
+  risePct: number;
+  fallPct: number;
+  flatPct: number;
+  strength: number;
   bias: "rise" | "fall" | "neutral";
   recommendRise: boolean;
   recommendFall: boolean;
-  recentRisePct: number;   // last 20 ticks rise %
-  recentFallPct: number;   // last 20 ticks fall %
+  recentRisePct: number;
+  recentFallPct: number;
   streakInfo: string;
-  hotStreak: number;       // consecutive same-direction ticks
+  hotStreak: number;
   hotDirection: "rise" | "fall" | "none";
 }
 
@@ -364,7 +433,6 @@ export function analyzeTrend(prices: number[]) {
   const recent = prices.slice(-20);
   const samples = window.length;
 
-  // ── Directional move counts ───────────────────────────────────────────────
   let rises = 0, falls = 0, flats = 0;
   for (let i = 1; i < window.length; i++) {
     if (window[i] > window[i - 1]) rises++;
@@ -376,7 +444,6 @@ export function analyzeTrend(prices: number[]) {
   const fallPct = Math.round((falls / total) * 100);
   const flatPct = 100 - risePct - fallPct;
 
-  // Recent moves (last 20 ticks)
   let recentRises = 0, recentFalls = 0;
   for (let i = 1; i < recent.length; i++) {
     if (recent[i] > recent[i - 1]) recentRises++;
@@ -386,19 +453,16 @@ export function analyzeTrend(prices: number[]) {
   const recentRisePct = Math.round((recentRises / recentTotal) * 100);
   const recentFallPct = Math.round((recentFalls / recentTotal) * 100);
 
-  // ── Momentum (normalised price change over last 10 ticks) ─────────────────
   const last10 = prices.slice(-10);
   const momentum = last10.length >= 2
     ? (last10[last10.length - 1] - last10[0]) / (Math.abs(last10[0]) || 1)
     : 0;
 
-  // ── SMA / EMA ─────────────────────────────────────────────────────────────
   const sma = window.reduce((a, b) => a + b, 0) / window.length;
   let ema = window[0];
   const k = 2 / (window.length + 1);
   for (let i = 1; i < window.length; i++) ema = window[i] * k + ema * (1 - k);
 
-  // ── RSI (14-period) ───────────────────────────────────────────────────────
   const rsiPeriod = Math.min(14, window.length - 1);
   let avgGain = 0, avgLoss = 0;
   for (let i = 1; i <= rsiPeriod; i++) {
@@ -410,31 +474,25 @@ export function analyzeTrend(prices: number[]) {
   const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
   const rsi = Math.round(100 - 100 / (1 + rs));
 
-  // ── Strength (how far from 50% baseline) ─────────────────────────────────
   const strength = Math.min(100, Math.abs(recentRisePct - 50) * 2);
 
-  // ── Direction bias with mean-reversion logic ──────────────────────────────
   let bias: "rise" | "fall" | "neutral" = "neutral";
   let recommendRise = false, recommendFall = false;
-  // Over-extended in one direction → expect reversion
   if (recentRisePct > 65) { bias = "fall"; recommendFall = true; }
   else if (recentFallPct > 65) { bias = "rise"; recommendRise = true; }
   else if (risePct > 55) { bias = "rise"; recommendRise = true; }
   else if (fallPct > 55) { bias = "fall"; recommendFall = true; }
 
-  // RSI overbought/oversold reinforcement
   if (rsi > 70) { bias = "fall"; recommendFall = true; }
   else if (rsi < 30) { bias = "rise"; recommendRise = true; }
 
   const direction = bias === "rise" ? "up" : bias === "fall" ? "down" : recentRisePct >= recentFallPct ? "up" : "down";
 
-  // ── Win probability estimates ──────────────────────────────────────────────
   const riseWinProb = Math.round(50 + (recentFallPct - 50) * 0.4 + (rsi > 70 ? 10 : rsi < 30 ? -10 : 0));
   const fallWinProb = 100 - riseWinProb;
   const callWinProb = Math.round(50 + (sma > ema ? 5 : -5) + (momentum > 0 ? 8 : -8));
   const putWinProb = 100 - callWinProb;
 
-  // ── Current consecutive streak ────────────────────────────────────────────
   let hotStreak = 0;
   let hotDirection: "rise" | "fall" | "none" = "none";
   for (let i = window.length - 1; i > 0; i--) {
@@ -450,7 +508,6 @@ export function analyzeTrend(prices: number[]) {
     : "No significant streak";
 
   return {
-    // Frontend panel fields
     direction,
     strength,
     winProb: { rise: Math.max(20, Math.min(80, riseWinProb)), fall: Math.max(20, Math.min(80, fallWinProb)), call: Math.max(20, Math.min(80, callWinProb)), put: Math.max(20, Math.min(80, putWinProb)) },
@@ -461,17 +518,16 @@ export function analyzeTrend(prices: number[]) {
     ema,
     rsi,
     samples,
-    // Legacy fields (used elsewhere)
     risePct, fallPct, flatPct, bias, recommendRise, recommendFall,
     recentRisePct, recentFallPct, streakInfo, hotStreak, hotDirection,
   };
 }
 
-// ── Persistent Tick Manager (clean rewrite) ───────────────────────────────────
+// ── Persistent Tick Manager ───────────────────────────────────────────────────
 const TICK_BUFFER_SIZE = 500;
 const DIGIT_BUFFER_SIZE = 300;
 
-// ── Simulated price parameters (used when app_id has no symbols) ──────────────
+// ── Simulated price parameters ────────────────────────────────────────────────
 const SIM_PARAMS: Record<string, { base: number; vol: number }> = {
   R_10:    { base: 4865.000,  vol: 0.00018 },
   R_25:    { base: 2592.726,  vol: 0.00035 },
@@ -499,55 +555,43 @@ export interface TickEvent {
   epoch: number;
 }
 
-type PendingAuth = {
-  resolve: (info: DerivAccountInfo) => void;
-  reject: (err: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-};
-
 /**
  * DerivTickManager
  *
- * Maintains one persistent WebSocket connection to wss://ws.derivws.com.
- * On connect it calls active_symbols to discover which markets are available
- * for the configured DERIV_APP_ID, then subscribes only to those symbols.
- * Symbols that return InvalidSymbol are permanently skipped (no retry loop).
- * No simulated/fallback prices — real data only.
+ * Maintains one persistent WebSocket connection to the Deriv PUBLIC endpoint.
+ * No authentication required — the public WS serves all market data freely.
  *
- * NOTE: Deriv now uses alphanumeric app IDs (e.g. 33TQEuMW21nTbCZ7Hfb0q).
- * Register your app at https://app.deriv.com/apps and set the DERIV_APP_ID
- * environment variable. Numeric IDs (e.g. 1089) are deprecated.
+ * On connect it calls active_symbols to discover which markets are available,
+ * then subscribes to those symbols via `ticks` subscriptions.
+ *
+ * NEW API notes:
+ *  - URL: wss://api.derivws.com/trading/v1/options/ws/public
+ *  - No app_id in the URL
+ *  - No `authorize` message (public endpoint)
+ *  - active_symbols response uses `underlying_symbol` field (not `symbol`)
  */
 class DerivTickManager extends EventEmitter {
-  // Connection
   private ws: WebSocket | null = null;
   private isConnected = false;
   private reconnectDelay = 3_000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // Symbol state
-  private desiredSymbols: string[] = [];           // symbols we WANT to receive
-  private confirmedSymbols = new Set<string>();     // confirmed valid by active_symbols
-  private invalidSymbols = new Set<string>();       // permanently invalid — do NOT retry
+  private desiredSymbols: string[] = [];
+  private confirmedSymbols = new Set<string>();
+  private invalidSymbols = new Set<string>();
 
-  // Data buffers
   private tickBuffers = new Map<string, number[]>();
   private digitBuffers = new Map<string, number[]>();
   private latestPrices = new Map<string, number>();
   private lastTickMs = new Map<string, number>();
 
-  // Keep-alive
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private staleTimer: ReturnType<typeof setInterval> | null = null;
   private lastPongMs = Date.now();
 
-  // Price simulation (used when app_id has no Deriv symbols)
   private simInterval: ReturnType<typeof setInterval> | null = null;
   private simPrices = new Map<string, number>();
   private usingSimulated = false;
-
-  // Auth callbacks routed through the shared WS
-  private pendingAuth: PendingAuth[] = [];
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -557,24 +601,8 @@ class DerivTickManager extends EventEmitter {
       if (!this.tickBuffers.has(sym)) this.tickBuffers.set(sym, []);
       if (!this.digitBuffers.has(sym)) this.digitBuffers.set(sym, []);
     }
-    logger.info({ count: symbols.length, appId: APP_ID }, "TickManager starting up");
+    logger.info({ count: symbols.length }, "TickManager starting on public WS");
     this.connect();
-  }
-
-  /** Send authorize on the shared persistent WS — avoids opening a competing connection. */
-  authorizeViaWs(token: string, timeoutMs = 12_000): Promise<DerivAccountInfo> {
-    return new Promise((resolve, reject) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-        reject(new Error("TickManager WS not open"));
-        return;
-      }
-      const timer = setTimeout(() => {
-        this.pendingAuth = this.pendingAuth.filter((p) => p.resolve !== resolve);
-        reject(new Error("Connection timeout"));
-      }, timeoutMs);
-      this.pendingAuth.push({ resolve, reject, timer });
-      this.ws.send(JSON.stringify({ authorize: token }));
-    });
   }
 
   getTicks(symbol: string, count = 100): number[] {
@@ -584,7 +612,6 @@ class DerivTickManager extends EventEmitter {
   getDigits(symbol: string, count = 300): number[] {
     const buf = this.digitBuffers.get(symbol) ?? [];
     if (buf.length >= 30) return buf.slice(-count);
-    // Warm-up: derive digits from the tick buffer while it fills up
     const market = getMarketInfo(symbol);
     if (market?.digitEnabled) {
       const ticks = this.getTicks(symbol, Math.max(count, 100));
@@ -640,7 +667,8 @@ class DerivTickManager extends EventEmitter {
   private connect() {
     this.cleanupWs();
     try {
-      this.ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
+      // Public WS — no app_id needed, no authorization
+      this.ws = new WebSocket(DERIV_PUBLIC_WS_URL, { perMessageDeflate: false });
     } catch (err) {
       logger.warn({ err }, "TickManager: failed to create WebSocket, will retry");
       this.scheduleReconnect();
@@ -651,8 +679,8 @@ class DerivTickManager extends EventEmitter {
       this.isConnected = true;
       this.reconnectDelay = 3_000;
       this.lastPongMs = Date.now();
-      logger.info({ url: DERIV_WS_URL, appId: APP_ID }, "TickManager: WebSocket connected to Deriv");
-      // Step 1 — discover which symbols are actually available for this app_id
+      logger.info({ url: DERIV_PUBLIC_WS_URL }, "TickManager: connected to public WS");
+      // Discover available symbols — response uses `underlying_symbol` field
       this.ws!.send(JSON.stringify({ active_symbols: "brief" }));
       this.startPing();
       this.startStaleCheck();
@@ -688,29 +716,22 @@ class DerivTickManager extends EventEmitter {
       case "pong":
         this.lastPongMs = Date.now();
         return;
-      case "authorize":
-        this.onAuthorize(msg);
-        return;
     }
     if (msg.error) this.onError(msg);
   }
 
   private onActiveSymbols(
-    symbols: Array<{ symbol: string; display_name: string; pip?: string }>,
+    symbols: Array<{ underlying_symbol: string; underlying_symbol_name?: string; pip_size?: number }>,
   ) {
-    const available = new Set(symbols.map((s) => s.symbol));
+    // New API uses `underlying_symbol` field (old API used `symbol`)
+    const available = new Set(symbols.map((s) => s.underlying_symbol));
     const toSubscribe = this.desiredSymbols.filter((s) => available.has(s));
 
     if (symbols.length === 0) {
-      // app_id has no symbols — likely using deprecated demo app_id=1089
       logger.warn(
-        { appId: APP_ID },
-        "TickManager: active_symbols returned empty — DERIV_APP_ID may be unset or invalid. " +
-          "Register your app at https://app.deriv.com to get a numeric app ID and set DERIV_APP_ID.",
+        "TickManager: active_symbols returned empty — starting simulated prices.",
       );
-      // Start simulated prices so digit analysers have data while awaiting a real app_id
       this.startSimulation();
-      // Subscribe to desired symbols anyway; each one will tell us individually if it's invalid
       this.subscribeSymbols(this.desiredSymbols);
     } else if (toSubscribe.length === 0) {
       logger.warn(
@@ -718,35 +739,31 @@ class DerivTickManager extends EventEmitter {
           availableSample: [...available].slice(0, 8),
           desired: this.desiredSymbols.slice(0, 5),
         },
-        "TickManager: none of our desired symbols found in active_symbols — " +
-          "Deriv may have renamed them. Subscribing anyway.",
+        "TickManager: none of our desired symbols found — Deriv may have renamed them. Subscribing anyway.",
       );
       this.subscribeSymbols(this.desiredSymbols);
     } else {
       this.confirmedSymbols = new Set(toSubscribe);
       logger.info(
         { confirmed: toSubscribe.length, total: this.desiredSymbols.length },
-        "TickManager: symbol discovery complete, subscribing",
+        "TickManager: symbol discovery complete",
       );
       this.subscribeSymbols(toSubscribe);
     }
   }
 
-  /** Subscribe to each symbol staggered 300 ms apart to respect Deriv rate limits. */
   private subscribeSymbols(symbols: string[]) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const valid = symbols.filter((s) => !this.invalidSymbols.has(s));
     valid.forEach((symbol, i) => {
       setTimeout(() => {
         if (this.ws?.readyState === WebSocket.OPEN) {
+          // `ticks` subscription — symbol name field unchanged
           this.ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
         }
       }, i * 300);
     });
-    logger.info(
-      { count: valid.length, staggerMs: 300 },
-      "TickManager: subscribing to markets (staggered)",
-    );
+    logger.info({ count: valid.length, staggerMs: 300 }, "TickManager: subscribing to markets");
   }
 
   private onTick(tick: { symbol: string; quote: string; epoch: number }) {
@@ -757,10 +774,8 @@ class DerivTickManager extends EventEmitter {
     const market = getMarketInfo(symbol);
     if (!market) return;
 
-    // First real tick from Deriv — stop simulation
     if (this.usingSimulated) this.stopSimulation();
 
-    // Buffer price
     const prices = this.tickBuffers.get(symbol) ?? [];
     prices.push(price);
     if (prices.length > TICK_BUFFER_SIZE) prices.shift();
@@ -768,7 +783,6 @@ class DerivTickManager extends EventEmitter {
     this.latestPrices.set(symbol, price);
     this.lastTickMs.set(symbol, Date.now());
 
-    // Buffer digit
     if (market.digitEnabled) {
       const digit = extractLastDigit(price, market.pipSize);
       if (digit >= 0 && digit <= 9) {
@@ -779,35 +793,8 @@ class DerivTickManager extends EventEmitter {
       }
     }
 
-    // Emit for real-time SSE broadcast
     const lastDigit = market.digitEnabled ? extractLastDigit(price, market.pipSize) : -1;
     this.emit("tick", { symbol, price, lastDigit, epoch } as TickEvent);
-  }
-
-  private onAuthorize(msg: any) {
-    if (msg.authorize) {
-      const info: DerivAccountInfo = {
-        loginid: msg.authorize.loginid,
-        currency: msg.authorize.currency,
-        balance: msg.authorize.balance,
-        is_virtual: msg.authorize.is_virtual,
-        email: msg.authorize.email,
-        fullname: msg.authorize.fullname,
-        country: msg.authorize.country,
-      };
-      for (const pending of this.pendingAuth) {
-        clearTimeout(pending.timer);
-        pending.resolve(info);
-      }
-      this.pendingAuth = [];
-    } else if (msg.error && this.pendingAuth.length > 0) {
-      const err = new Error(msg.error.message ?? "Authorization failed");
-      for (const pending of this.pendingAuth) {
-        clearTimeout(pending.timer);
-        pending.reject(err);
-      }
-      this.pendingAuth = [];
-    }
   }
 
   private onError(msg: any) {
@@ -815,43 +802,25 @@ class DerivTickManager extends EventEmitter {
     const message: string = msg.error?.message ?? "";
     const sym: string | undefined = msg.echo_req?.ticks;
 
-    // Reject any pending authorize that failed
-    if (msg.echo_req?.authorize !== undefined && this.pendingAuth.length > 0) {
-      const err = new Error(message || "Authorization failed");
-      for (const pending of this.pendingAuth) {
-        clearTimeout(pending.timer);
-        pending.reject(err);
-      }
-      this.pendingAuth = [];
-      return;
-    }
-
     logger.warn({ code, message, symbol: sym }, "TickManager: Deriv error");
 
     if (!sym || !this.desiredSymbols.includes(sym)) return;
 
     if (code === "InvalidSymbol") {
-      // Permanently remove from retry loop — this symbol no longer exists on Deriv
       this.invalidSymbols.add(sym);
-      logger.warn(
-        { symbol: sym, appId: APP_ID },
-        "TickManager: symbol permanently invalid — marking as unavailable (symbol may have been renamed by Deriv)",
-      );
+      logger.warn({ symbol: sym }, "TickManager: symbol permanently invalid");
       return;
     }
 
     if (code === "RateLimit") {
-      // Back off 60 s before retrying
       setTimeout(() => {
         if (this.ws?.readyState === WebSocket.OPEN && !this.invalidSymbols.has(sym)) {
-          logger.info({ symbol: sym }, "TickManager: retrying after rate limit");
           this.ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
         }
       }, 60_000);
       return;
     }
 
-    // Transient error — short retry
     setTimeout(() => {
       if (this.ws?.readyState === WebSocket.OPEN && !this.invalidSymbols.has(sym)) {
         this.ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
@@ -865,7 +834,7 @@ class DerivTickManager extends EventEmitter {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = setInterval(() => {
       if (Date.now() - this.lastPongMs > 60_000) {
-        logger.warn("TickManager: no pong for 60 s, reconnecting");
+        logger.warn("TickManager: no pong for 60s, reconnecting");
         this.connect();
         return;
       }
@@ -880,7 +849,6 @@ class DerivTickManager extends EventEmitter {
     this.staleTimer = setInterval(() => {
       if (!this.isConnected || this.ws?.readyState !== WebSocket.OPEN) return;
       const now = Date.now();
-      // Only re-subscribe symbols that WERE receiving ticks but went stale (> 45 s)
       const liveSymbols = this.desiredSymbols.filter(
         (s) => !this.invalidSymbols.has(s) && (this.lastTickMs.get(s) ?? 0) > 0,
       );
@@ -898,9 +866,8 @@ class DerivTickManager extends EventEmitter {
     if (this.staleTimer) { clearInterval(this.staleTimer); this.staleTimer = null; }
   }
 
-  // ── Price simulation (fallback when app_id has no Deriv symbols) ─────────────
+  // ── Price simulation ──────────────────────────────────────────────────────
 
-  /** Box-Muller Gaussian random number (mean=0, std=1). */
   private gaussianRandom(): number {
     let u = 0, v = 0;
     while (u === 0) u = Math.random();
@@ -908,7 +875,6 @@ class DerivTickManager extends EventEmitter {
     return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
   }
 
-  /** Push one simulated price into the tick + digit buffers (no SSE emit). */
   private pushSimulatedTick(market: (typeof DERIV_MARKETS)[0], price: number) {
     const factor = Math.pow(10, market.pipSize);
     const rounded = Math.round(price * factor) / factor;
@@ -930,17 +896,11 @@ class DerivTickManager extends EventEmitter {
     }
   }
 
-  /** Start synthetic price generation for every digit market. */
   startSimulation() {
-    if (this.simInterval) return; // already running
+    if (this.simInterval) return;
     this.usingSimulated = true;
-    logger.info(
-      { appId: APP_ID || "(unset)" },
-      "TickManager: no live symbols — starting simulated prices for digit analysis. " +
-      "Set DERIV_APP_ID to your numeric app ID from app.deriv.com to receive live prices.",
-    );
+    logger.info("TickManager: starting simulated prices (no live symbols available)");
 
-    // Seed 150 initial ticks so analysers warm up immediately
     for (const market of DERIV_MARKETS) {
       const params = SIM_PARAMS[market.symbol];
       if (!params || !market.digitEnabled) continue;
@@ -953,7 +913,6 @@ class DerivTickManager extends EventEmitter {
       }
     }
 
-    // Continue generating one tick per market per second (staggered)
     let idx = 0;
     this.simInterval = setInterval(() => {
       const digitMarkets = DERIV_MARKETS.filter((m) => m.digitEnabled);
@@ -1009,47 +968,31 @@ class DerivTickManager extends EventEmitter {
 
 export const tickManager = new DerivTickManager();
 
-// ── getTickHistory — fetches history via WS ticks_history endpoint ─────────
-// Returns ticks from the in-memory buffer if available, otherwise opens a
-// short-lived WS connection to fetch historical ticks from Deriv directly.
+// ── getTickHistory ────────────────────────────────────────────────────────────
+// Fetches historical tick prices. Uses the in-memory buffer if warm, otherwise
+// opens a short-lived connection to the PUBLIC WebSocket.
 export async function getTickHistory(symbol: string, count = 50): Promise<number[]> {
-  // Return buffered data if we already have enough
   const buffered = tickManager.getTicks(symbol, count);
   if (buffered.length >= 5) return buffered;
 
-  // Fetch from Deriv ticks_history endpoint
   return new Promise((resolve) => {
     try {
-      const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
-      const timeout = setTimeout(() => {
-        ws.close();
-        resolve([]); // no simulation — return empty if unavailable
-      }, 8_000);
+      const ws = new WebSocket(DERIV_PUBLIC_WS_URL, { perMessageDeflate: false });
+      const timeout = setTimeout(() => { ws.close(); resolve([]); }, 8_000);
 
       ws.on("open", () => {
-        ws.send(
-          JSON.stringify({
-            ticks_history: symbol,
-            count,
-            end: "latest",
-            style: "ticks",
-          }),
-        );
+        ws.send(JSON.stringify({
+          ticks_history: symbol,
+          count,
+          end: "latest",
+          style: "ticks",
+        }));
       });
 
       ws.on("message", (data) => {
         try {
           const msg = JSON.parse(data.toString());
-          if (msg.error) {
-            clearTimeout(timeout);
-            ws.close();
-            logger.warn(
-              { symbol, code: msg.error.code },
-              "getTickHistory: Deriv error",
-            );
-            resolve([]);
-            return;
-          }
+          if (msg.error) { clearTimeout(timeout); ws.close(); resolve([]); return; }
           if (msg.msg_type === "history" && msg.history?.prices) {
             clearTimeout(timeout);
             ws.close();
@@ -1058,23 +1001,17 @@ export async function getTickHistory(symbol: string, count = 50): Promise<number
         } catch { /* ignore */ }
       });
 
-      ws.on("error", () => {
-        clearTimeout(timeout);
-        ws.close();
-        resolve([]);
-      });
-    } catch {
-      resolve([]);
-    }
+      ws.on("error", () => { clearTimeout(timeout); ws.close(); resolve([]); });
+    } catch { resolve([]); }
   });
 }
 
-// ── Auth / trade execution types ───────────────────────────────────────────────
+// ── Account / auth types ──────────────────────────────────────────────────────
 export interface DerivAccountInfo {
   loginid: string;
   currency: string;
   balance: number;
-  is_virtual: number;
+  is_virtual: number;   // 0 = real, 1 = virtual
   email?: string;
   fullname?: string;
   country?: string;
@@ -1106,37 +1043,104 @@ export interface ContractProposal {
   askPrice: number;
 }
 
-// ── Persistent journal WebSocket manager ─────────────────────────────────────
-// Maintains a single long-lived WS connection for fetching the Deriv profit
-// table so the journal never disconnects as long as a token is active.
+// ── Module-level credential cache ─────────────────────────────────────────────
+// The Bearer token + accountId are needed for authenticated REST calls and OTP.
+let cachedBearerToken: string | null = null;
+let cachedAccountId: string | null = null;
+let cachedAccountInfo: DerivAccountInfo | null = null;
+
+// Balance cache (REST-based — no WS needed)
+let cachedBalance: number | null = null;
+let cachedBalanceAt = 0;
+const BALANCE_CACHE_TTL_MS = 60_000;
+
+export function setDerivCredentials(bearerToken: string, accountId: string) {
+  cachedBearerToken = bearerToken;
+  cachedAccountId = accountId;
+  cachedBalance = null;
+  cachedBalanceAt = 0;
+  journalManager.setCredentials(bearerToken, accountId);
+}
+
+// Backward-compatible alias — accepts a Bearer token and optionally an accountId.
+export function setDerivToken(token: string, accountId?: string) {
+  cachedBearerToken = token;
+  if (accountId) cachedAccountId = accountId;
+  cachedBalance = null;
+  cachedBalanceAt = 0;
+  if (accountId) {
+    journalManager.setCredentials(token, accountId);
+  }
+}
+
+export function clearDerivToken() {
+  cachedBearerToken = null;
+  cachedAccountId = null;
+  cachedAccountInfo = null;
+  cachedBalance = null;
+  cachedBalanceAt = 0;
+  journalManager.clearCredentials();
+}
+
+export function getCachedAccountInfo() { return cachedAccountInfo; }
+
+/** Returns the active Bearer token (used everywhere a "token" is expected). */
+export function getCachedToken(): string | null { return cachedBearerToken; }
+export function getCachedBearerToken(): string | null { return cachedBearerToken; }
+export function getCachedAccountId(): string | null { return cachedAccountId; }
+
+export function invalidateBalanceCache() { cachedBalanceAt = 0; }
+
+// ── Persistent Journal WebSocket Manager ─────────────────────────────────────
+/**
+ * DerivJournalManager
+ *
+ * Maintains a persistent authenticated WebSocket for profit_table fetches.
+ *
+ * Auth flow:
+ *  1. Fetch OTP URL via POST /accounts/{accountId}/otp (Bearer token)
+ *  2. Connect to the OTP URL (no `authorize` message)
+ *  3. Send profit_table requests on the open connection
+ *  4. On disconnect, fetch a fresh OTP URL and reconnect
+ */
 class DerivJournalManager extends EventEmitter {
   private ws: WebSocket | null = null;
-  private token: string | null = null;
+  private bearerToken: string | null = null;
+  private accountId: string | null = null;
   private cachedTransactions: any[] = [];
   private lastFetchMs = 0;
-  private isAuthorized = false;
   private reconnectDelay = 3000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private lastPongMs = Date.now();
 
-  setToken(token: string) {
-    if (this.token === token && this.ws?.readyState === WebSocket.OPEN && this.isAuthorized) return;
-    this.token = token;
-    this.reconnectDelay = 3000;
-    this.connect();
-    this.startRefreshTimer();
+  setCredentials(bearerToken: string, accountId: string) {
+    const changed = this.bearerToken !== bearerToken || this.accountId !== accountId;
+    this.bearerToken = bearerToken;
+    this.accountId = accountId;
+    if (changed) {
+      this.reconnectDelay = 3000;
+      this.connect();
+      this.startRefreshTimer();
+    }
   }
 
-  clearToken() {
-    this.token = null;
+  // Backward-compat: accept PAT token only (no accountId → can't use OTP)
+  setToken(token: string) {
+    logger.info("JournalManager.setToken: token stored; awaiting accountId for OTP connection.");
+    this.bearerToken = token;
+    // Don't connect until we have accountId
+  }
+
+  clearCredentials() {
+    this.bearerToken = null;
+    this.accountId = null;
     this.cachedTransactions = [];
     this.lastFetchMs = 0;
-    this.isAuthorized = false;
     this.stopTimers();
     if (this.ws) { try { this.ws.terminate(); } catch { /* ignore */ } this.ws = null; }
-    logger.info("JournalManager: cleared (token disconnected)");
+    logger.info("JournalManager: credentials cleared");
   }
 
   getCached(): any[] { return this.cachedTransactions; }
@@ -1145,9 +1149,8 @@ class DerivJournalManager extends EventEmitter {
     return this.lastFetchMs > 0 && (Date.now() - this.lastFetchMs) < maxAgeMs;
   }
 
-  /** Immediately request a fresh profit_table — call after any trade settles. */
   forceRefresh() {
-    if (this.isAuthorized && this.ws?.readyState === WebSocket.OPEN) {
+    if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 500 }));
     }
   }
@@ -1161,18 +1164,27 @@ class DerivJournalManager extends EventEmitter {
   private startRefreshTimer() {
     if (this.refreshTimer) clearInterval(this.refreshTimer);
     this.refreshTimer = setInterval(() => {
-      if (this.isAuthorized && this.ws?.readyState === WebSocket.OPEN) {
+      if (this.ws?.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 500 }));
       }
     }, 60_000);
   }
 
-  private connect() {
+  private async connect() {
     if (this.ws) { try { this.ws.terminate(); } catch { /* ignore */ } this.ws = null; }
-    if (!this.token) return;
+    if (!this.bearerToken || !this.accountId) return;
+
+    let otpUrl: string;
+    try {
+      otpUrl = await getOtpWebSocketUrl(this.bearerToken, this.accountId);
+    } catch (err) {
+      logger.warn({ err }, "JournalManager: failed to get OTP URL, will retry");
+      this.scheduleReconnect();
+      return;
+    }
 
     try {
-      this.ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
+      this.ws = new WebSocket(otpUrl, { perMessageDeflate: false });
     } catch (err) {
       logger.warn({ err }, "JournalManager: failed to create WS, will retry");
       this.scheduleReconnect();
@@ -1180,22 +1192,17 @@ class DerivJournalManager extends EventEmitter {
     }
 
     this.ws.on("open", () => {
-      this.isAuthorized = false;
       this.lastPongMs = Date.now();
-      logger.info("JournalManager: WS connected, authorizing");
-      this.ws!.send(JSON.stringify({ authorize: this.token }));
+      this.reconnectDelay = 3000;
+      logger.info("JournalManager: connected via OTP WS — fetching profit table");
+      // No authorize message — OTP URL is pre-authenticated
+      this.ws!.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 500 }));
       this.startPing();
     });
 
     this.ws.on("message", (data) => {
       try {
         const msg = JSON.parse(data.toString());
-        if (msg.msg_type === "authorize" && msg.authorize && !this.isAuthorized) {
-          this.isAuthorized = true;
-          this.reconnectDelay = 3000;
-          logger.info({ loginId: msg.authorize.loginid }, "JournalManager: authorized, fetching profit table");
-          this.ws!.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 500 }));
-        }
         if (msg.msg_type === "profit_table" && msg.profit_table) {
           this.cachedTransactions = msg.profit_table.transactions ?? [];
           this.lastFetchMs = Date.now();
@@ -1206,12 +1213,7 @@ class DerivJournalManager extends EventEmitter {
           this.lastPongMs = Date.now();
         }
         if (msg.error) {
-          logger.warn({ code: msg.error.code, message: msg.error.message }, "JournalManager: error from Deriv");
-          // If invalid token, don't retry
-          if (msg.error.code === "InvalidToken" || msg.error.code === "AuthorizationRequired") {
-            this.token = null;
-            this.stopTimers();
-          }
+          logger.warn({ code: msg.error.code, message: msg.error.message }, "JournalManager: error");
         }
       } catch { /* ignore */ }
     });
@@ -1221,7 +1223,6 @@ class DerivJournalManager extends EventEmitter {
     });
 
     this.ws.on("close", () => {
-      this.isAuthorized = false;
       if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
       logger.info("JournalManager: WS closed, scheduling reconnect");
       this.scheduleReconnect();
@@ -1243,7 +1244,7 @@ class DerivJournalManager extends EventEmitter {
   }
 
   private scheduleReconnect() {
-    if (!this.token) return;
+    if (!this.bearerToken || !this.accountId) return;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, 30_000);
@@ -1255,33 +1256,58 @@ class DerivJournalManager extends EventEmitter {
 
 export const journalManager = new DerivJournalManager();
 
-let cachedToken: string | null = null;
-let cachedAccountInfo: DerivAccountInfo | null = null;
+// ── Account authorization via REST ────────────────────────────────────────────
+/**
+ * Validate a Bearer token by calling GET /trading/v1/options/accounts.
+ * Returns the first account's info mapped to DerivAccountInfo.
+ *
+ * This replaces the old `authorize` WebSocket message flow.
+ */
+export async function authorizeWithDeriv(bearerToken: string): Promise<DerivAccountInfo> {
+  const accounts = await getDerivAccounts(bearerToken);
+  if (accounts.length === 0) {
+    throw new Error("No trading accounts found for this token");
+  }
 
-// Balance cache — avoid opening a new WebSocket on every account-fetch poll
-let cachedBalance: number | null = null;
-let cachedBalanceAt = 0;
-const BALANCE_CACHE_TTL_MS = 60_000; // refresh at most once per minute
+  // Use the first active account (prefer real over demo if available)
+  const real = accounts.find((a) => a.account_type === "real" && a.status === "active");
+  const account = real ?? accounts[0];
 
-export function setDerivToken(token: string) {
-  cachedToken = token;
-  journalManager.setToken(token);
-}
-export function clearDerivToken() {
-  cachedToken = null;
-  cachedAccountInfo = null;
-  cachedBalance = null;
-  cachedBalanceAt = 0;
-  journalManager.clearToken();
-}
-export function getCachedAccountInfo() { return cachedAccountInfo; }
-export function getCachedToken() { return cachedToken; }
-export function invalidateBalanceCache() {
-  cachedBalanceAt = 0;
+  const info: DerivAccountInfo = {
+    loginid: account.account_id,
+    currency: account.currency,
+    balance: account.balance,
+    is_virtual: account.account_type === "demo" ? 1 : 0,
+  };
+
+  cachedAccountInfo = info;
+  cachedAccountId = account.account_id;
+  return info;
 }
 
+// ── Live balance via REST ─────────────────────────────────────────────────────
+export async function getLiveBalance(bearerToken: string): Promise<number | null> {
+  const now = Date.now();
+  if (cachedBalance !== null && now - cachedBalanceAt < BALANCE_CACHE_TTL_MS) {
+    return cachedBalance;
+  }
+
+  try {
+    const accounts = await getDerivAccounts(bearerToken);
+    if (accounts.length === 0) return null;
+    const real = accounts.find((a) => a.account_type === "real" && a.status === "active");
+    const account = real ?? accounts[0];
+    cachedBalance = account.balance;
+    cachedBalanceAt = Date.now();
+    return account.balance;
+  } catch {
+    return null;
+  }
+}
+
+// ── Contract proposal (public WS — no auth required) ─────────────────────────
 export async function getContractProposal(
-  token: string | null,
+  _token: string | null,   // kept for API compat; proposals use the public WS
   params: {
     symbol: string;
     contractType: string;
@@ -1294,9 +1320,9 @@ export async function getContractProposal(
 ): Promise<ContractProposal | null> {
   return new Promise((resolve) => {
     try {
-      const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
-      const timeout = setTimeout(() => { ws.close(); resolve(null); }, 12000);
-      let authorized = !token;
+      // Proposals don't require auth — use the public WS
+      const ws = new WebSocket(DERIV_PUBLIC_WS_URL, { perMessageDeflate: false });
+      const timeout = setTimeout(() => { ws.close(); resolve(null); }, 12_000);
 
       const sendProposal = () => {
         const proposalParams: Record<string, unknown> = {
@@ -1306,26 +1332,19 @@ export async function getContractProposal(
           currency: params.currency,
           duration: params.duration,
           duration_unit: params.durationUnit,
-          symbol: params.symbol,
+          // New API uses `underlying_symbol` (not `symbol`)
+          underlying_symbol: params.symbol,
         };
         if (params.barrier !== undefined) proposalParams.barrier = String(params.barrier);
         ws.send(JSON.stringify({ proposal: 1, ...proposalParams }));
       };
 
-      ws.on("open", () => {
-        if (token) ws.send(JSON.stringify({ authorize: token }));
-        else sendProposal();
-      });
+      ws.on("open", () => { sendProposal(); });
 
       ws.on("message", (data) => {
         try {
           const msg = JSON.parse(data.toString());
           if (msg.error) { clearTimeout(timeout); ws.close(); resolve(null); return; }
-
-          if (msg.msg_type === "authorize" && !authorized) {
-            authorized = true;
-            sendProposal();
-          }
 
           if (msg.msg_type === "proposal" && msg.proposal) {
             clearTimeout(timeout);
@@ -1344,164 +1363,150 @@ export async function getContractProposal(
           }
         } catch { /* ignore */ }
       });
-      ws.on("error", () => { clearTimeout(timeout); ws.close(); resolve(null); });
-    } catch {
-      resolve(null);
-    }
-  });
-}
 
-export async function authorizeWithDeriv(token: string): Promise<DerivAccountInfo> {
-  // Prefer the TickManager's already-open WS to avoid opening a competing connection
-  try {
-    const info = await tickManager.authorizeViaWs(token);
-    cachedAccountInfo = info;
-    return info;
-  } catch {
-    // TickManager WS not ready — fall back to a dedicated connection
-  }
-
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
-    const timeout = setTimeout(() => { ws.close(); reject(new Error("Connection timeout")); }, 15000);
-
-    ws.on("open", () => { ws.send(JSON.stringify({ authorize: token })); });
-    ws.on("message", (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.error) { clearTimeout(timeout); ws.close(); reject(new Error(msg.error.message)); return; }
-        if (msg.msg_type === "authorize" && msg.authorize) {
-          clearTimeout(timeout);
-          const info: DerivAccountInfo = {
-            loginid: msg.authorize.loginid,
-            currency: msg.authorize.currency,
-            balance: msg.authorize.balance,
-            is_virtual: msg.authorize.is_virtual,
-            email: msg.authorize.email,
-            fullname: msg.authorize.fullname,
-            country: msg.authorize.country,
-          };
-          cachedAccountInfo = info;
-          ws.close();
-          resolve(info);
-        }
-      } catch { /* ignore */ }
-    });
-    ws.on("error", (err) => { clearTimeout(timeout); reject(err); });
-  });
-}
-
-export async function getLiveBalance(token: string): Promise<number | null> {
-  // Return cached balance if it's still fresh — avoids hammering Deriv authorize rate limit
-  const now = Date.now();
-  if (cachedBalance !== null && now - cachedBalanceAt < BALANCE_CACHE_TTL_MS) {
-    return cachedBalance;
-  }
-
-  return new Promise((resolve) => {
-    try {
-      const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
-      const timeout = setTimeout(() => { ws.close(); resolve(null); }, 8000);
-      ws.on("open", () => { ws.send(JSON.stringify({ authorize: token })); });
-      ws.on("message", (data) => {
-        try {
-          const msg = JSON.parse(data.toString());
-          if (msg.msg_type === "authorize" && msg.authorize) {
-            clearTimeout(timeout);
-            ws.close();
-            const balance = Number(msg.authorize.balance);
-            cachedBalance = balance;
-            cachedBalanceAt = Date.now();
-            resolve(balance);
-          }
-          if (msg.error) { clearTimeout(timeout); ws.close(); resolve(null); }
-        } catch { /* ignore */ }
-      });
       ws.on("error", () => { clearTimeout(timeout); ws.close(); resolve(null); });
     } catch { resolve(null); }
   });
 }
 
-export async function executeLiveTrade(token: string, params: {
-  symbol: string;
-  contractType: string;
-  stake: number;
-  duration: number;
-  durationUnit: string;
-  currency: string;
-  barrier?: number | string;
-}): Promise<LiveTradeResult> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
-    const timeout = setTimeout(() => { ws.close(); reject(new Error("Trade execution timeout")); }, 20000);
-    let authorized = false;
-    let sentBuyPayload: Record<string, unknown> | null = null;
+// ── Live trade execution via OTP WebSocket ────────────────────────────────────
+/**
+ * Execute a live trade using the new OTP-authenticated WebSocket flow:
+ *  1. POST /accounts/{accountId}/otp → OTP WS URL
+ *  2. Connect to OTP URL (no authorize message)
+ *  3. Send `proposal` with `underlying_symbol`
+ *  4. On proposal response, send `buy` with the proposal ID
+ *  5. On buy confirmation, resolve with contract details
+ */
+export async function executeLiveTrade(
+  _token: string,   // kept for API compat; auth comes from module-level cache
+  params: {
+    symbol: string;
+    contractType: string;
+    stake: number;
+    duration: number;
+    durationUnit: string;
+    currency: string;
+    barrier?: number | string;
+  },
+): Promise<LiveTradeResult> {
+  const bearerToken = cachedBearerToken;
+  const accountId = cachedAccountId;
 
-    ws.on("open", () => { ws.send(JSON.stringify({ authorize: token })); });
+  if (!bearerToken || !accountId) {
+    throw new Error(
+      "No authenticated session. Please sign in with Deriv (OAuth) to enable live trading. " +
+      "A Bearer token and account ID are required for the new Deriv API.",
+    );
+  }
+
+  // Step 1: Get OTP WebSocket URL
+  const otpUrl = await getOtpWebSocketUrl(bearerToken, accountId);
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("Trade execution timeout"));
+    }, 20_000);
+
+    let proposalId: string | null = null;
+    let askPrice: number | null = null;
+
+    ws.on("open", () => {
+      // Step 2: Connected — no authorize message needed
+      // Step 3: Send proposal with `underlying_symbol`
+      const proposalParams: Record<string, unknown> = {
+        amount: params.stake,
+        basis: "stake",
+        contract_type: params.contractType,
+        currency: params.currency,
+        duration: params.duration,
+        duration_unit: params.durationUnit,
+        underlying_symbol: params.symbol,   // new field name
+      };
+      if (params.barrier !== undefined) proposalParams.barrier = String(params.barrier);
+      logger.info({ proposalParams }, "executeLiveTrade: sending proposal");
+      ws.send(JSON.stringify({ proposal: 1, ...proposalParams }));
+    });
+
     ws.on("message", (data) => {
       try {
         const msg = JSON.parse(data.toString());
-        logger.info({ rawMsg: msg }, "executeLiveTrade: received message");
+        logger.info({ msgType: msg.msg_type }, "executeLiveTrade: received message");
+
         if (msg.error) {
           clearTimeout(timeout);
           ws.close();
-          logger.error({
-            derivError: msg.error,
-            echoReq: msg.echo_req,
-            sentBuyPayload,
-          }, "Deriv rejected live trade request — full diagnostic");
-          reject(new Error(msg.error.message));
+          logger.error({ derivError: msg.error }, "executeLiveTrade: Deriv error");
+          reject(new Error(msg.error.message ?? "Trade rejected by Deriv"));
           return;
         }
 
-        if (msg.msg_type === "authorize" && !authorized) {
-          authorized = true;
-          const buyParams: Record<string, unknown> = {
-            amount: params.stake,
-            basis: "stake",
-            contract_type: params.contractType,
-            currency: params.currency,
-            duration: params.duration,
-            duration_unit: params.durationUnit,
-            symbol: params.symbol,
-          };
-          if (params.barrier !== undefined) buyParams.barrier = String(params.barrier);
-          sentBuyPayload = { buy: 1, price: params.stake, parameters: buyParams };
-          logger.info({ sentBuyPayload }, "Sending live buy request to Deriv");
-          ws.send(JSON.stringify(sentBuyPayload));
+        // Step 4: proposal received → send buy
+        if (msg.msg_type === "proposal" && msg.proposal) {
+          proposalId = String(msg.proposal.id);
+          askPrice = Number(msg.proposal.ask_price ?? params.stake);
+          logger.info({ proposalId, askPrice }, "executeLiveTrade: proposal received, sending buy");
+          // New buy format: { buy: proposalId, price: askPrice }
+          ws.send(JSON.stringify({ buy: proposalId, price: askPrice }));
         }
 
+        // Step 5: buy confirmed
         if (msg.msg_type === "buy" && msg.buy) {
           clearTimeout(timeout);
           ws.close();
           resolve({
             contractId: msg.buy.contract_id,
             buyPrice: Number(msg.buy.buy_price),
-            entrySpot: Number(msg.buy.buy_price),
+            entrySpot: Number(msg.buy.start_time ?? 0),
             longcode: msg.buy.longcode ?? "",
           });
         }
-      } catch (e) { logger.error({ e }, "Error parsing Deriv buy response"); }
+      } catch (e) {
+        logger.error({ e }, "executeLiveTrade: error parsing message");
+      }
     });
+
     ws.on("error", (err) => { clearTimeout(timeout); reject(err); });
   });
 }
 
-export async function fetchDerivProfitTable(token: string, limit = 50): Promise<any[]> {
+// ── Profit table fetch via OTP WebSocket ──────────────────────────────────────
+export async function fetchDerivProfitTable(
+  _token: string,   // kept for API compat
+  limit = 50,
+): Promise<any[]> {
+  const bearerToken = cachedBearerToken;
+  const accountId = cachedAccountId;
+
+  if (!bearerToken || !accountId) {
+    logger.warn("fetchDerivProfitTable: no Bearer token or accountId — returning empty");
+    return [];
+  }
+
+  let otpUrl: string;
+  try {
+    otpUrl = await getOtpWebSocketUrl(bearerToken, accountId);
+  } catch (err) {
+    logger.warn({ err }, "fetchDerivProfitTable: OTP fetch failed");
+    return [];
+  }
+
   return new Promise((resolve) => {
     try {
-      const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
-      const timeout = setTimeout(() => { ws.close(); resolve([]); }, 12000);
-      let authorized = false;
-      ws.on("open", () => { ws.send(JSON.stringify({ authorize: token })); });
+      const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
+      const timeout = setTimeout(() => { ws.close(); resolve([]); }, 12_000);
+
+      ws.on("open", () => {
+        // No authorize — OTP URL is pre-authenticated
+        ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit }));
+      });
+
       ws.on("message", (data) => {
         try {
           const msg = JSON.parse(data.toString());
           if (msg.error) { clearTimeout(timeout); ws.close(); resolve([]); return; }
-          if (msg.msg_type === "authorize" && !authorized) {
-            authorized = true;
-            ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit }));
-          }
           if (msg.msg_type === "profit_table" && msg.profit_table) {
             clearTimeout(timeout);
             ws.close();
@@ -1509,24 +1514,38 @@ export async function fetchDerivProfitTable(token: string, limit = 50): Promise<
           }
         } catch { /* ignore */ }
       });
+
       ws.on("error", () => { clearTimeout(timeout); ws.close(); resolve([]); });
     } catch { resolve([]); }
   });
 }
 
-// NOTE: `proposal_open_contracts` is rejected outright ("UnrecognisedRequest") for this
-// account/app_id combination — verified independently outside the app (raw WS script,
-// with and without contract_id/subscribe, always errors). `portfolio` and `profit_table`
-// work fine, so we poll those instead: portfolio tells us when the contract has left the
-// open-contracts list, then profit_table gives us the ground-truth settled buy/sell price.
-export async function waitForContractResult(token: string, contractId: number, timeoutMs = 30000): Promise<ContractResult> {
+// ── Wait for contract result via OTP WebSocket ────────────────────────────────
+/**
+ * NOTE: proposal_open_contracts is unsupported for this account/app_id combination.
+ * We poll `portfolio` (checks if contract is still open) then `profit_table`
+ * (confirms settled buy/sell price) — same strategy as before, now on OTP WS.
+ */
+export async function waitForContractResult(
+  _token: string,   // kept for API compat
+  contractId: number,
+  timeoutMs = 30_000,
+): Promise<ContractResult> {
+  const bearerToken = cachedBearerToken;
+  const accountId = cachedAccountId;
+
+  if (!bearerToken || !accountId) {
+    throw new Error("No authenticated session for contract result polling");
+  }
+
+  const otpUrl = await getOtpWebSocketUrl(bearerToken, accountId);
+
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(DERIV_WS_URL, { perMessageDeflate: false });
-    let authorized = false;
+    const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
     let settled = false;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-    const overallTimeout = setTimeout(() => finishError(new Error("Contract result timeout")), timeoutMs + 10000);
+    const overallTimeout = setTimeout(() => finishError(new Error("Contract result timeout")), timeoutMs + 10_000);
 
     const cleanup = () => {
       clearTimeout(overallTimeout);
@@ -1548,31 +1567,26 @@ export async function waitForContractResult(token: string, contractId: number, t
       reject(err);
     };
 
-    ws.on("open", () => { ws.send(JSON.stringify({ authorize: token })); });
+    ws.on("open", () => {
+      // No authorize — OTP URL is pre-authenticated
+      const poll = () => { if (!settled) ws.send(JSON.stringify({ portfolio: 1 })); };
+      poll();
+      pollInterval = setInterval(poll, 1_000);
+    });
+
     ws.on("message", (data) => {
       try {
         const msg = JSON.parse(data.toString());
         if (msg.error) {
-          if (!authorized) { finishError(new Error(msg.error.message)); }
-          // ignore transient poll errors after authorization — just keep polling
+          // Ignore transient poll errors; if portfolio itself fails, keep polling
           return;
-        }
-
-        if (msg.msg_type === "authorize" && !authorized) {
-          authorized = true;
-          const poll = () => { if (!settled) ws.send(JSON.stringify({ portfolio: 1 })); };
-          poll();
-          pollInterval = setInterval(poll, 1000);
         }
 
         if (msg.msg_type === "portfolio") {
           const contracts: any[] = msg.portfolio?.contracts ?? [];
           const stillOpen = contracts.some((c) => Number(c.contract_id) === contractId);
-          if (stillOpen) { return; }
-          // Contract no longer (or not yet) in the open-contracts list. Check
-          // profit_table for a settled record; if not found yet we simply keep
-          // polling on the next tick (handles both "not registered yet" and
-          // "already settled" without a race).
+          if (stillOpen) return;
+          // Not in open portfolio — check profit_table for settled record
           ws.send(JSON.stringify({ profit_table: 1, limit: 10, sort: "DESC" }));
         }
 
@@ -1592,10 +1606,11 @@ export async function waitForContractResult(token: string, contractId: number, t
               entrySpot: 0,
             });
           }
-          // Not found yet — Deriv hasn't recorded it in profit_table yet, keep polling.
+          // Not settled yet — keep polling portfolio
         }
-      } catch { /* ignore parse errors */ }
+      } catch { /* ignore */ }
     });
+
     ws.on("error", (err) => { finishError(err); });
   });
 }

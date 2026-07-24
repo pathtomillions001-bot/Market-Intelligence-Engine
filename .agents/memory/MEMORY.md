@@ -1,6 +1,6 @@
 - [NeuroTrade Architecture](neurotrade-arch.md) — pnpm monorepo: trading-platform (Vite/React, port 21210) + api-server (Express, port 8080). DB push via `pnpm --filter db push`.
 - [Deriv API migration](deriv-api-migration.md) — URL is derivws.com not binaryws.com; app_id=1089 deprecated; active_symbols discovery on connect; InvalidSymbol = permanent, no retry.
-- [Deriv new auth format](deriv-new-auth.md) — App IDs are now alphanumeric (e.g. 33TQEuMW21nTbCZ7Hfb0q); tokens are PATs (pat_xxx…); numeric-only guard removed from deriv.ts; WS URL falls back to app_id=1089 only when DERIV_APP_ID unset.
+- [Deriv new API migration](deriv-new-api-migration.md) — Full API migration: public WS (no auth), OTP-URL trading WS, OAuth2+PKCE, `underlying_symbol` field, no `authorize` WS message.
 - [Digit analyser simulation fallback](digit-sim-fallback.md) — DerivTickManager.startSimulation() seeds 150 ticks then continues at ~1 tick/s per market when active_symbols returns empty; stops automatically on first real tick; frontend panels show warmup spinner instead of hiding.
 - [CALL/PUT canonical types](callput-canonical.md) — CALL=Rise, PUT=Fall are the canonical internal types; RISE/FALL are legacy aliases normalized on ingestion; Deriv API accepts both.
 - [EvenOdd Markov analysis](evenodd-markov.md) — analyzeEvenOdd uses Markov chain + streak reversal + chi-square; needs ≥2 signals to fire; returns markovEvenGivenEven/Odd, markovNextEvenProb, streakReversalSignal.

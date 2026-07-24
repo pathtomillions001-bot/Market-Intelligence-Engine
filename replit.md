@@ -11,8 +11,7 @@ AI-driven trading platform connected to Deriv's WebSocket API with 8-agent auton
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required env: `DATABASE_URL` — Postgres connection string
-- Required env: `DERIV_APP_ID` — alphanumeric Deriv app ID from app.deriv.com/apps (e.g. `33TQEuMW21nTbCZ7Hfb0q`)
-- Required env: `VITE_DERIV_APP_ID` — same value, exposed to the frontend Vite build
+- Required env: `DERIV_APP_ID` — alphanumeric Deriv app ID from app.deriv.com/apps (e.g. `33TQEuMW21nTbCZ7Hfb0q`). Also used as the OAuth2 `client_id`.
 
 ## Stack
 
@@ -23,7 +22,9 @@ AI-driven trading platform connected to Deriv's WebSocket API with 8-agent auton
 - Validation: Zod (`zod/v4`), `drizzle-zod`
 - API codegen: Orval (from OpenAPI spec)
 - Build: esbuild (CJS bundle)
-- Deriv WebSocket API: `wss://ws.derivws.com/websockets/v3?app_id=<your-alphanumeric-app-id>`
+- Deriv public WS: `wss://api.derivws.com/trading/v1/options/ws/public` (no auth — ticks, symbols, proposals)
+- Deriv trading WS: OTP URL from `POST https://api.derivws.com/trading/v1/options/accounts/{id}/otp`
+- Deriv auth: OAuth2 + PKCE via `https://auth.deriv.com/oauth2/auth`
 
 ## Where things live
 
@@ -60,12 +61,17 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 ## Gotchas
 
-- **Deriv App ID**: Must be the new alphanumeric format from app.deriv.com/apps (e.g. `33TQEuMW21nTbCZ7Hfb0q`). Old numeric IDs like `1089` are deprecated and return no symbols — the engine falls back to simulated prices automatically.
-- **Deriv PAT tokens**: Users must use Personal Access Tokens (format: `pat_xxxxxxxxxx`) from app.deriv.com/account/api-token. Old short API keys are no longer accepted by Deriv.
-- Deriv WebSocket connection may timeout in 8s — code falls back to simulated prices automatically
+- **New Deriv API architecture**: The legacy `wss://ws.derivws.com/websockets/v3?app_id=<ID>` endpoint does NOT accept the new alphanumeric App IDs (returns 401). The app has been migrated to the new API:
+  - **Public market data** (ticks, proposals): `wss://api.derivws.com/trading/v1/options/ws/public` — no auth required
+  - **Authenticated trading**: OTP URL from `POST /trading/v1/options/accounts/{id}/otp` — no `authorize` WS message
+  - **Auth**: OAuth2 + PKCE via `auth.deriv.com` (not `oauth.deriv.com`)
+- **No `authorize` WS message**: The new API authenticates via OTP URL. Any code that sends `{ authorize: token }` over WebSocket will fail silently with the new endpoints.
+- **`underlying_symbol` not `symbol`**: Proposal and buy WS messages must use `underlying_symbol` field. The `ticks` subscription still uses `ticks: "R_100"`.
+- **OTP URLs are one-time-use** for establishing a connection; the connection stays alive for multiple messages. On reconnect, always fetch a fresh OTP URL.
+- **Redirect URI must match**: The redirect URI used in OAuth must exactly match what is registered in the Deriv app dashboard (including trailing slashes, http vs https, port).
+- **DERIV_APP_ID**: Alphanumeric string from app.deriv.com/apps. Used as OAuth `client_id` and `Deriv-App-ID` header on REST calls. Not appended to the WebSocket URL.
 - The `ws` package must be a `dependency` (not devDependency) since it's used at runtime in the bundled server
 - Market analysis cache lives in-memory — restarts clear it; first requests will be slower as cache warms up
-- `DERIV_APP_ID` and `VITE_DERIV_APP_ID` must both be set to the same alphanumeric app ID
 
 ## Pointers
 

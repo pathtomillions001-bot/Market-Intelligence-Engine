@@ -15,21 +15,23 @@ import { registerMidnightCallback, scheduleNextMidnight } from "./lib/tz";
 import { loadFromDb as loadDynamicConfidence } from "./lib/agents/dynamic-confidence";
 import { pool, db, marketWinRatesTable } from "@workspace/db";
 
-/** Ensure DB schema is applied — runs drizzle-kit push if tables are missing. */
+/** Ensure DB schema is applied — runs drizzle-kit push if tables or columns are missing. */
 async function bootstrapDb() {
   try {
-    // Check for both the original 'settings' table AND the newer 'adaptive_thresholds'
-    // table so that existing deployments that already have 'settings' but are missing
-    // the new intelligence tables also get the schema push applied automatically.
     const { rows } = await pool.query(
       `SELECT
-        (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'settings') AS settings_exists,
-        (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'adaptive_thresholds') AS adaptive_exists`
+        (SELECT COUNT(*) FROM information_schema.tables   WHERE table_schema = 'public' AND table_name = 'settings')           AS settings_exists,
+        (SELECT COUNT(*) FROM information_schema.tables   WHERE table_schema = 'public' AND table_name = 'adaptive_thresholds') AS adaptive_exists,
+        (SELECT COUNT(*) FROM information_schema.columns  WHERE table_schema = 'public' AND table_name = 'accounts' AND column_name = 'bearer_token') AS bearer_col_exists`
     );
-    const settingsExists = Number(rows[0].settings_exists) > 0;
-    const adaptiveExists = Number(rows[0].adaptive_exists) > 0;
-    if (settingsExists && adaptiveExists) return; // all required tables present
-    logger.warn("DB schema missing — running schema push");
+    const settingsExists   = Number(rows[0].settings_exists) > 0;
+    const adaptiveExists   = Number(rows[0].adaptive_exists) > 0;
+    const bearerColExists  = Number(rows[0].bearer_col_exists) > 0;
+
+    // Push whenever any required table or column is missing
+    if (settingsExists && adaptiveExists && bearerColExists) return;
+
+    logger.warn("DB schema out of date — running schema push");
     const root = resolve(import.meta.dirname, "../../../../");
     execSync("pnpm --filter @workspace/db run push", { cwd: root, stdio: "inherit" });
     logger.info("DB schema push complete");
