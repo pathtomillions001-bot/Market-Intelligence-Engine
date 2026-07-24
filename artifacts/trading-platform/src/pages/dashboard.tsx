@@ -669,7 +669,7 @@ export default function Dashboard() {
           {account ? (
             <div className="text-right">
               <div className="text-xs text-muted-foreground font-mono">{account.loginId}</div>
-              <div className="font-mono font-bold">{account.currency} {account.balance.toFixed(2)}</div>
+              <div className="font-mono font-bold">{account.currency} {Number(account.balance).toFixed(2)}</div>
             </div>
           ) : (
             <Link href="/connect">

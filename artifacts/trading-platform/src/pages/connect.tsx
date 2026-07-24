@@ -251,7 +251,7 @@ export default function Connect() {
               </div>
               <div>
                 <Label className="text-muted-foreground text-xs uppercase">Balance</Label>
-                <div className="font-mono text-base md:text-lg mt-1 text-green-400">{account.currency} {account.balance.toFixed(2)}</div>
+                <div className="font-mono text-base md:text-lg mt-1 text-green-400">{account.currency} {Number(account.balance).toFixed(2)}</div>
               </div>
               {account.email && (
                 <div>

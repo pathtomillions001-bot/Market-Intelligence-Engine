@@ -221,7 +221,7 @@ export default function Settings() {
       {account && (
         <div className="flex items-center gap-3 p-3 rounded-lg bg-green-500/5 border border-green-500/20">
           <div className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
-          <span className="text-sm text-green-400">Live on <span className="font-mono">{account.loginId}</span> — {account.currency} {account.balance.toFixed(2)}</span>
+          <span className="text-sm text-green-400">Live on <span className="font-mono">{account.loginId}</span> — {account.currency} {Number(account.balance).toFixed(2)}</span>
         </div>
       )}
 
