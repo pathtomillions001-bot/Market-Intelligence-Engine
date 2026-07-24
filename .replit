@@ -72,9 +72,9 @@ externalPort = 8080
 # Users connect their personal accounts with a PAT token (pat_xxx) at the /connect page
 
 [userenv.shared]
-DERIV_APP_ID = ""
+DERIV_APP_ID = "33UykfmRmHDK2MSlotlw9"
 API_PORT = "8080"
-VITE_DERIV_APP_ID = ""
+VITE_DERIV_APP_ID = "33UykfmRmHDK2MSlotlw9"
 
 [nix]
 channel = "stable-25_05"
