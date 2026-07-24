@@ -118,9 +118,13 @@ function useLandingGate() {
 function Router() {
   useMidnightReset();
   const { showLanding, dismiss } = useLandingGate();
-  const [, setLocation] = useLocation();
+  const [location, setLocation] = useLocation();
 
-  if (showLanding) {
+  // Never block the /connect route — OAuth callbacks land here and need to
+  // reach the Connect component directly (even before an account exists).
+  const isConnectPage = location === "/connect" || location.startsWith("/connect?");
+
+  if (showLanding && !isConnectPage) {
     return <LandingPage onEnter={() => { dismiss(); setLocation("/connect"); }} />;
   }
 

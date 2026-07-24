@@ -8,7 +8,7 @@ import { motion } from "framer-motion";
 import { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import { Link, useLocation } from "wouter";
-import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound } from "lucide-react";
+import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound, Copy, Check } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
 // ── PKCE utilities ────────────────────────────────────────────────────────────
@@ -57,7 +57,18 @@ export default function Connect() {
   const [showToken, setShowToken] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [oauthPending, setOauthPending] = useState(false);
+  const [copied, setCopied] = useState(false);
   const handledRef = useRef(false);
+
+  // The redirect URI this app uses — must be registered in the Deriv app dashboard
+  const redirectUri = buildRedirectUri();
+
+  const copyRedirectUri = () => {
+    navigator.clipboard.writeText(redirectUri).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
 
   // ── Handle OAuth2 callback (new: code param; legacy: token1/acct1 params) ──
   useEffect(() => {
@@ -108,6 +119,8 @@ export default function Connect() {
           toast.success("Signed in with Deriv — live trading enabled!");
           setOauthPending(false);
           queryClient.invalidateQueries();
+          // Redirect to dashboard after short delay so the user sees the success state
+          setTimeout(() => setLocation("/"), 1200);
         })
         .catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : "OAuth login failed — please try again";
@@ -131,6 +144,7 @@ export default function Connect() {
           toast.success("Logged in with Deriv — live trading enabled!");
           setOauthPending(false);
           queryClient.invalidateQueries();
+          setTimeout(() => setLocation("/"), 1200);
         },
         onError: (err: unknown) => {
           const msg = err instanceof ApiError
@@ -188,6 +202,7 @@ export default function Connect() {
         toast.success("Account connected — live trading on Deriv");
         setToken("");
         queryClient.invalidateQueries();
+        setTimeout(() => setLocation("/"), 1200);
       },
       onError: (err: unknown) => {
         const msg = err instanceof ApiError
@@ -331,6 +346,29 @@ export default function Connect() {
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <ShieldCheck className="w-3.5 h-3.5 text-primary flex-shrink-0" />
             <span>You'll be redirected to Deriv's secure login page (auth.deriv.com). No passwords stored here.</span>
+          </div>
+
+          {/* Redirect URI setup notice */}
+          <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 space-y-2">
+            <p className="text-xs font-medium text-amber-400">⚠ One-time setup required</p>
+            <p className="text-xs text-muted-foreground">
+              Register this redirect URI in your{" "}
+              <a href="https://app.deriv.com/account/api-token" target="_blank" rel="noopener noreferrer" className="text-primary underline">
+                Deriv app settings
+              </a>{" "}
+              under <strong className="text-foreground">OAuth details → Redirect URI</strong>:
+            </p>
+            <div className="flex items-center gap-2 bg-secondary/60 rounded px-3 py-2">
+              <code className="text-xs text-primary font-mono flex-1 break-all">{redirectUri}</code>
+              <button
+                type="button"
+                onClick={copyRedirectUri}
+                className="text-muted-foreground hover:text-foreground flex-shrink-0 transition-colors"
+                title="Copy redirect URI"
+              >
+                {copied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
+              </button>
+            </div>
           </div>
 
           <div className="grid grid-cols-3 gap-2 pt-1">
