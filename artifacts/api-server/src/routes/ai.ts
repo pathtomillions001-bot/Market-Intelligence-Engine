@@ -815,14 +815,21 @@ async function runAutonomousLoop() {
       return;
     }
 
-    // ── Fix 12: Absolute quality floor ────────────────────────────────────────
+    // ── Absolute quality floor ────────────────────────────────────────────────
     // Even when shouldTrade is true, skip the cycle if the tournament winner's
-    // quality score is below 60. A score that low means the agents collectively
+    // quality score is below the floor. A score that low means the agents collectively
     // have borderline confidence — the engine is reaching for a marginal trade
     // rather than a genuinely strong setup. Waiting costs nothing; a bad trade costs real money.
-    if (output.qualityScore < 60) {
-      logger.info({ symbol: bestMarket.symbol, quality: output.qualityScore },
-        "Quality floor not met (< 60) — holding off this scan cycle");
+    //
+    // During active recovery the floor is relaxed to 50: the master-decision EV,
+    // timing, and risk gates already guard execution quality. Keeping the normal
+    // 60-pt floor in recovery mode causes the engine to repeatedly skip the very
+    // trades it needs to execute to cover the accumulated debt — defeating the purpose
+    // of the recovery system entirely.
+    const qualityFloor = inRecoveryNow ? 50 : 60;
+    if (output.qualityScore < qualityFloor) {
+      logger.info({ symbol: bestMarket.symbol, quality: output.qualityScore, inRecovery: inRecoveryNow },
+        `Quality floor not met (< ${qualityFloor}) — holding off this scan cycle`);
       scheduleNext(false, 500);
       return;
     }

@@ -199,7 +199,14 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   // wants OVER/UNDER. If this is a pure matchdiff-family scan (wantDigit = false), start
   // empty so that OVER/UNDER options can never "win" the EV tournament and hijack the
   // recommendation away from DIGITDIFF/DIGITMATCH.
-  const allBarrierOptions = wantDigit ? [...barrierOptions] : [];
+  //
+  // STRICT PREFERRED FILTER: only include barrier options for contract types the user
+  // has actually enabled. If the user enables ONLY DIGITOVER (not DIGITUNDER), digit-
+  // probability still produces both options (at the user-configured barriers) — we must
+  // filter here so the EV tournament never recommends the disabled type.
+  const allBarrierOptions = wantDigit
+    ? [...barrierOptions].filter(b => preferred.includes(b.contractType as string))
+    : [];
   if (wantMatchDiff && digitAgent.matchDiffersAnalysis && ctx.digits.length >= 30) {
     const md = digitAgent.matchDiffersAnalysis;
     if (preferred.includes("DIGITMATCH")) {

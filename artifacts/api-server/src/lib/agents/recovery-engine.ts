@@ -217,7 +217,21 @@ function computeDynamicStake(
     : 0.12;   // moderate
   const maxExposure = Math.min(balance * maxExposurePct, maxTradeStake);
 
-  if (recoveryMethod === "instant") {
+  // Capital-protection override: for very-low net-payout contracts such as
+  // DIGITDIFF (payout 1.04×, netPayout = 0.04), full instant recovery in one
+  // trade would require a stake ≈ 26× the accumulated debt — dangerously
+  // over-exposing the user's capital. Always use split-mode progressive capping
+  // for these contracts regardless of the recoveryMethod setting so recovery
+  // happens gradually over multiple near-certain wins rather than one huge bet.
+  //
+  // Threshold: netPayout < 0.15 covers DIGITDIFF (0.04) while leaving all
+  // DIGITOVER/DIGITUNDER barriers (minimum 0.04 at OVER 8 — wait, actually
+  // OVER 8 payout is 4.9, netPayout = 3.9) and DIGITMATCH (8.0) unaffected.
+  // Note: DIGITOVER 0 payout=1.04, netPayout=0.04 — also a low-payout barrier,
+  // same protection applies.
+  const isLowNetPayout = netPayout < 0.15;
+
+  if (recoveryMethod === "instant" && !isLowNetPayout) {
     // Instant: use the SAME reasonable multiplier Split mode uses (recoveryMultiplier,
     // e.g. 1.62×) whenever that's enough to cover the loss in one trade — Instant
     // should never stake more than Split's own step-1 stake just because it's
@@ -235,7 +249,7 @@ function computeDynamicStake(
     return Math.max(0.35, Math.min(stake, maxExposure, maxTradeStake));
   }
 
-  // Split: progressive cap grows by 1× base stake per consecutive recovery loss.
+  // Split (and low-net-payout instant): progressive cap grows by 1× base stake per consecutive recovery loss.
   //   Step 1 → cap = base × recoveryMultiplier          (e.g. 1.62×)
   //   Step 2 → cap = base × (recoveryMultiplier + 1)    (e.g. 2.62×)
   //   Step 3 → cap = base × (recoveryMultiplier + 2)    (e.g. 3.62×)

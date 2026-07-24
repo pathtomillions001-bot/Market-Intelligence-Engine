@@ -252,19 +252,25 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   // During a loss streak, raise the bar aggressively — each consecutive loss adds
   // 5 points (max +30), demanding much stronger multi-agent consensus before trading.
   //
-  // EXCEPTION — DIGITMATCH recovery: the streak boost must NOT apply when the engine
-  // has specifically selected DIGITMATCH to recover a loss. The boost raises the
-  // threshold at exactly the moment DIGITMATCH is meant to fire, making recovery
-  // nearly impossible. DIGITMATCH already has its own EV gate (-5%) and its
-  // naturally lower confidence scores are accounted for by the 45-pt threshold cap
-  // set in the matchdiff family context.
+  // EXCEPTION — recovery-mode trades: the streak boost must NOT apply when the engine
+  // is executing a recovery trade (DIGITMATCH for high-payout coverage, or DIGITOVER/
+  // DIGITUNDER at the user's recovery barriers). The boost raises the threshold at
+  // exactly the moment these trades need to fire, making recovery nearly impossible.
+  // These contract types already have their own EV and timing gates; blocking recovery
+  // further with a consensus boost defeats the purpose of the recovery system.
   {
     const sessionLosses = ctx.daily.consecutiveLosses;
-    const isMatchRecovery = candidateProduct === "DIGITMATCH";
-    const lossStreakBoost = isMatchRecovery ? 0 : Math.min(sessionLosses * 5, 30);
+    // Re-derive recovery-barrier classification here so Gate 4 doesn't depend on the
+    // Gate 2 local variables (those are inside a separate block scope).
+    const recOverBarrier  = ctx.settings.recoveryOverDigit  ?? 3;
+    const recUnderBarrier = ctx.settings.recoveryUnderDigit ?? 6;
+    const isRecoveryTrade = candidateProduct === "DIGITMATCH" ||
+      (bestEV?.product === "DIGITOVER"  && bestEV?.barrier === recOverBarrier) ||
+      (bestEV?.product === "DIGITUNDER" && bestEV?.barrier === recUnderBarrier);
+    const lossStreakBoost = isRecoveryTrade ? 0 : Math.min(sessionLosses * 5, 30);
     const minScore = (settings.minConfidenceThreshold ?? 50) + lossStreakBoost;
     if (weightedScore < minScore) {
-      const streakNote = (!isMatchRecovery && sessionLosses >= 2) ? ` (incl. +${lossStreakBoost}pt loss-streak guard)` : "";
+      const streakNote = (!isRecoveryTrade && sessionLosses >= 2) ? ` (incl. +${lossStreakBoost}pt loss-streak guard)` : "";
       rejectReasons.push(`Consensus score ${weightedScore.toFixed(0)} below threshold ${minScore}${streakNote}`);
     }
   }
