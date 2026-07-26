@@ -249,14 +249,26 @@ function computeDynamicStake(
     return Math.max(0.35, Math.min(stake, maxExposure, maxTradeStake));
   }
 
-  // Split (and low-net-payout instant): progressive cap grows by 1× base stake per consecutive recovery loss.
-  //   Step 1 → cap = base × recoveryMultiplier          (e.g. 1.62×)
-  //   Step 2 → cap = base × (recoveryMultiplier + 1)    (e.g. 2.62×)
-  //   Step 3 → cap = base × (recoveryMultiplier + 2)    (e.g. 3.62×)
-  // The recoveryMultiplier from settings is calibrated to the recovery barrier
-  // payout so step 1 always covers exactly one base-stake loss.
+  // Split (and low-net-payout instant): progressive cap grows per consecutive recovery loss.
+  //
+  // KEY FIX — payout-calibrated cap: the user-configured recoveryMultiplier is the FLOOR,
+  // but the cap can never be lower than what the live barrier payout mathematically requires
+  // to cover exactly one base-stake loss in a single win.
+  //
+  //   payoutImpliedMinMult = 1 / netPayout × 1.05
+  //   → OVER 3  (payout 1.37×, netPayout 0.37): needs 2.84× — user's 1.62× would only
+  //     win back 0.60× base, leaving partial debt after every recovery step.
+  //   → OVER 5  (payout 1.96×, netPayout 0.96): needs 1.09× — user's 1.62× is more
+  //     than sufficient; minRecovery wins and the stake stays at ~1.09×.
+  //   → DIGITMATCH (payout 9×, netPayout 8):    needs 0.13× — minRecovery governs
+  //     as always (tiny stake fully covers the debt at 9× payout).
+  //
+  // Progressive step still grows by 1× baseEffectiveMult so each consecutive recovery
+  // loss raises the cap predictably: step1=baseEffective, step2=baseEffective+1, …
   const stepOffset = Math.max(0, recoveryStep - 1);
-  const progressiveMultiplier = Math.max(1.1, recoveryMultiplier + stepOffset);
+  const payoutImpliedMinMult = (1 / netPayout) * 1.05;
+  const baseEffectiveMult    = Math.max(recoveryMultiplier, payoutImpliedMinMult);
+  const progressiveMultiplier = Math.max(1.1, baseEffectiveMult + stepOffset);
   const splitCap = baseStake > 0 ? baseStake * progressiveMultiplier : maxTradeStake;
 
   return Math.max(0.35, Math.min(minRecovery, maxExposure, splitCap, maxTradeStake));

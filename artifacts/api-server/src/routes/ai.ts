@@ -9,6 +9,7 @@ import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 import { computeStake } from "../lib/agents/ev-calculator";
 import * as recoveryEngine from "../lib/agents/recovery-engine";
+import { recordLossForPattern, clearLossPattern } from "../lib/agents/recovery-intelligence";
 import { analyzeCompletedTrade, getRecentReports, getIntelligenceSummary } from "../lib/agents/trade-intelligence";
 import { trackRejectedTrade, getMissedOpportunitySummary, getRecentMissed } from "../lib/agents/missed-opportunity";
 import { getStatus as getDynamicConfidenceStatus, loadFromDb as loadDynamicConfidence } from "../lib/agents/dynamic-confidence";
@@ -862,9 +863,9 @@ async function runAutonomousLoop() {
     // predicts the next digit distribution; capping at 5t keeps execution tight and accurate.
     const rawDuration = rec.duration ?? 5;
     const duration = (effectiveContractType === "DIGITEVEN" || effectiveContractType === "DIGITODD")
-      ? Math.max(5, rawDuration)
+      ? Math.max(5, rawDuration)                          // Deriv minimum 5t for Even/Odd
       : (effectiveContractType === "DIGITMATCH" || effectiveContractType === "DIGITDIFF")
-        ? 5
+        ? Math.max(1, Math.min(5, rawDuration))           // 1–5t: duration optimizer chooses; never >5 (extra exposure)
         : rawDuration;
 
     // ── Fix 7: Regime gate on digit recovery trades ───────────────────────────
@@ -928,6 +929,10 @@ async function runAutonomousLoop() {
       if (isTracked) {
         recoveryEngine.recordOutcome(won, profit, stake, settings?.maxRecoverySteps ?? 3, effectiveContractType);
       }
+      // Update structural loss pattern detector so the next scan avoids repeating
+      // the exact same losing contractType+regime combination.
+      if (won) clearLossPattern(bestMarket.symbol);
+      else recordLossForPattern(bestMarket.symbol, effectiveContractType, output.regime ?? "");
 
       const [paperTrade] = await db.insert(tradesTable).values({
         symbol: bestMarket.symbol,
@@ -1053,6 +1058,10 @@ async function runAutonomousLoop() {
       if (isTracked) {
         recoveryEngine.recordOutcome(won, profit, stake, settings?.maxRecoverySteps ?? 3, effectiveContractType);
       }
+      // Update structural loss pattern detector — prevents re-entering the same
+      // losing contractType+regime combo back-to-back without a regime change.
+      if (won) clearLossPattern(bestMarket.symbol);
+      else recordLossForPattern(bestMarket.symbol, effectiveContractType, output.regime ?? "");
 
       await db.update(tradesTable).set({
         status: won ? "won" : "lost",

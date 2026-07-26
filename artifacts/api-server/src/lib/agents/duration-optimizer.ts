@@ -35,8 +35,11 @@ export interface OptimalDuration {
 
 const CANDIDATE_DURATIONS = [1, 3, 5, 7, 10, 15];
 // Digit contracts only care about the FINAL tick's last digit — durations beyond
-// 5 ticks add time exposure without improving odds. Restrict to these candidates.
-const DIGIT_CANDIDATE_DURATIONS = [3, 5];
+// 5 ticks add time exposure without improving odds.
+// 1 tick is valid for DIGITOVER/DIGITUNDER/DIGITMATCH/DIGITDIFF and is the
+// optimal choice in high/extreme volatility (minimum time for the distribution
+// to shift before settlement). 3t and 5t remain for normal/low vol.
+const DIGIT_CANDIDATE_DURATIONS = [1, 3, 5];
 
 /**
  * Score a given tick duration for a contract type in the current market conditions.
@@ -85,19 +88,42 @@ function scoreDuration(
       else if (duration >= 10) { score -= 12; reasoning.push("Mean-reverting penalises long duration"); }
     }
   } else {
-    // Digit contracts: Hurst has limited impact on the final digit, but volatility does.
-    // Avoid a static bias — let vol/regime drive the choice between 3t and 5t.
-    // High vol → prefer 3t (less time exposure); low vol → prefer 5t (digit distribution stabilises)
-    if (pf.vol20 > 0.006) {
-      if (duration === 3) { score += 6; reasoning.push(`High vol: 3t reduces digit exposure`); }
-      else { score -= 2; }
+    // Digit contracts: only the FINAL tick's last digit matters.
+    // Scoring logic for 1t / 3t / 5t based on volatility and market regime:
+    //
+    //  1t — optimal when extreme/high vol: minimum time-exposure means the digit
+    //       distribution has the least chance to shift between analysis and settlement.
+    //       Also best when we want a tight, precise entry during recovery.
+    //
+    //  3t — default for moderately high vol: balances tick-count variance with
+    //       reduced exposure compared to 5t.
+    //
+    //  5t — best in low/medium vol: the digit distribution is stable enough that
+    //       more ticks produce a more reliable probability estimate at settlement.
+    if (pf.vol20 > 0.010) {
+      // Extreme volatility: 1 tick minimises time-exposure; 5t is actively risky
+      if (duration === 1)      { score += 16; reasoning.push(`Extreme vol (${(pf.vol20*100).toFixed(3)}%): 1t minimises digit time-exposure`); }
+      else if (duration === 3) { score += 4; }
+      else                     { score -= 10; reasoning.push(`Extreme vol penalises long digit duration`); }
+    } else if (pf.vol20 > 0.006) {
+      // High volatility: 1t is good, 3t is solid, 5t loses edge
+      if (duration === 1)      { score += 10; reasoning.push(`High vol: 1t tight digit entry reduces distribution drift`); }
+      else if (duration === 3) { score += 8;  reasoning.push(`High vol: 3t reduces digit exposure`); }
+      else                     { score -= 4; }
     } else if (pf.vol20 < 0.002) {
-      if (duration === 5) { score += 6; reasoning.push(`Low vol: 5t allows digit distribution to settle`); }
+      // Very low volatility: distribution is stable — more ticks = more reliable
+      if (duration === 5)      { score += 8;  reasoning.push(`Low vol: 5t allows digit distribution to stabilise`); }
+      else if (duration === 1) { score -= 8;  reasoning.push(`Low vol: 1t too noisy for digit`); }
+    } else {
+      // Normal volatility (0.002–0.006): moderate preference for 3t and 5t
+      if (duration === 5)      { score += 4; }
+      else if (duration === 3) { score += 3; }
+      // 1-tick neutral in normal conditions
     }
-    // Small neutral preference for 5 in truly ambiguous conditions
-    if (pf.vol20 >= 0.002 && pf.vol20 <= 0.006) {
-      if (duration === 5) { score += 2; }
-      else if (duration === 3) { score += 1; }
+    // Regime overlay: volatile/choppy markets — 1t further rewarded for digits
+    if (regime === "volatile" || regime === "choppy") {
+      if (duration === 1)      { score += 6;  reasoning.push(`${regime} regime: 1t for digits cuts noise exposure`); }
+      else if (duration === 5) { score -= 5; }
     }
   }
 

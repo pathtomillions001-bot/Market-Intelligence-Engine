@@ -13,6 +13,7 @@ import type { DirectionResult } from "./rise-fall-agent";
 import type { BarrierOption } from "./digit-probability";
 import type { EVResult } from "./ev-calculator";
 import { getDynamicWeights, getAdaptiveConfidenceThreshold, getAdaptiveEvThreshold, getAdaptiveTimingThreshold } from "./dynamic-confidence";
+import { getStructuralLossPattern } from "./recovery-intelligence";
 
 export interface FusionInput {
   marketScannerScore: number;
@@ -93,6 +94,24 @@ export function runConfidenceFusionAgent(
   // is not enough — we need a guaranteed veto to protect capital during severe streaks).
   if (input.recoveryIntelligenceScore < 20) {
     blockers.push("Recovery intelligence: consecutive loss limit — mandatory pause before next trade");
+  }
+
+  // Structural loss pattern gate: if ≥2 of the last 4 losses on this symbol
+  // share the same contractType + market regime, suppress that exact combo for
+  // one more scan. A win on ANY contract type on this symbol clears the pattern.
+  // This prevents the engine from blindly re-entering a proven losing setup
+  // (e.g. DIGITOVER in trending_up twice in a row) without raising the bar globally.
+  const structuralPattern = getStructuralLossPattern(ctx.symbol);
+  const candidateType = input.contractType ?? "";
+  if (
+    structuralPattern &&
+    structuralPattern.contractType === candidateType &&
+    structuralPattern.regime === (ctx.regime as string) &&
+    sessionLosses >= 2
+  ) {
+    blockers.push(
+      `Structural loss pattern: ${candidateType} in ${regime} regime has lost ≥2 times — waiting for regime shift`,
+    );
   }
 
   // ── Resolve dynamic weights (accuracy-driven, falls back to base) ────────────

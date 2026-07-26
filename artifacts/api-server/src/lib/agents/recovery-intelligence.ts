@@ -1,9 +1,10 @@
 /**
  * Agent 8: Recovery Intelligence Agent
  *
- * RESPONSIBILITY: Track win/loss streaks and session P&L for informational
- * purposes only. The engine always runs in normal mode — no recovery stake
- * adjustments, no mode switching, no cooldown triggers from this agent.
+ * RESPONSIBILITY: Track win/loss streaks, session P&L, and structural loss
+ * patterns so downstream agents can avoid repeating the exact same losing
+ * setup. The engine always runs in normal mode — no recovery stake adjustments,
+ * no mode switching, no cooldown triggers from this agent.
  * Cooldown is handled externally by the consecutive-loss limit in settings.
  */
 
@@ -20,6 +21,79 @@ export interface RecoveryState {
   mode: RecoveryMode;
   recommendedStakeMultiplier: number;
   cooldownUntil: number;
+}
+
+// ── Structural loss pattern detection ────────────────────────────────────────
+//
+// Records the last N loss contexts (contractType + market regime) per symbol.
+// When ≥2 consecutive losses share the same contractType+regime combination,
+// `getStructuralLossPattern` returns that combo so the fusion engine can apply
+// a targeted penalty — blocking that specific setup rather than raising the bar
+// globally for all contract types.
+
+interface LossContext {
+  contractType: string;
+  regime: string;
+  timestamp: number;
+}
+
+// Session-scoped: keyed by symbol, stores last 4 loss contexts
+const lossPatternStore = new Map<string, LossContext[]>();
+
+/**
+ * Called from ai.ts immediately after a confirmed loss outcome.
+ * Stores the loss context so pattern detection can fire on the next scan.
+ */
+export function recordLossForPattern(
+  symbol: string,
+  contractType: string,
+  regime: string,
+): void {
+  const existing = lossPatternStore.get(symbol) ?? [];
+  // Keep last 4 only (sufficient for 2-match detection, bounded memory)
+  const updated = [...existing, { contractType, regime, timestamp: Date.now() }].slice(-4);
+  lossPatternStore.set(symbol, updated);
+}
+
+/**
+ * Called from ai.ts after a confirmed win (any contract type on that symbol).
+ * Clears the pattern — a win breaks the structural repeat cycle.
+ */
+export function clearLossPattern(symbol: string): void {
+  lossPatternStore.delete(symbol);
+}
+
+/**
+ * Returns the blocked {contractType, regime} combo if ≥2 of the last 4 losses
+ * on this symbol share the same pair, otherwise null.
+ *
+ * Only patterns within the last 30 minutes are considered — stale patterns
+ * from earlier in the session shouldn't suppress trades indefinitely.
+ */
+export function getStructuralLossPattern(
+  symbol: string,
+): { contractType: string; regime: string } | null {
+  const contexts = lossPatternStore.get(symbol);
+  if (!contexts || contexts.length < 2) return null;
+
+  const cutoff = Date.now() - 30 * 60 * 1000; // 30-minute window
+  const recent = contexts.filter(c => c.timestamp >= cutoff);
+  if (recent.length < 2) return null;
+
+  // Count occurrences of each contractType+regime combination
+  const counts = new Map<string, { contractType: string; regime: string; count: number }>();
+  for (const c of recent) {
+    const key = `${c.contractType}|${c.regime}`;
+    const existing = counts.get(key);
+    if (existing) existing.count++;
+    else counts.set(key, { contractType: c.contractType, regime: c.regime, count: 1 });
+  }
+
+  // Return the first combo that appears ≥2 times
+  for (const entry of counts.values()) {
+    if (entry.count >= 2) return { contractType: entry.contractType, regime: entry.regime };
+  }
+  return null;
 }
 
 // In-memory state per session (resets on server restart)
