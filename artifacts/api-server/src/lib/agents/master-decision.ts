@@ -94,6 +94,10 @@ function isDirectionProduct(product: ProductType | string | undefined): boolean 
   return ["RISE", "FALL", "CALL", "PUT"].includes(product ?? "");
 }
 
+function isOverUnderProduct(product: ProductType | string | undefined): boolean {
+  return product === "DIGITOVER" || product === "DIGITUNDER";
+}
+
 // ── Trend direction from probabilities ───────────────────────────────────────
 
 function trendFromProb(probUp: number): CoordinatorOutput["trend"] {
@@ -138,8 +142,17 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   const weightedScore = computeWeightedScore(agents);
   const rejectReasons: string[] = [];
 
-  const candidateProduct = bestEV?.product;
+  // The coordinator runs each contract family with a narrowed preferred list.
+  // Preserve that family identity even when the EV agent has no result during
+  // warm-up, so OVER/UNDER does not fall into the generic no-EV veto.
+  const candidateProduct = bestEV?.product ??
+    (settings.preferredContractTypes.includes("DIGITOVER")
+      ? "DIGITOVER"
+      : settings.preferredContractTypes.includes("DIGITUNDER")
+        ? "DIGITUNDER"
+        : undefined);
   const isDirProduct = isDirectionProduct(candidateProduct);
+  const isOverUnder = isOverUnderProduct(candidateProduct);
 
   // ── Gate 1: Risk hard stop ───────────────────────────────────────────────
   if (riskDecision.hardStop) {
@@ -152,8 +165,14 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   // The real signal is EDGE: actual win rate > theoretical 70%.
   // For all other products, require EV > -0.06.
   if (!bestEV) {
-    rejectReasons.push("No EV data — market data insufficient to evaluate");
-  } else {
+    // OVER/UNDER still uses the agent analysis and configured barrier when the
+    // EV calculator has no candidate (for example during a short warm-up).
+    // Do not turn missing EV into a second hidden veto for this user-directed
+    // contract family.
+    if (!isOverUnder) {
+      rejectReasons.push("No EV data — market data insufficient to evaluate");
+    }
+  } else if (!isOverUnder) {
     // ── Dynamic tier classification using user-configured barriers ───────────
     // Use the exact barriers the user configured — no range scanning.
     // Defaults match the DB schema so a missing settings row behaves consistently.
@@ -237,7 +256,7 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   // Digit trades: blocked when timingScore < 45. Less velocity-sensitive but still
   // needs stable tick conditions for digit predictions to be reliable.
   // Both: always veto on extreme z-score outlier tick to avoid chasing spikes.
-  {
+  if (!isOverUnder) {
     const timingHardThreshold = isDirProduct ? 52 : 45;
     if (!timingResult.notOnExtreme) {
       rejectReasons.push(`Outlier tick — waiting for normalisation (z=${timingResult.waitReason ?? "extreme"})`);
@@ -258,7 +277,7 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   // exactly the moment these trades need to fire, making recovery nearly impossible.
   // These contract types already have their own EV and timing gates; blocking recovery
   // further with a consensus boost defeats the purpose of the recovery system.
-  {
+  if (!isOverUnder) {
     const sessionLosses = ctx.daily.consecutiveLosses;
     // Re-derive recovery-barrier classification here so Gate 4 doesn't depend on the
     // Gate 2 local variables (those are inside a separate block scope).
@@ -280,6 +299,7 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   // Severe drift (recent WR < 40%, ≥20 trades): hard block — this setup is
   // demonstrably broken and continuing will compound losses, not recover them.
   if (
+    !isOverUnder &&
     strategyStats.isDrifting &&
     strategyStats.hasEnoughData &&
     strategyStats.recentWinRate < 0.40 &&
@@ -321,18 +341,31 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     const dirAgent = agents["direction"];
     const probUpLocal = dirAgent?.data?.["probUp"] as number ?? 0.5;
     const preferred = ctx.settings.preferredContractTypes;
+    const digitAgent = agents["digitDistribution"] ?? agents["digitProbability"];
+    const analyzedBarrier = digitAgent?.data?.["bestBarrier"] as
+      { contractType?: ProductType; barrier?: number } | undefined;
     const wantDir = preferred.some((t) => ["CALL", "PUT", "RISE", "FALL"].includes(t));
     const wantOU  = preferred.some((t) => t === "DIGITOVER" || t === "DIGITUNDER");
     const wantEO  = preferred.some((t) => t === "DIGITEVEN" || t === "DIGITODD");
     const wantMD  = preferred.some((t) => t === "DIGITMATCH" || t === "DIGITDIFF");
-    const product: ProductType = wantDir
+    const product = (wantDir
       ? (probUpLocal >= 0.5 ? "CALL" : "PUT")
-      : wantOU  ? "DIGITOVER"
+      : wantOU  ? (analyzedBarrier?.contractType === "DIGITOVER" && preferred.includes("DIGITOVER")
+          ? "DIGITOVER"
+          : analyzedBarrier?.contractType === "DIGITUNDER" && preferred.includes("DIGITUNDER")
+            ? "DIGITUNDER"
+            : preferred.includes("DIGITOVER") ? "DIGITOVER" : "DIGITUNDER")
       : wantEO  ? "DIGITEVEN"
       : wantMD  ? "DIGITMATCH"
-      : (probUpLocal >= 0.5 ? "CALL" : "PUT");   // absolute last resort
+      : (probUpLocal >= 0.5 ? "CALL" : "PUT")) as ProductType;   // absolute last resort
+    const barrier = product === "DIGITOVER"
+      ? ctx.recoveryBarrierOverride?.DIGITOVER ?? ctx.settings.normalOverDigit
+      : product === "DIGITUNDER"
+        ? ctx.recoveryBarrierOverride?.DIGITUNDER ?? ctx.settings.normalUnderDigit
+        : undefined;
     recommendation = {
       product,
+      barrier,
       winProbability: Math.round(probUpLocal * 100),
       payoutMultiplier: wantDir ? 1.91 : 1.95,
       expectedValue: 0,

@@ -76,9 +76,10 @@ export function runConfidenceFusionAgent(
   const blockers: string[] = [];
   const enhancers: string[] = [];
   const preferred = input.preferredTypes;
+  const isOverUnder = input.contractType === "DIGITOVER" || input.contractType === "DIGITUNDER";
 
   // ── 1. Hard gates ────────────────────────────────────────────────────────────
-  if (input.marketScannerScore < 20) {
+  if (input.marketScannerScore < 20 && !isOverUnder) {
     blockers.push("Market scanner: market ineligible");
   }
   if (input.riskIntelligenceScore < 20) {
@@ -110,11 +111,12 @@ export function runConfidenceFusionAgent(
   const adaptiveMinEV = getAdaptiveEvThreshold();
   const baselineMinEV = Math.max(adaptiveMinEV, -0.04);   // -4% floor, always applied
   const minEV = sessionLosses >= 3 ? 0.001 : sessionLosses >= 2 ? -0.02 : baselineMinEV;
-  const evPasses = input.bestEVResult !== null && input.bestEVResult.expectedValue >= minEV;
-  // EV is now always a hard gate — poor-EV trades are the primary cause of loss streaks.
-  const evIsHardGate = true;
+  // OVER/UNDER barriers are user-directed contracts. Their low fixed payouts make
+  // raw EV negative in most statistically normal markets, so EV must inform the
+  // analysis without vetoing the configured contract after the agents agree.
+  const evPasses = isOverUnder || (input.bestEVResult !== null && input.bestEVResult.expectedValue >= minEV);
   const evGated = evPasses;
-  if (!evPasses && input.bestEVResult !== null) {
+  if (!isOverUnder && !evPasses && input.bestEVResult !== null) {
     const streakNote = sessionLosses >= 3 ? ` (${sessionLosses} losses — strictly positive EV required)`
       : sessionLosses >= 2 ? ` (${sessionLosses} losses — tighter EV gate)` : "";
     blockers.push(`EV gate: ${(input.bestEVResult.expectedValue * 100).toFixed(1)}% < ${(minEV * 100).toFixed(0)}% required${streakNote}`);
@@ -123,8 +125,8 @@ export function runConfidenceFusionAgent(
   // ── 3. Timing gate ───────────────────────────────────────────────────────────
   const adaptiveTimingThreshold = getAdaptiveTimingThreshold();
   const minTimingScore = sessionLosses >= 3 ? 50 : sessionLosses >= 2 ? 44 : adaptiveTimingThreshold;
-  const timingGated = input.executionTimingScore >= minTimingScore;
-  if (!timingGated) {
+  const timingGated = isOverUnder || input.executionTimingScore >= minTimingScore;
+  if (!isOverUnder && !timingGated) {
     blockers.push(`Timing score ${input.executionTimingScore} < ${minTimingScore} — suboptimal entry`);
   }
 
@@ -194,12 +196,12 @@ export function runConfidenceFusionAgent(
   );
 
   const overallConfidence = agentWeightedScore;
-  const meetsThreshold = overallConfidence >= effectiveThreshold;
+  const meetsThreshold = isOverUnder || overallConfidence >= effectiveThreshold;
 
   // During a loss streak (≥2 consecutive losses) timing becomes a hard gate, not advisory.
   // In normal conditions timing is advisory so the engine keeps trading; during recovery
   // we want the most favourable entry, so we block poor-timing setups.
-  const timingRequired = sessionLosses >= 2;
+  const timingRequired = sessionLosses >= 2 && !isOverUnder;
   const timingPass = !timingRequired || timingGated;
 
   const shouldTrade = !hardBlocked && meetsThreshold && evGated && timingPass && !!recommendedContractType;

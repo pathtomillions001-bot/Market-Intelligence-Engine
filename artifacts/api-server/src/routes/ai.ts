@@ -826,7 +826,9 @@ async function runAutonomousLoop() {
     // 60-pt floor in recovery mode causes the engine to repeatedly skip the very
     // trades it needs to execute to cover the accumulated debt — defeating the purpose
     // of the recovery system entirely.
-    const qualityFloor = inRecoveryNow ? 50 : 60;
+    const isOverUnderTrade = output.recommendation?.product === "DIGITOVER" ||
+      output.recommendation?.product === "DIGITUNDER";
+    const qualityFloor = isOverUnderTrade ? 0 : (inRecoveryNow ? 50 : 60);
     if (output.qualityScore < qualityFloor) {
       logger.info({ symbol: bestMarket.symbol, quality: output.qualityScore, inRecovery: inRecoveryNow },
         `Quality floor not met (< ${qualityFloor}) — holding off this scan cycle`);
@@ -871,7 +873,10 @@ async function runAutonomousLoop() {
     // assumption breaks — directional price momentum skews which digits appear at
     // expiry. Executing digit recovery trades in a trend compounds debt rather
     // than recovering it. Hold and rescan in 8s when regime may have normalised.
-    if (recoveryEngine.isInRecovery() && effectiveContractType.startsWith("DIGIT")) {
+    if (recoveryEngine.isInRecovery() &&
+        effectiveContractType.startsWith("DIGIT") &&
+        effectiveContractType !== "DIGITOVER" &&
+        effectiveContractType !== "DIGITUNDER") {
       const regime = output.regime;
       if (regime === "trending_up" || regime === "trending_down") {
         logger.info({ symbol: bestMarket.symbol, regime, contractType: effectiveContractType },

@@ -151,8 +151,15 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   const bestBarrier = digitAgent.bestBarrier;
 
   // ── Stage 3.5: Duration Optimizer ─────────────────────────────────────────
+  const preferredDigitProduct = preferred.includes("DIGITOVER")
+    ? "DIGITOVER"
+    : preferred.includes("DIGITUNDER")
+      ? "DIGITUNDER"
+      : "DIGITOVER";
   const candidateProduct = wantDigit
-    ? (bestBarrier?.contractType ?? "DIGITOVER")
+    ? (bestBarrier && preferred.includes(bestBarrier.contractType)
+      ? bestBarrier.contractType
+      : preferredDigitProduct)
     : wantMatchDiff
       // Normal mode → DIGITDIFF (coldest digit, ~96% win); recovery → DIGITMATCH (9× payout).
       // Use whichever type is actually in the preferred list for this family scan.
@@ -248,7 +255,14 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   const bestEV = evAgent.bestEVResult;
 
   const effectiveContractType = bestEV?.product ?? candidateProduct;
-  const effectiveBarrier = bestEV?.barrier;
+  const configuredBarrier = effectiveContractType === "DIGITOVER"
+    ? ctx.recoveryBarrierOverride?.DIGITOVER ?? ctx.settings.normalOverDigit
+    : effectiveContractType === "DIGITUNDER"
+      ? ctx.recoveryBarrierOverride?.DIGITUNDER ?? ctx.settings.normalUnderDigit
+      : undefined;
+  // Keep the exact user-configured barrier attached even if a low-data scan has
+  // no EV result to supply one. Never substitute a neighboring barrier.
+  const effectiveBarrier = bestEV?.barrier ?? configuredBarrier;
 
   // ── Stage 5: Risk Intelligence + Execution Timing + Learning Agent (parallel) ─
   const currentDrawdown = Math.max(0, -ctx.daily.profit / (ctx.balance || 1));
