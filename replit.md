@@ -11,6 +11,7 @@ AI-driven trading platform connected to Deriv's WebSocket API with 8-agent auton
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required env: `DATABASE_URL` — Postgres connection string
+- Replit setup: the checked-in `.replit` configuration provisions the `postgresql-16` module, which supplies the development database environment used by the API server.
 - Required env: `DERIV_APP_ID` — alphanumeric Deriv app ID from app.deriv.com/apps (e.g. `33TQEuMW21nTbCZ7Hfb0q`). Also used as the OAuth2 `client_id`.
 
 ## Stack
