@@ -10,7 +10,7 @@ import { tickManager, DERIV_MARKETS, APP_ID } from "./lib/deriv";
 import { loadWinRatesFromDb } from "./lib/win-rate-store";
 import { seedFromDb as seedLearningAgent } from "./lib/agents/learning-agent";
 import { loadCalibrationCache } from "./lib/calibration";
-import { loadRecoveryStateFromDb, forceDayReset } from "./routes/ai";
+import { loadRecoveryStateFromDb, resumeEngineIfEnabled, forceDayReset } from "./routes/ai";
 import { registerMidnightCallback, scheduleNextMidnight } from "./lib/tz";
 import { loadFromDb as loadDynamicConfidence } from "./lib/agents/dynamic-confidence";
 import { pool, db, marketWinRatesTable } from "@workspace/db";
@@ -67,7 +67,11 @@ bootstrapDb().then(() => {
   loadPersistedToken().catch((err) => logger.warn({ err }, "Token load on startup failed"));
   loadWinRatesFromDb().catch((err) => logger.warn({ err }, "Win rate load on startup failed"));
   loadCalibrationCache().catch((err) => logger.warn({ err }, "Calibration load on startup failed"));
-  loadRecoveryStateFromDb().catch((err) => logger.warn({ err }, "Recovery state load on startup failed"));
+  // loadRecoveryStateFromDb MUST finish before resumeEngineIfEnabled so that the
+  // streak counter is accurate before the first autonomous loop scan fires.
+  loadRecoveryStateFromDb()
+    .then(() => resumeEngineIfEnabled())
+    .catch((err) => logger.warn({ err }, "Recovery state load / engine auto-resume on startup failed"));
   loadDynamicConfidence().catch((err) => logger.warn({ err }, "Dynamic confidence load on startup failed"));
   // Seed the learning agent's in-memory win-rate store from the database so the
   // AI has historical context immediately after a server restart rather than

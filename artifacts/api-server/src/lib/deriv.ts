@@ -1612,5 +1612,11 @@ export async function waitForContractResult(
     });
 
     ws.on("error", (err) => { finishError(err); });
+
+    // Without a "close" handler, a silent WebSocket drop (no error event) hangs
+    // the promise until overallTimeout fires ~47s later — keeping isLoopRunning=true
+    // the whole time and causing the loop to warn "previous iteration still running"
+    // on every 3s tick. Immediate rejection on unexpected close is much safer.
+    ws.on("close", () => { finishError(new Error("Settlement WebSocket closed before contract was confirmed")); });
   });
 }

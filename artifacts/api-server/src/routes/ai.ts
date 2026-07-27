@@ -50,6 +50,47 @@ export function forceDayReset(broadcast = true): void {
   logger.info("Midnight day-reset fired — all in-memory daily counters cleared");
 }
 
+/**
+ * Called once at startup. If the DB shows autonomous_enabled=true (i.e. the
+ * engine was running when the server last shut down), restart the loop
+ * automatically so a server restart doesn't silently strand the user in
+ * manual mode without any indication.
+ *
+ * Runs AFTER loadRecoveryStateFromDb so the streak counter is accurate
+ * before the first scan fires.
+ */
+export async function resumeEngineIfEnabled(): Promise<void> {
+  try {
+    const rows = await db.select().from(settingsTable).limit(1);
+    const s = rows[0];
+    if (!s?.autonomousEnabled) return;
+
+    // Do NOT resume into an active cooldown — the cooldown must have already
+    // expired (we lost the in-memory timer on restart). If the DB shows a
+    // streakLossCount that still equals or exceeds the limit, hold off and
+    // let the user manually restart once they're ready.
+    const limit = s.consecutiveLossLimit ?? 3;
+    const streak = recoveryEngine.getState().streakLossCount;
+    if (streak >= limit) {
+      logger.info({ streak, limit }, "Auto-resume skipped: streak count still at limit — engine will stay paused until manual restart");
+      // Reflect that the engine is stopped in the DB so the UI shows it correctly
+      await db.update(settingsTable).set({ autonomousEnabled: false });
+      return;
+    }
+
+    sessionLossCount = streak;
+    engineRunning    = true;
+    autonomousMode   = "autonomous";
+    stopReasons      = [];
+    nextScanIn       = loopIntervalSec;
+    groupCursors.fill(0);
+    autonomousTimer  = setTimeout(runAutonomousLoop, 3000); // 3s grace for ticks to warm up
+    logger.info({ streak, loopIntervalSec }, "Autonomous engine auto-resumed from DB state after server restart");
+  } catch (err) {
+    logger.warn({ err }, "Auto-resume engine check failed — engine stays in manual mode");
+  }
+}
+
 export async function loadRecoveryStateFromDb(): Promise<void> {
   try {
     const rows = await db.select().from(settingsTable).limit(1);
@@ -740,11 +781,38 @@ async function runAutonomousLoop() {
     currentMarket = bestMarket.symbol;
 
     // ── Guard: block if there is already an open/in-progress trade ───────────
+    // Stale "open" trades (> 2 minutes old) are auto-recovered as "error" so
+    // they never permanently freeze the loop. This handles the crash path where
+    // executeLiveTrade OR waitForContractResult threw after the DB insert but
+    // before the status update — leaving a ghost trade that blocked the engine
+    // indefinitely (the engine keeps finding the ghost every 3s and backing off).
+    const STALE_OPEN_MS = 2 * 60 * 1000; // 2 minutes — enough for any tick contract + settlement
     const openTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
     if (openTrades.length > 0) {
-      logger.info({ openCount: openTrades.length }, "Autonomous: open trade in progress — waiting before next scan");
-      scheduleNext(false);
-      return;
+      const now = Date.now();
+      const staleTrades = openTrades.filter(t => now - new Date(t.createdAt).getTime() > STALE_OPEN_MS);
+      if (staleTrades.length > 0) {
+        logger.warn(
+          { staleIds: staleTrades.map(t => t.id), ages: staleTrades.map(t => Math.round((now - new Date(t.createdAt).getTime()) / 1000) + "s") },
+          "Autonomous: auto-recovering stale open trades — settlement result unknown, marking as error",
+        );
+        await Promise.all(
+          staleTrades.map(t =>
+            db.update(tradesTable)
+              .set({ status: "error", profit: "0", payout: "0", closedAt: new Date(),
+                     agentReasoning: `${t.agentReasoning ?? ""} [AUTO-RECOVERED: trade left open after crash — settlement unknown]` })
+              .where(eq(tradesTable.id, t.id))
+              .catch(dbErr => logger.error({ dbErr, tradeId: t.id }, "Failed to auto-recover stale open trade")),
+          ),
+        );
+      }
+      const freshTrades = openTrades.filter(t => now - new Date(t.createdAt).getTime() <= STALE_OPEN_MS);
+      if (freshTrades.length > 0) {
+        logger.info({ openCount: freshTrades.length }, "Autonomous: open trade in progress — waiting before next scan");
+        scheduleNext(false);
+        return;
+      }
+      // All open trades were stale and have been cleared — fall through and continue
     }
 
     // ── Guard: require minimum time since last trade settled ─────────────────
@@ -1030,10 +1098,20 @@ async function runAutonomousLoop() {
         // Marking as "lost" would create a false loss that corrupts consecutive-loss count
         // and daily P&L, causing the engine to falsely trigger loss-streak / loss-limit stops
         // even when the actual Deriv journal shows wins.
-        await db.update(tradesTable)
-          .set({ status: "error", profit: "0", payout: "0", closedAt: new Date(),
-                 agentReasoning: `${output.reasoning} [EXECUTION FAILED: ${errMsg}]` })
-          .where(eq(tradesTable.id, openTrade.id));
+        //
+        // IMPORTANT: wrap this DB update in its own try/catch. If it throws (DB hiccup,
+        // network drop), the exception must NOT propagate to the outer catch — that would
+        // leave the trade stuck as "open" permanently and freeze the loop (the stale-trade
+        // auto-recovery above handles it if that happens, but preventing it is better).
+        try {
+          await db.update(tradesTable)
+            .set({ status: "error", profit: "0", payout: "0", closedAt: new Date(),
+                   agentReasoning: `${output.reasoning} [EXECUTION FAILED: ${errMsg}]` })
+            .where(eq(tradesTable.id, openTrade.id));
+        } catch (dbErr) {
+          logger.error({ dbErr, tradeId: openTrade.id },
+            "Failed to mark live trade as error in DB — stale-open guard will auto-recover on next iteration");
+        }
         broadcastSSE("trade_completed", { id: openTrade.id, symbol: bestMarket.symbol, won: false,
           profit: "0", contract: effectiveContractType, error: errMsg });
         journalManager.forceRefresh();
