@@ -149,14 +149,20 @@ export function runRiskIntelligenceAgent(
 
 function computeRecommendedStake(ctx: ScanContext, kf: number, _winP: number): number {
   const { balance, settings } = ctx;
-  // Guard: NaN / zero maxRiskPerTrade falls back to 1% to prevent $0.35 floor traps
-  const riskPct = Number(settings.maxRiskPerTrade);
-  const effectiveRiskPct = (!isFinite(riskPct) || riskPct <= 0) ? 1 : riskPct;
-  const maxRisk = effectiveRiskPct / 100;
   const riskMult = settings.riskProfile === "conservative" ? 0.4
     : settings.riskProfile === "aggressive" ? 1.2 : 0.7;
 
-  const settingsBased = balance * maxRisk * riskMult;
+  let settingsBased: number;
+  if (settings.riskAmountType === "fixed") {
+    // Fixed mode: use the exact dollar amount the user set
+    const fixedAmount = Number(settings.riskAmountValue);
+    settingsBased = (!isFinite(fixedAmount) || fixedAmount <= 0) ? 1 : fixedAmount * riskMult;
+  } else {
+    // Percentage mode: riskAmountValue holds the % figure — do NOT use maxRiskPerTrade
+    const riskPct = Number(settings.riskAmountValue);
+    const effectiveRiskPct = (!isFinite(riskPct) || riskPct <= 0) ? 1 : riskPct;
+    settingsBased = balance * (effectiveRiskPct / 100) * riskMult;
+  }
   const kellyBased    = balance * kf;
 
   // When Kelly fraction is positive AND large enough to produce a meaningful stake,

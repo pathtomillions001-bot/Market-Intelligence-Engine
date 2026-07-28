@@ -294,7 +294,9 @@ export function computeStake(ctx: ScanContext): number {
     // riskProfile still scales fixed stakes (conservative trades smaller, aggressive larger)
     rawStake = rawStake * riskMult;
   } else {
-    const riskPct = Number(settings.maxRiskPerTrade);
+    // Percentage mode — riskAmountValue holds the % figure (e.g. 0.5 = 0.5% of balance).
+    // Do NOT use maxRiskPerTrade: that column is not updated by the settings form.
+    const riskPct = Number(settings.riskAmountValue);
     const effectiveRiskPct = (!isFinite(riskPct) || riskPct <= 0) ? 1 : riskPct;
     rawStake = balance * (effectiveRiskPct / 100) * riskMult;
   }

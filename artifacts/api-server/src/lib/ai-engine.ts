@@ -202,9 +202,12 @@ export function analyzeMarket(
     safeStake = (!isFinite(fixedAmount) || fixedAmount <= 0) ? 1 : fixedAmount * profMult;
     stakingDesc = `$${fixedAmount.toFixed(2)} fixed × ${settings.riskProfile}`;
   } else {
-    const maxStake = balance * (settings.maxRiskPerTrade / 100);
+    // Percentage mode — riskAmountValue holds the % figure set by the user.
+    // Do NOT use maxRiskPerTrade: that column is not updated by the settings form.
+    const riskPct = Number((settings as any).riskAmountValue ?? settings.maxRiskPerTrade);
+    const maxStake = balance * (riskPct / 100);
     safeStake = Math.min(maxStake * profMult, balance * 0.05);
-    stakingDesc = `${settings.maxRiskPerTrade}% × ${settings.riskProfile}`;
+    stakingDesc = `${riskPct}% × ${settings.riskProfile}`;
   }
   if (settings.maxTradeStake) safeStake = Math.min(safeStake, settings.maxTradeStake);
   safeStake = Math.max(0.35, safeStake);
