@@ -84,7 +84,6 @@ export default function Settings() {
     riskProfile: "moderate" as "conservative" | "moderate" | "aggressive",
     riskAmountType: "fixed" as "fixed" | "percentage",
     riskAmountValue: 1,
-    maxRiskPerTrade: 2,
     dailyTarget: 50,
     dailyLossLimit: 30,
     maxDrawdown: 10,
@@ -118,7 +117,6 @@ export default function Settings() {
         riskProfile: settings.riskProfile as any,
         riskAmountType: ((settings as any).riskAmountType ?? "fixed") as "fixed" | "percentage",
         riskAmountValue: (settings as any).riskAmountValue ?? 1,
-        maxRiskPerTrade: settings.maxRiskPerTrade,
         dailyTarget: settings.dailyTarget,
         dailyLossLimit: settings.dailyLossLimit,
         maxDrawdown: settings.maxDrawdown,
@@ -274,9 +272,6 @@ export default function Settings() {
               step={form.riskAmountType === "fixed" ? 0.5 : 0.1}
               suffix={form.riskAmountType === "fixed" ? "$" : "%"}
             />
-          </SettingRow>
-          <SettingRow label="Max Risk Per Trade" description="% of balance — absolute safety ceiling regardless of risk amount setting.">
-            <NumInput value={form.maxRiskPerTrade} onChange={(v) => set("maxRiskPerTrade", v)} min={0.1} max={10} step={0.1} suffix="%" />
           </SettingRow>
           <SettingRow label="Max Stake Per Trade" description="Hard cap per trade regardless of balance.">
             <NumInput value={form.maxTradeStake} onChange={(v) => set("maxTradeStake", v)} min={0.35} max={50000} step={0.5} suffix="$" />
