@@ -5,7 +5,7 @@ import { Activity, BarChart2, Briefcase, LayoutDashboard, Settings as SettingsIc
 import { Switch } from "./ui/switch";
 import { Label } from "./ui/label";
 import { motion, AnimatePresence } from "framer-motion";
-import { SpeedAIFab } from "./speed-ai-fab";
+import { NeuroSonicFabButton } from "./neurosonic-fab";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -150,8 +150,8 @@ export function Layout({ children }: { children: ReactNode }) {
         </main>
       </div>
 
-      {/* SpeedAI floating engine — available on every page */}
-      <SpeedAIFab />
+      {/* NeuroSonic floating engine — available on every page */}
+      <NeuroSonicFabButton />
     </div>
   );
 }
