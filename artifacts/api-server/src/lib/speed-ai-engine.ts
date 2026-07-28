@@ -282,11 +282,23 @@ function pickMatchDiffBarrier(freq: number[], contractType: "DIGITMATCH" | "DIGI
   }
 }
 
+/**
+ * Extract OVER and UNDER barriers from the barriers array.
+ * Convention (set by familyToContracts): barriers[0] = OVER barrier, barriers[1] = UNDER barrier.
+ * The user's exact choice is ALWAYS used — no auto-picking or substitution.
+ */
+function extractBarriers(barriers: number[]): { overBarrier: number; underBarrier: number } {
+  const overBarrier  = barriers.length > 0 ? barriers[0] : 1;
+  const underBarrier = barriers.length > 1 ? barriers[1] : barriers.length > 0 ? barriers[0] : 8;
+  return { overBarrier, underBarrier };
+}
+
 export async function analyzeMarketsForStrategy(
   contractTypes: SpeedContractType[],
   barriers: number[],
 ): Promise<MarketScore[]> {
   const scored: MarketScore[] = [];
+  const { overBarrier, underBarrier } = extractBarriers(barriers);
 
   for (const market of DERIV_MARKETS) {
     if (!market.digitEnabled && contractTypes.some(ct => ct.startsWith("DIGIT"))) continue;
@@ -294,12 +306,14 @@ export async function analyzeMarketsForStrategy(
     const prices = tickManager.getTicks(market.symbol, 100);
 
     for (const ct of contractTypes) {
-      if (ct === "DIGITOVER" || ct === "DIGITUNDER") {
-        const barriersToTry = barriers.length > 0 ? barriers : (ct === "DIGITOVER" ? [1, 2] : [7, 8]);
-        for (const b of barriersToTry) {
-          const s = scoreMarket(market.symbol, market.displayName, ct, b, digits, prices);
-          if (s) scored.push(s);
-        }
+      if (ct === "DIGITOVER") {
+        // Always use the exact OVER barrier the user set — never auto-pick
+        const s = scoreMarket(market.symbol, market.displayName, ct, overBarrier, digits, prices);
+        if (s) scored.push(s);
+      } else if (ct === "DIGITUNDER") {
+        // Always use the exact UNDER barrier the user set — never auto-pick
+        const s = scoreMarket(market.symbol, market.displayName, ct, underBarrier, digits, prices);
+        if (s) scored.push(s);
       } else if (ct === "DIGITMATCH" || ct === "DIGITDIFF") {
         const freq = digitFrequency(digits);
         const b = pickMatchDiffBarrier(freq, ct);
@@ -317,6 +331,7 @@ export async function analyzeMarketsForStrategy(
 
 /**
  * Score a single market symbol across the given contract types and return the best setup.
+ * Barriers are the exact values the user configured — never substituted or auto-picked for OVER/UNDER.
  */
 export async function scoreSingleMarket(
   symbol: string,
@@ -327,14 +342,15 @@ export async function scoreSingleMarket(
   const digits = tickManager.getDigits(symbol, 200);
   const prices = tickManager.getTicks(symbol, 100);
   const scored: MarketScore[] = [];
+  const { overBarrier, underBarrier } = extractBarriers(barriers);
 
   for (const ct of contractTypes) {
-    if (ct === "DIGITOVER" || ct === "DIGITUNDER") {
-      const barriersToTry = barriers.length > 0 ? barriers : (ct === "DIGITOVER" ? [1, 2] : [7, 8]);
-      for (const b of barriersToTry) {
-        const s = scoreMarket(symbol, displayName, ct, b, digits, prices);
-        if (s) scored.push(s);
-      }
+    if (ct === "DIGITOVER") {
+      const s = scoreMarket(symbol, displayName, ct, overBarrier, digits, prices);
+      if (s) scored.push(s);
+    } else if (ct === "DIGITUNDER") {
+      const s = scoreMarket(symbol, displayName, ct, underBarrier, digits, prices);
+      if (s) scored.push(s);
     } else if (ct === "DIGITMATCH" || ct === "DIGITDIFF") {
       const freq = digitFrequency(digits);
       const b = pickMatchDiffBarrier(freq, ct);
@@ -388,6 +404,10 @@ export async function scanBestMarket(config: SpeedAIConfig): Promise<ScanResult>
     );
 
     scanned++;
+
+    // Deliberate pause per market so the scan feels real-time to the user
+    // and each market's SSE event reaches the frontend before the next one fires.
+    await sleep(280);
 
     if (!normalBest && !recoveryBest) continue;
 

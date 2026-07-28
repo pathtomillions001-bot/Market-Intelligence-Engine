@@ -591,118 +591,164 @@ export function SpeedAIFab() {
 
               {/* ── STEP: SCANNING ── */}
               {step === "scanning" && (
-                <div className="p-4 space-y-3">
-                  {/* Header + progress count */}
+                <div className="p-4 space-y-4">
+
+                  {/* Header row */}
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <div className="w-5 h-5 rounded-full bg-cyan-500/15 border border-cyan-500/40 flex items-center justify-center">
+                      <motion.div
+                        className="w-5 h-5 rounded-full bg-cyan-500/15 border border-cyan-500/40 flex items-center justify-center"
+                        animate={{ boxShadow: ["0 0 0px rgba(6,182,212,0)", "0 0 8px rgba(6,182,212,0.5)", "0 0 0px rgba(6,182,212,0)"] }}
+                        transition={{ duration: 2, repeat: Infinity }}
+                      >
                         <Loader2 className="w-3 h-3 text-cyan-400 animate-spin" />
+                      </motion.div>
+                      <div>
+                        <p className="text-xs font-bold text-white tracking-wide leading-none">Neural Scan</p>
+                        <p className="text-[9px] text-cyan-400/50 mt-0.5">Scoring normal + recovery per market</p>
                       </div>
-                      <span className="text-xs font-bold text-white tracking-wide">Neural Scan</span>
                     </div>
-                    <span className="text-[11px] font-mono text-cyan-400/80">
-                      {scanProgress.scanned} <span className="text-muted-foreground/50">/</span> {scanProgress.total || 17}
-                    </span>
+                    <div className="text-right">
+                      <span className="text-sm font-bold font-mono text-cyan-400">
+                        {scanProgress.scanned}
+                      </span>
+                      <span className="text-xs text-muted-foreground/40 font-mono"> / {scanProgress.total || 17}</span>
+                    </div>
                   </div>
 
                   {/* Progress bar */}
-                  <div className="h-1 bg-white/5 rounded-full overflow-hidden">
-                    <motion.div
-                      className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full"
-                      animate={{ width: `${(scanProgress.scanned / (scanProgress.total || 17)) * 100}%` }}
-                      transition={{ duration: 0.4, ease: "easeOut" }}
-                    />
+                  <div className="space-y-1.5">
+                    <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+                      <motion.div
+                        className="h-full rounded-full"
+                        style={{ background: "linear-gradient(90deg, #0891b2, #06b6d4, #67e8f9)" }}
+                        animate={{ width: `${(scanProgress.scanned / (scanProgress.total || 17)) * 100}%` }}
+                        transition={{ duration: 0.35, ease: "easeOut" }}
+                      />
+                    </div>
                   </div>
 
-                  {/* Currently-analyzing hero card */}
-                  <div className="relative rounded-xl border overflow-hidden min-h-[56px] flex items-center px-3 py-2.5 gap-3
-                    bg-cyan-500/5 border-cyan-500/25">
-                    {/* Animated shimmer sweep */}
+                  {/* Currently-analyzing card */}
+                  <div className="relative rounded-xl border overflow-hidden flex items-center gap-3 px-3 py-3 bg-cyan-950/40 border-cyan-500/20">
                     <motion.div
-                      className="absolute inset-0 bg-gradient-to-r from-transparent via-cyan-400/8 to-transparent pointer-events-none"
-                      animate={{ x: ["-110%", "210%"] }}
-                      transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+                      className="absolute inset-0 bg-gradient-to-r from-transparent via-cyan-400/6 to-transparent pointer-events-none"
+                      animate={{ x: ["-120%", "220%"] }}
+                      transition={{ duration: 1.8, repeat: Infinity, ease: "linear" }}
                     />
+                    {/* Sonar ring */}
                     <div className="relative w-8 h-8 flex-shrink-0">
                       <motion.span
-                        className="absolute inset-0 rounded-full border border-cyan-500/40"
-                        animate={{ scale: [1, 1.45], opacity: [0.6, 0] }}
-                        transition={{ duration: 1.1, repeat: Infinity, ease: "easeOut" }}
+                        className="absolute inset-0 rounded-full border border-cyan-400/30"
+                        animate={{ scale: [1, 1.55], opacity: [0.5, 0] }}
+                        transition={{ duration: 1.2, repeat: Infinity, ease: "easeOut" }}
                       />
-                      <div className="absolute inset-0 rounded-full bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center">
+                      <motion.span
+                        className="absolute inset-0 rounded-full border border-cyan-400/20"
+                        animate={{ scale: [1, 1.55], opacity: [0.4, 0] }}
+                        transition={{ duration: 1.2, repeat: Infinity, ease: "easeOut", delay: 0.4 }}
+                      />
+                      <div className="absolute inset-0 rounded-full bg-cyan-500/10 border border-cyan-500/25 flex items-center justify-center">
                         <ScanSearch className="w-3.5 h-3.5 text-cyan-400" />
                       </div>
                     </div>
                     <div className="relative flex-1 min-w-0">
-                      <p className="text-[9px] uppercase tracking-widest text-cyan-400/60 mb-0.5">Analyzing</p>
-                      <p className="text-xs font-bold text-white truncate">
-                        {scanProgress.scanning ?? "Preparing scan…"}
-                      </p>
+                      <AnimatePresence mode="wait">
+                        <motion.div
+                          key={scanProgress.scanning ?? "prep"}
+                          initial={{ opacity: 0, y: 4 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -4 }}
+                          transition={{ duration: 0.2 }}
+                        >
+                          <p className="text-[9px] uppercase tracking-widest text-cyan-400/50 mb-0.5">Now analyzing</p>
+                          <p className="text-sm font-bold text-white truncate">
+                            {scanProgress.scanning ?? "Preparing scan…"}
+                          </p>
+                        </motion.div>
+                      </AnimatePresence>
                     </div>
-                    {/* Pulsing wave dots */}
-                    <div className="relative flex items-center gap-0.5 flex-shrink-0">
-                      {[0, 1, 2, 3].map(i => (
+                    <div className="relative flex items-end gap-0.5 h-5 flex-shrink-0">
+                      {[0.4, 0.7, 1, 0.7, 0.4].map((h, i) => (
                         <motion.span
                           key={i}
-                          className="w-1 h-1 rounded-full bg-cyan-400"
-                          animate={{ opacity: [0.2, 1, 0.2], scaleY: [0.6, 1.4, 0.6] }}
-                          transition={{ duration: 0.7, repeat: Infinity, delay: i * 0.12, ease: "easeInOut" }}
+                          className="w-0.5 rounded-full bg-cyan-400"
+                          animate={{ scaleY: [h, 1, h] }}
+                          transition={{ duration: 0.6, repeat: Infinity, delay: i * 0.1, ease: "easeInOut" }}
+                          style={{ height: "100%", transformOrigin: "bottom" }}
                         />
                       ))}
                     </div>
                   </div>
 
-                  {/* Compact 17-market dot strip */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <p className="text-[9px] uppercase tracking-widest text-muted-foreground/40">Markets scanned</p>
-                      <p className="text-[9px] text-muted-foreground/40">N+R scored</p>
-                    </div>
-                    <div className="flex flex-wrap gap-x-1 gap-y-2 justify-between">
-                      {ALL_SCAN_MARKETS.map((m, idx) => {
-                        const result = scanProgress.results.find(r => r.symbol === m.symbol);
-                        const isActive = scanProgress.scanningSymbol === m.symbol;
-                        const dotColor = result
-                          ? result.score >= 60 ? "#22c55e"
-                          : result.score >= 54 ? "#06b6d4"
-                          : result.score >= 48 ? "#f59e0b"
-                          : "#ef4444"
-                          : isActive ? "#06b6d4" : undefined;
-                        return (
-                          <div key={m.symbol} className="flex flex-col items-center gap-0.5" style={{ width: "calc(100% / 9 - 4px)", minWidth: 26 }}>
-                            <motion.div
-                              className="w-4 h-4 rounded-full border flex items-center justify-center"
-                              style={{
-                                backgroundColor: dotColor ? `${dotColor}25` : "rgba(255,255,255,0.04)",
-                                borderColor: dotColor ?? "rgba(255,255,255,0.08)",
-                              }}
-                              animate={isActive ? { scale: [1, 1.25, 1], opacity: [0.7, 1, 0.7] } : {}}
-                              transition={{ duration: 0.75, repeat: Infinity }}
-                            >
-                              {result && (
-                                <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: dotColor }} />
-                              )}
-                              {isActive && !result && (
+                  {/* Live results list — appears as markets complete */}
+                  {scanProgress.results.length > 0 && (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between px-0.5">
+                        <p className="text-[9px] uppercase tracking-wider text-muted-foreground/40">Live rankings</p>
+                        <p className="text-[9px] text-muted-foreground/30">score / 100</p>
+                      </div>
+                      <div className="space-y-1 max-h-40 overflow-y-auto pr-0.5">
+                        <AnimatePresence initial={false}>
+                          {[...scanProgress.results]
+                            .sort((a, b) => b.score - a.score)
+                            .map((r, i) => {
+                              const market = ALL_SCAN_MARKETS.find(m => m.symbol === r.symbol);
+                              const isLeading = i === 0;
+                              const sc = r.score;
+                              const color = sc >= 60 ? "#22c55e" : sc >= 54 ? "#06b6d4" : sc >= 48 ? "#f59e0b" : "#94a3b8";
+                              return (
                                 <motion.div
-                                  className="w-1.5 h-1.5 rounded-full bg-cyan-400"
-                                  animate={{ opacity: [0.3, 1, 0.3] }}
-                                  transition={{ duration: 0.5, repeat: Infinity }}
-                                />
-                              )}
-                            </motion.div>
-                            <span className="text-[7px] font-mono leading-none text-center" style={{ color: isActive ? "#67e8f9" : result ? "rgba(255,255,255,0.45)" : "rgba(255,255,255,0.18)" }}>
-                              {m.short}
-                            </span>
-                            {result && (
-                              <span className="text-[7px] font-mono font-bold leading-none" style={{ color: dotColor }}>
-                                {result.score.toFixed(0)}
-                              </span>
-                            )}
-                          </div>
-                        );
-                      })}
+                                  key={r.symbol}
+                                  layout
+                                  initial={{ opacity: 0, x: -12 }}
+                                  animate={{ opacity: 1, x: 0 }}
+                                  transition={{ duration: 0.25, ease: "easeOut" }}
+                                  className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg ${
+                                    isLeading
+                                      ? "bg-cyan-500/8 border border-cyan-500/20"
+                                      : "bg-white/3 border border-transparent"
+                                  }`}
+                                >
+                                  <span className="text-[10px] font-mono w-4 text-muted-foreground/30 flex-shrink-0">
+                                    {i + 1}
+                                  </span>
+                                  <span className={`text-xs font-medium flex-1 truncate ${isLeading ? "text-white" : "text-white/60"}`}>
+                                    {market?.short ?? r.symbol}
+                                  </span>
+                                  {/* N/R score pills */}
+                                  {(r.normalScore !== undefined || r.recoveryScore !== undefined) && (
+                                    <div className="flex gap-1 flex-shrink-0">
+                                      {r.normalScore !== undefined && (
+                                        <span className="text-[8px] font-mono px-1 rounded bg-white/5 text-white/40">
+                                          N{r.normalScore.toFixed(0)}
+                                        </span>
+                                      )}
+                                      {r.recoveryScore !== undefined && (
+                                        <span className="text-[8px] font-mono px-1 rounded bg-amber-500/10 text-amber-400/60">
+                                          R{r.recoveryScore.toFixed(0)}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                  <span className="text-xs font-bold font-mono flex-shrink-0" style={{ color }}>
+                                    {sc.toFixed(0)}
+                                  </span>
+                                  {isLeading && (
+                                    <motion.span
+                                      className="text-[8px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-400 font-bold flex-shrink-0"
+                                      animate={{ opacity: [0.6, 1, 0.6] }}
+                                      transition={{ duration: 1.5, repeat: Infinity }}
+                                    >
+                                      BEST
+                                    </motion.span>
+                                  )}
+                                </motion.div>
+                              );
+                            })}
+                        </AnimatePresence>
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
               )}
 
