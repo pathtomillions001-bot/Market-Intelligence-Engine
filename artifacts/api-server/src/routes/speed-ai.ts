@@ -114,6 +114,7 @@ router.post("/start", async (req, res): Promise<void> => {
     recoveryMultiplier:    parsed.data.recoveryMultiplier,
     recoveryMethod:        parsed.data.recoveryMethod,
     maxRecoverySteps:      parsed.data.maxRecoverySteps,
+    lockedSymbol:          parsed.data.lockedSymbol,
   };
 
   const result = await startSession(config);

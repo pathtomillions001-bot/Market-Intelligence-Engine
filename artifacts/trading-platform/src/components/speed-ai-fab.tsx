@@ -91,50 +91,26 @@ interface SessionStatus {
   topMarkets?: MarketScore[];
 }
 
-// ── Scan market groups (for progress visualization) ──────────────────────────
+// ── Flat market list for progress dot strip ───────────────────────────────────
 
-const SCAN_MARKET_GROUPS: { label: string; col: number; markets: { symbol: string; short: string }[] }[] = [
-  {
-    label: "Volatility",
-    col: 0,
-    markets: [
-      { symbol: "R_10",   short: "V10"  },
-      { symbol: "R_25",   short: "V25"  },
-      { symbol: "R_50",   short: "V50"  },
-      { symbol: "R_75",   short: "V75"  },
-      { symbol: "R_100",  short: "V100" },
-    ],
-  },
-  {
-    label: "Volatility 1s",
-    col: 1,
-    markets: [
-      { symbol: "1HZ10V",  short: "V10" },
-      { symbol: "1HZ25V",  short: "V25" },
-      { symbol: "1HZ50V",  short: "V50" },
-      { symbol: "1HZ75V",  short: "V75" },
-      { symbol: "1HZ100V", short: "V100" },
-    ],
-  },
-  {
-    label: "Jump",
-    col: 0,
-    markets: [
-      { symbol: "JD10",  short: "J10"  },
-      { symbol: "JD25",  short: "J25"  },
-      { symbol: "JD50",  short: "J50"  },
-      { symbol: "JD75",  short: "J75"  },
-      { symbol: "JD100", short: "J100" },
-    ],
-  },
-  {
-    label: "Indices",
-    col: 1,
-    markets: [
-      { symbol: "RDBULL", short: "Bull" },
-      { symbol: "RDBEAR", short: "Bear" },
-    ],
-  },
+const ALL_SCAN_MARKETS: { symbol: string; short: string; group: string }[] = [
+  { symbol: "R_10",    short: "V10",  group: "V"  },
+  { symbol: "R_25",    short: "V25",  group: "V"  },
+  { symbol: "R_50",    short: "V50",  group: "V"  },
+  { symbol: "R_75",    short: "V75",  group: "V"  },
+  { symbol: "R_100",   short: "V100", group: "V"  },
+  { symbol: "1HZ10V",  short: "1s10", group: "1s" },
+  { symbol: "1HZ25V",  short: "1s25", group: "1s" },
+  { symbol: "1HZ50V",  short: "1s50", group: "1s" },
+  { symbol: "1HZ75V",  short: "1s75", group: "1s" },
+  { symbol: "1HZ100V", short: "1s1",  group: "1s" },
+  { symbol: "JD10",    short: "J10",  group: "J"  },
+  { symbol: "JD25",    short: "J25",  group: "J"  },
+  { symbol: "JD50",    short: "J50",  group: "J"  },
+  { symbol: "JD75",    short: "J75",  group: "J"  },
+  { symbol: "JD100",   short: "J100", group: "J"  },
+  { symbol: "RDBULL",  short: "Bull", group: "I"  },
+  { symbol: "RDBEAR",  short: "Bear", group: "I"  },
 ];
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -207,11 +183,9 @@ function NumInput({ label, value, onChange, min, max, step = 1, suffix }: {
   );
 }
 
-function FamilySelector({ label, value, onChange, families, showBarriers, overBarrier, underBarrier, onOverBarrier, onUnderBarrier }: {
+function FamilySelector({ label, value, onChange, families }: {
   label: string; value: ContractFamily; onChange: (v: ContractFamily) => void;
   families: { id: ContractFamily; label: string; icon: React.ReactNode; desc: string }[];
-  showBarriers: boolean; overBarrier: number; underBarrier: number;
-  onOverBarrier: (v: number) => void; onUnderBarrier: (v: number) => void;
 }) {
   return (
     <div className="space-y-2">
@@ -232,36 +206,45 @@ function FamilySelector({ label, value, onChange, families, showBarriers, overBa
           </button>
         ))}
       </div>
-      {showBarriers && value === "overUnder" && (
-        <div className="grid grid-cols-2 gap-2 pt-1">
-          <div>
-            <p className="text-[10px] text-muted-foreground mb-1">OVER barrier</p>
-            <Select value={String(overBarrier)} onValueChange={v => onOverBarrier(Number(v))}>
-              <SelectTrigger className="h-7 text-xs bg-black/30 border-white/10">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {[0,1,2,3,4,5,6,7,8].map(b => (
-                  <SelectItem key={b} value={String(b)}>OVER {b} ({(100*(9-b)/10).toFixed(0)}%)</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <p className="text-[10px] text-muted-foreground mb-1">UNDER barrier</p>
-            <Select value={String(underBarrier)} onValueChange={v => onUnderBarrier(Number(v))}>
-              <SelectTrigger className="h-7 text-xs bg-black/30 border-white/10">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {[1,2,3,4,5,6,7,8,9].map(b => (
-                  <SelectItem key={b} value={String(b)}>UNDER {b} ({(100*b/10).toFixed(0)}%)</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+    </div>
+  );
+}
+
+function BarrierRow({ label, overBarrier, underBarrier, onOverBarrier, onUnderBarrier }: {
+  label: string; overBarrier: number; underBarrier: number;
+  onOverBarrier: (v: number) => void; onUnderBarrier: (v: number) => void;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <p className="text-[10px] text-muted-foreground/60">{label}</p>
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <p className="text-[10px] text-muted-foreground mb-1">OVER digit</p>
+          <Select value={String(overBarrier)} onValueChange={v => onOverBarrier(Number(v))}>
+            <SelectTrigger className="h-7 text-xs bg-black/30 border-white/10">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {[0,1,2,3,4,5,6,7,8].map(b => (
+                <SelectItem key={b} value={String(b)}>OVER {b} · {(100*(9-b)/10).toFixed(0)}%</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
-      )}
+        <div>
+          <p className="text-[10px] text-muted-foreground mb-1">UNDER digit</p>
+          <Select value={String(underBarrier)} onValueChange={v => onUnderBarrier(Number(v))}>
+            <SelectTrigger className="h-7 text-xs bg-black/30 border-white/10">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {[1,2,3,4,5,6,7,8,9].map(b => (
+                <SelectItem key={b} value={String(b)}>UNDER {b} · {(100*b/10).toFixed(0)}%</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
     </div>
   );
 }
@@ -511,11 +494,6 @@ export function SpeedAIFab() {
                     value={config.normalFamily}
                     onChange={v => set("normalFamily", v)}
                     families={NORMAL_FAMILIES}
-                    showBarriers
-                    overBarrier={config.normalOverBarrier}
-                    underBarrier={config.normalUnderBarrier}
-                    onOverBarrier={v => set("normalOverBarrier", v)}
-                    onUnderBarrier={v => set("normalUnderBarrier", v)}
                   />
 
                   <FamilySelector
@@ -523,12 +501,27 @@ export function SpeedAIFab() {
                     value={config.recoveryFamily}
                     onChange={v => set("recoveryFamily", v)}
                     families={RECOVERY_FAMILIES}
-                    showBarriers
-                    overBarrier={config.recoveryOverBarrier}
-                    underBarrier={config.recoveryUnderBarrier}
-                    onOverBarrier={v => set("recoveryOverBarrier", v)}
-                    onUnderBarrier={v => set("recoveryUnderBarrier", v)}
                   />
+
+                  {/* Digit Barriers — always visible so user can tune them regardless of family */}
+                  <div className="space-y-3 bg-white/3 rounded-xl p-3 border border-white/5">
+                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Digit Barriers</p>
+                    <BarrierRow
+                      label="Normal trades"
+                      overBarrier={config.normalOverBarrier}
+                      underBarrier={config.normalUnderBarrier}
+                      onOverBarrier={v => set("normalOverBarrier", v)}
+                      onUnderBarrier={v => set("normalUnderBarrier", v)}
+                    />
+                    <div className="border-t border-white/5" />
+                    <BarrierRow
+                      label="Recovery trades"
+                      overBarrier={config.recoveryOverBarrier}
+                      underBarrier={config.recoveryUnderBarrier}
+                      onOverBarrier={v => set("recoveryOverBarrier", v)}
+                      onUnderBarrier={v => set("recoveryUnderBarrier", v)}
+                    />
+                  </div>
 
                   {/* Risk settings */}
                   <div className="space-y-2 pt-1">
@@ -659,57 +652,57 @@ export function SpeedAIFab() {
                     </div>
                   </div>
 
-                  {/* Market groups — 2-column layout */}
-                  <div className="grid grid-cols-2 gap-x-3 gap-y-3">
-                    {SCAN_MARKET_GROUPS.map(group => (
-                      <div key={group.label} className="space-y-1">
-                        <p className="text-[8.5px] uppercase tracking-widest text-muted-foreground/40 font-semibold">
-                          {group.label}
-                        </p>
-                        {group.markets.map(m => {
-                          const result = scanProgress.results.find(r => r.symbol === m.symbol);
-                          const isActive = scanProgress.scanningSymbol === m.symbol;
-                          return (
+                  {/* Compact 17-market dot strip */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[9px] uppercase tracking-widest text-muted-foreground/40">Markets scanned</p>
+                      <p className="text-[9px] text-muted-foreground/40">N+R scored</p>
+                    </div>
+                    <div className="flex flex-wrap gap-x-1 gap-y-2 justify-between">
+                      {ALL_SCAN_MARKETS.map((m, idx) => {
+                        const result = scanProgress.results.find(r => r.symbol === m.symbol);
+                        const isActive = scanProgress.scanningSymbol === m.symbol;
+                        const dotColor = result
+                          ? result.score >= 60 ? "#22c55e"
+                          : result.score >= 54 ? "#06b6d4"
+                          : result.score >= 48 ? "#f59e0b"
+                          : "#ef4444"
+                          : isActive ? "#06b6d4" : undefined;
+                        return (
+                          <div key={m.symbol} className="flex flex-col items-center gap-0.5" style={{ width: "calc(100% / 9 - 4px)", minWidth: 26 }}>
                             <motion.div
-                              key={m.symbol}
-                              className={`flex items-center justify-between px-2 py-1 rounded-md transition-colors ${
-                                isActive
-                                  ? "bg-cyan-500/15 border border-cyan-500/35"
-                                  : "bg-white/3 border border-transparent"
-                              }`}
-                              animate={isActive ? { boxShadow: ["0 0 0px rgba(6,182,212,0)", "0 0 6px rgba(6,182,212,0.3)", "0 0 0px rgba(6,182,212,0)"] } : {}}
-                              transition={{ duration: 1.2, repeat: Infinity }}
+                              className="w-4 h-4 rounded-full border flex items-center justify-center"
+                              style={{
+                                backgroundColor: dotColor ? `${dotColor}25` : "rgba(255,255,255,0.04)",
+                                borderColor: dotColor ?? "rgba(255,255,255,0.08)",
+                              }}
+                              animate={isActive ? { scale: [1, 1.25, 1], opacity: [0.7, 1, 0.7] } : {}}
+                              transition={{ duration: 0.75, repeat: Infinity }}
                             >
-                              <span className={`text-[10px] font-mono font-semibold ${
-                                isActive ? "text-cyan-300" : result ? "text-white/70" : "text-muted-foreground/40"
-                              }`}>
-                                {m.short}
-                              </span>
-                              {result ? (
-                                <span className={`text-[9px] font-bold font-mono ${scoreColor(result.score)}`}>
-                                  {result.score.toFixed(0)}
-                                </span>
-                              ) : isActive ? (
-                                <motion.span
-                                  className="text-[9px] text-cyan-400 font-mono"
+                              {result && (
+                                <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: dotColor }} />
+                              )}
+                              {isActive && !result && (
+                                <motion.div
+                                  className="w-1.5 h-1.5 rounded-full bg-cyan-400"
                                   animate={{ opacity: [0.3, 1, 0.3] }}
                                   transition={{ duration: 0.5, repeat: Infinity }}
-                                >
-                                  ···
-                                </motion.span>
-                              ) : (
-                                <span className="text-[9px] text-muted-foreground/25 font-mono">—</span>
+                                />
                               )}
                             </motion.div>
-                          );
-                        })}
-                      </div>
-                    ))}
+                            <span className="text-[7px] font-mono leading-none text-center" style={{ color: isActive ? "#67e8f9" : result ? "rgba(255,255,255,0.45)" : "rgba(255,255,255,0.18)" }}>
+                              {m.short}
+                            </span>
+                            {result && (
+                              <span className="text-[7px] font-mono font-bold leading-none" style={{ color: dotColor }}>
+                                {result.score.toFixed(0)}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
-
-                  <p className="text-[9px] text-center text-muted-foreground/40">
-                    Scoring both normal &amp; recovery contracts per market
-                  </p>
                 </div>
               )}
 
@@ -919,9 +912,27 @@ export function SpeedAIFab() {
 
                   {/* Recovery indicator */}
                   {status?.inRecovery && (
-                    <div className="flex items-center gap-2 bg-amber-500/5 rounded-lg px-3 py-2 border border-amber-500/20 text-xs">
-                      <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" />
-                      <span className="text-amber-400">Recovery step {status.recoveryStep} · ${status.unrecoveredAmount.toFixed(2)} to recover</span>
+                    <div className={`flex items-center gap-2 rounded-lg px-3 py-2 border text-xs ${
+                      status.config && status.recoveryStep >= status.config.maxRecoverySteps
+                        ? "bg-purple-500/8 border-purple-500/25"
+                        : "bg-amber-500/5 border-amber-500/20"
+                    }`}>
+                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                        status.config && status.recoveryStep >= status.config.maxRecoverySteps
+                          ? "bg-purple-400"
+                          : "bg-amber-400"
+                      }`} />
+                      <div className="flex-1 min-w-0">
+                        {status.config && status.recoveryStep >= status.config.maxRecoverySteps ? (
+                          <p className="text-purple-300 font-medium">
+                            Max steps — stake locked · ${status.unrecoveredAmount.toFixed(2)} debt
+                          </p>
+                        ) : (
+                          <p className="text-amber-400">
+                            Recovery step {status.recoveryStep}{status.config ? `/${status.config.maxRecoverySteps}` : ""} · ${status.unrecoveredAmount.toFixed(2)} to recover
+                          </p>
+                        )}
+                      </div>
                     </div>
                   )}
 

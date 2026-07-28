@@ -593,6 +593,15 @@ async function runLoop(config: SpeedAIConfig) {
     ? DERIV_MARKETS.find(m => m.symbol === config.lockedSymbol) ?? null
     : null;
 
+  // Guard: if a lock was requested but the symbol isn't in DERIV_MARKETS, abort immediately
+  if (config.lockedSymbol && !lockedDerivsMarket) {
+    session.running = false;
+    session.message = `⚠️ Market ${config.lockedSymbol} not found — session aborted`;
+    broadcast();
+    logger.error({ symbol: config.lockedSymbol }, "SpeedAI locked symbol not found in DERIV_MARKETS");
+    return;
+  }
+
   while (session.running && !session.stopRequested) {
     // ── Determine trade mode (normal vs recovery) ──────────────────────────
     const inRecovery = session.recovery.inRecovery;
