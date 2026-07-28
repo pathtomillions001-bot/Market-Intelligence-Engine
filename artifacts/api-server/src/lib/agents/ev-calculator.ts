@@ -278,25 +278,29 @@ export function runEVCalculatorAgent(
   };
 }
 
-/** Compute initial stake based on risk settings. Guards against NaN/zero values.
- *  When riskAmountType="fixed" the riskAmountValue is used directly (after
- *  applying the riskProfile multiplier). When riskAmountType="percentage" the
- *  legacy percentage-of-balance path is used. Both paths respect maxTradeStake. */
+/**
+ * Compute the base stake for a trade from the user's risk settings.
+ *
+ * Two modes — controlled by settings.riskAmountType:
+ *   "fixed"      → use riskAmountValue as an exact dollar amount (e.g. $1.00)
+ *   "percentage" → use riskAmountValue as a % of the current balance (e.g. 1% of $200 = $2.00)
+ *
+ * No riskProfile scaling is applied — the user's chosen value is used as-is.
+ * The result is always clamped between the Deriv minimum ($0.35) and maxTradeStake.
+ */
 export function computeStake(ctx: ScanContext): number {
   const { balance, settings } = ctx;
-  const riskMult = settings.riskProfile === "conservative" ? 0.4
-    : settings.riskProfile === "aggressive" ? 1.2 : 0.7;
 
   let rawStake: number;
   if (settings.riskAmountType === "fixed") {
-    const fixedAmount = Number(settings.riskAmountValue);
-    rawStake = (!isFinite(fixedAmount) || fixedAmount <= 0) ? 1 : fixedAmount;
-    // riskProfile still scales fixed stakes (conservative trades smaller, aggressive larger)
-    rawStake = rawStake * riskMult;
+    // Exact dollar amount the user wants to risk per trade.
+    const amount = Number(settings.riskAmountValue);
+    rawStake = isFinite(amount) && amount > 0 ? amount : 1;
   } else {
-    const riskPct = Number(settings.maxRiskPerTrade);
-    const effectiveRiskPct = (!isFinite(riskPct) || riskPct <= 0) ? 1 : riskPct;
-    rawStake = balance * (effectiveRiskPct / 100) * riskMult;
+    // Percentage of current account balance.
+    const pct = Number(settings.riskAmountValue);
+    const effectivePct = isFinite(pct) && pct > 0 ? pct : Number(settings.maxRiskPerTrade) || 1;
+    rawStake = balance * (effectivePct / 100);
   }
 
   return Math.max(0.35, Math.min(rawStake, settings.maxTradeStake));
