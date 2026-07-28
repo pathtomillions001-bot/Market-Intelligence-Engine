@@ -194,9 +194,18 @@ export function analyzeMarket(
   };
 
   // === 6. Capital Preservation ===
-  const maxStake = balance * (settings.maxRiskPerTrade / 100);
   const profMult = settings.riskProfile === "conservative" ? 0.5 : settings.riskProfile === "aggressive" ? 1.5 : 1.0;
-  let safeStake = Math.min(maxStake * profMult, balance * 0.05);
+  let safeStake: number;
+  let stakingDesc: string;
+  if ((settings as any).riskAmountType === "fixed") {
+    const fixedAmount = Number((settings as any).riskAmountValue ?? 1);
+    safeStake = (!isFinite(fixedAmount) || fixedAmount <= 0) ? 1 : fixedAmount * profMult;
+    stakingDesc = `$${fixedAmount.toFixed(2)} fixed × ${settings.riskProfile}`;
+  } else {
+    const maxStake = balance * (settings.maxRiskPerTrade / 100);
+    safeStake = Math.min(maxStake * profMult, balance * 0.05);
+    stakingDesc = `${settings.maxRiskPerTrade}% × ${settings.riskProfile}`;
+  }
   if (settings.maxTradeStake) safeStake = Math.min(safeStake, settings.maxTradeStake);
   safeStake = Math.max(0.35, safeStake);
   const capScore = safeStake > 0 ? 72 : 28;
@@ -204,7 +213,7 @@ export function analyzeMarket(
     score: capScore,
     weight: 0.08,
     signal: scoreToSignal(capScore),
-    reasoning: `Safe stake: $${safeStake.toFixed(2)} (${settings.maxRiskPerTrade}% × ${settings.riskProfile}).`,
+    reasoning: `Safe stake: $${safeStake.toFixed(2)} (${stakingDesc}).`,
   };
 
   // === 7. Trade Execution (tick velocity from ML features) ===

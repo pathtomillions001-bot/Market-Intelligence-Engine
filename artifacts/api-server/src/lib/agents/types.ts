@@ -69,7 +69,9 @@ export interface ProductRecommendation {
 // Passed to every agent so each can use the same raw data without fetching twice.
 
 export interface TradingSettings {
-  maxRiskPerTrade: number;         // % of balance per trade
+  riskAmountType: "fixed" | "percentage"; // how stake is sized
+  riskAmountValue: number;                // fixed $ amount OR percentage value
+  maxRiskPerTrade: number;         // % of balance per trade (used when riskAmountType="percentage")
   minConfidenceThreshold: number;  // minimum confidence to trade
   riskProfile: "conservative" | "moderate" | "aggressive";
   preferredContractTypes: string[];

@@ -39,6 +39,8 @@ async function getAccountAndSettings() {
 
 function buildTradingSettings(s: any, preferredContractTypes: string[]): TradingSettings {
   return {
+    riskAmountType:         (s?.riskAmountType === "percentage" ? "percentage" : "fixed") as "fixed" | "percentage",
+    riskAmountValue:        s ? Number(s.riskAmountValue ?? 1) : 1,
     maxRiskPerTrade:        s ? Number(s.maxRiskPerTrade) : 2,
     minConfidenceThreshold: s ? Number(s.minConfidenceThreshold) : 38,
     riskProfile:            (s?.riskProfile ?? "moderate") as "conservative" | "moderate" | "aggressive",

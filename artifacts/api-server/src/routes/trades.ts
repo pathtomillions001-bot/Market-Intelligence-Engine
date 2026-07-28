@@ -20,6 +20,8 @@ const DEMO_BALANCE = 10000;
 
 function buildTradingSettingsForManual(s: any, preferredContractTypes: string[]): TradingSettings {
   return {
+    riskAmountType:         (s?.riskAmountType === "percentage" ? "percentage" : "fixed") as "fixed" | "percentage",
+    riskAmountValue:        s ? Number(s.riskAmountValue ?? 1) : 1,
     maxRiskPerTrade:        s ? Number(s.maxRiskPerTrade) : 2,
     minConfidenceThreshold: s ? Math.min(Number(s.minConfidenceThreshold), 55) : 38,
     riskProfile:            (s?.riskProfile ?? "moderate") as "conservative" | "moderate" | "aggressive",

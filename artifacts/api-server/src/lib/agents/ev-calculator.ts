@@ -278,14 +278,26 @@ export function runEVCalculatorAgent(
   };
 }
 
-/** Compute initial stake based on risk settings. Guards against NaN/zero maxRiskPerTrade. */
+/** Compute initial stake based on risk settings. Guards against NaN/zero values.
+ *  When riskAmountType="fixed" the riskAmountValue is used directly (after
+ *  applying the riskProfile multiplier). When riskAmountType="percentage" the
+ *  legacy percentage-of-balance path is used. Both paths respect maxTradeStake. */
 export function computeStake(ctx: ScanContext): number {
   const { balance, settings } = ctx;
-  const riskPct = Number(settings.maxRiskPerTrade);
-  const effectiveRiskPct = (!isFinite(riskPct) || riskPct <= 0) ? 1 : riskPct;
-  const maxRisk = effectiveRiskPct / 100;
   const riskMult = settings.riskProfile === "conservative" ? 0.4
     : settings.riskProfile === "aggressive" ? 1.2 : 0.7;
-  const rawStake = balance * maxRisk * riskMult;
+
+  let rawStake: number;
+  if (settings.riskAmountType === "fixed") {
+    const fixedAmount = Number(settings.riskAmountValue);
+    rawStake = (!isFinite(fixedAmount) || fixedAmount <= 0) ? 1 : fixedAmount;
+    // riskProfile still scales fixed stakes (conservative trades smaller, aggressive larger)
+    rawStake = rawStake * riskMult;
+  } else {
+    const riskPct = Number(settings.maxRiskPerTrade);
+    const effectiveRiskPct = (!isFinite(riskPct) || riskPct <= 0) ? 1 : riskPct;
+    rawStake = balance * (effectiveRiskPct / 100) * riskMult;
+  }
+
   return Math.max(0.35, Math.min(rawStake, settings.maxTradeStake));
 }
