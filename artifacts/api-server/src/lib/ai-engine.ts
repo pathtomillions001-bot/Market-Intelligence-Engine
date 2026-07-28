@@ -194,7 +194,7 @@ export function analyzeMarket(
   };
 
   // === 6. Capital Preservation ===
-  const profMult = settings.riskProfile === "conservative" ? 0.5 : settings.riskProfile === "aggressive" ? 1.5 : 1.0;
+  const profMult = settings.riskProfile === "conservative" ? 0.5 : settings.riskProfile === "aggressive" ? 1.0 : 0.7;
   let safeStake: number;
   let stakingDesc: string;
   if ((settings as any).riskAmountType === "fixed") {

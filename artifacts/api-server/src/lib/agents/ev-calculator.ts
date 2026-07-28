@@ -285,7 +285,7 @@ export function runEVCalculatorAgent(
 export function computeStake(ctx: ScanContext): number {
   const { balance, settings } = ctx;
   const riskMult = settings.riskProfile === "conservative" ? 0.4
-    : settings.riskProfile === "aggressive" ? 1.2 : 0.7;
+    : settings.riskProfile === "aggressive" ? 1.0 : 0.7;
 
   let rawStake: number;
   if (settings.riskAmountType === "fixed") {
