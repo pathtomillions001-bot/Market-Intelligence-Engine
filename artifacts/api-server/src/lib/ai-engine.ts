@@ -194,18 +194,17 @@ export function analyzeMarket(
   };
 
   // === 6. Capital Preservation ===
-  // Stake is derived purely from user's risk settings — no profile multiplier applied.
+  const profMult = settings.riskProfile === "conservative" ? 0.5 : settings.riskProfile === "aggressive" ? 1.5 : 1.0;
   let safeStake: number;
   let stakingDesc: string;
-  const riskType = (settings as any).riskAmountType ?? "percentage";
-  const riskValue = Number((settings as any).riskAmountValue ?? settings.maxRiskPerTrade ?? 2);
-  if (riskType === "fixed") {
-    safeStake = isFinite(riskValue) && riskValue > 0 ? riskValue : 1;
-    stakingDesc = `$${safeStake.toFixed(2)} fixed`;
+  if ((settings as any).riskAmountType === "fixed") {
+    const fixedAmount = Number((settings as any).riskAmountValue ?? 1);
+    safeStake = (!isFinite(fixedAmount) || fixedAmount <= 0) ? 1 : fixedAmount * profMult;
+    stakingDesc = `$${fixedAmount.toFixed(2)} fixed × ${settings.riskProfile}`;
   } else {
-    const pct = isFinite(riskValue) && riskValue > 0 ? riskValue : (settings.maxRiskPerTrade || 1);
-    safeStake = balance * (pct / 100);
-    stakingDesc = `${pct}% of $${balance.toFixed(2)}`;
+    const maxStake = balance * (settings.maxRiskPerTrade / 100);
+    safeStake = Math.min(maxStake * profMult, balance * 0.05);
+    stakingDesc = `${settings.maxRiskPerTrade}% × ${settings.riskProfile}`;
   }
   if (settings.maxTradeStake) safeStake = Math.min(safeStake, settings.maxTradeStake);
   safeStake = Math.max(0.35, safeStake);

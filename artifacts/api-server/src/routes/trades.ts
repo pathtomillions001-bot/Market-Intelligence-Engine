@@ -229,19 +229,11 @@ router.post("/", async (req, res): Promise<void> => {
   const accounts = await db.select().from(accountsTable).limit(1);
   const settings = await db.select().from(settingsTable).limit(1);
   const balance = accounts.length > 0 ? Number(accounts[0].balance) : DEMO_BALANCE;
+  const maxRisk = settings.length > 0 ? Number(settings[0].maxRiskPerTrade) : 2;
   const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
 
-  // Compute the max allowed stake from the user's risk settings (5× headroom for manual trades).
-  const s0 = settings.length > 0 ? settings[0] : null;
-  const riskType = (s0 as any)?.riskAmountType ?? "percentage";
-  const riskValue = Number((s0 as any)?.riskAmountValue ?? (s0 ? s0.maxRiskPerTrade : 2));
-  const baseStakeLimit = riskType === "fixed"
-    ? (isFinite(riskValue) && riskValue > 0 ? riskValue : 1)
-    : balance * ((isFinite(riskValue) && riskValue > 0 ? riskValue : 2) / 100);
-  const maxAllowedStake = Math.min(baseStakeLimit * 5, s0 ? Number(s0.maxTradeStake) : 500);
-
-  if (stake > maxAllowedStake) {
-    res.status(400).json({ error: `Stake ${stake.toFixed(2)} exceeds risk limit. Max: ${maxAllowedStake.toFixed(2)}` });
+  if (stake > balance * (maxRisk / 100) * 5) {
+    res.status(400).json({ error: `Stake ${stake.toFixed(2)} exceeds risk limit. Max: ${(balance * maxRisk / 100 * 5).toFixed(2)}` });
     return;
   }
   if (stake <= 0) {
