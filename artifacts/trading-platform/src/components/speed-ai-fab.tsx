@@ -12,7 +12,7 @@ import { useGetSettings } from "@workspace/api-client-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type ContractFamily = "overUnder" | "riseFall" | "evenOdd" | "matchDiff";
+type ContractFamily = "overUnder" | "riseFall" | "evenOdd" | "differ" | "match";
 type RecoveryMethod = "split" | "instant";
 type Step = "config" | "scanning" | "scan-result" | "running";
 
@@ -80,11 +80,21 @@ interface SessionStatus {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const FAMILIES: { id: ContractFamily; label: string; icon: React.ReactNode; desc: string }[] = [
+// Normal mode never trades Matches (recovery-only); recovery mode never trades
+// Differs (normal-only). This keeps the cold-digit / hot-digit strategy split intact:
+// Differ = ~96% win avoiding the coldest digit, Match = 9× payout recovering losses fast.
+const NORMAL_FAMILIES: { id: ContractFamily; label: string; icon: React.ReactNode; desc: string }[] = [
   { id: "overUnder", label: "Over & Under", icon: <Hash className="w-3.5 h-3.5" />, desc: "Digit barrier trades" },
   { id: "riseFall",  label: "Rise & Fall",  icon: <TrendingUp className="w-3.5 h-3.5" />, desc: "Price direction trades" },
   { id: "evenOdd",   label: "Even & Odd",   icon: <Equal className="w-3.5 h-3.5" />, desc: "Digit parity trades" },
-  { id: "matchDiff", label: "Match & Differ", icon: <BarChart2 className="w-3.5 h-3.5" />, desc: "Digit prediction trades" },
+  { id: "differ",    label: "Differs",      icon: <BarChart2 className="w-3.5 h-3.5" />, desc: "Cold-digit avoidance (~96% win)" },
+];
+
+const RECOVERY_FAMILIES: { id: ContractFamily; label: string; icon: React.ReactNode; desc: string }[] = [
+  { id: "overUnder", label: "Over & Under", icon: <Hash className="w-3.5 h-3.5" />, desc: "Digit barrier trades" },
+  { id: "riseFall",  label: "Rise & Fall",  icon: <TrendingUp className="w-3.5 h-3.5" />, desc: "Price direction trades" },
+  { id: "evenOdd",   label: "Even & Odd",   icon: <Equal className="w-3.5 h-3.5" />, desc: "Digit parity trades" },
+  { id: "match",     label: "Matches",      icon: <BarChart2 className="w-3.5 h-3.5" />, desc: "Hot-digit recovery (9× payout)" },
 ];
 
 const DIGIT_PAYOUTS_OVER: Record<number, number> = {
@@ -105,7 +115,8 @@ function familyToContracts(family: ContractFamily, overB: number, underB: number
     case "overUnder":  return { types: ["DIGITOVER", "DIGITUNDER"], barriers: [overB, underB] };
     case "riseFall":   return { types: ["CALL", "PUT"], barriers: [] };
     case "evenOdd":    return { types: ["DIGITEVEN", "DIGITODD"], barriers: [] };
-    case "matchDiff":  return { types: ["DIGITMATCH", "DIGITDIFF"], barriers: [] };
+    case "differ":     return { types: ["DIGITDIFF"], barriers: [] };
+    case "match":      return { types: ["DIGITMATCH"], barriers: [] };
   }
 }
 
@@ -137,8 +148,9 @@ function NumInput({ label, value, onChange, min, max, step = 1, suffix }: {
   );
 }
 
-function FamilySelector({ label, value, onChange, showBarriers, overBarrier, underBarrier, onOverBarrier, onUnderBarrier }: {
+function FamilySelector({ label, value, onChange, families, showBarriers, overBarrier, underBarrier, onOverBarrier, onUnderBarrier }: {
   label: string; value: ContractFamily; onChange: (v: ContractFamily) => void;
+  families: { id: ContractFamily; label: string; icon: React.ReactNode; desc: string }[];
   showBarriers: boolean; overBarrier: number; underBarrier: number;
   onOverBarrier: (v: number) => void; onUnderBarrier: (v: number) => void;
 }) {
@@ -146,7 +158,7 @@ function FamilySelector({ label, value, onChange, showBarriers, overBarrier, und
     <div className="space-y-2">
       <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">{label}</p>
       <div className="grid grid-cols-2 gap-1.5">
-        {FAMILIES.map(f => (
+        {families.map(f => (
           <button
             key={f.id}
             onClick={() => onChange(f.id)}
@@ -337,14 +349,14 @@ export function SpeedAIFab() {
       });
       const data = await res.json();
       if (!res.ok) {
-        toast.error(data.error ?? "Failed to start SpeedAI");
+        toast.error(data.error ?? "Failed to start NeuroAI");
         return;
       }
       setStatus(data.status);
       setStep("running");
-      toast.success("⚡ SpeedAI locked on market — trading now!");
+      toast.success("⚡ NeuroAI locked on market — trading now!");
     } catch {
-      toast.error("Could not start SpeedAI session");
+      toast.error("Could not start NeuroAI session");
     } finally {
       setLoading(false);
     }
@@ -419,6 +431,7 @@ export function SpeedAIFab() {
                     label="Normal trade type"
                     value={config.normalFamily}
                     onChange={v => set("normalFamily", v)}
+                    families={NORMAL_FAMILIES}
                     showBarriers
                     overBarrier={config.normalOverBarrier}
                     underBarrier={config.normalUnderBarrier}
@@ -430,6 +443,7 @@ export function SpeedAIFab() {
                     label="Recovery trade type"
                     value={config.recoveryFamily}
                     onChange={v => set("recoveryFamily", v)}
+                    families={RECOVERY_FAMILIES}
                     showBarriers
                     overBarrier={config.recoveryOverBarrier}
                     underBarrier={config.recoveryUnderBarrier}
@@ -578,7 +592,7 @@ export function SpeedAIFab() {
                         className="w-full h-10 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold text-sm shadow-lg shadow-cyan-900/40"
                       >
                         {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Zap className="w-4 h-4 mr-2" />}
-                        Run SpeedAI
+                        Run NeuroAI
                       </Button>
 
                       <button onClick={() => setStep("config")} className="w-full text-[11px] text-muted-foreground hover:text-white text-center py-1">

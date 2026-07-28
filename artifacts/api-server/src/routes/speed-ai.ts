@@ -18,6 +18,12 @@ function validateStartBody(body: any): { ok: true; data: any } | { ok: false; er
     return { ok: false, error: "normalContractTypes must be a non-empty array" };
   if (!Array.isArray(body.recoveryContractTypes) || body.recoveryContractTypes.length === 0)
     return { ok: false, error: "recoveryContractTypes must be a non-empty array" };
+  // Strategy split: Differ (cold-digit avoidance, ~96% win) is normal-only; Match
+  // (hot-digit, 9× payout) is recovery-only — it recovers a Differ loss cheaply.
+  if (body.normalContractTypes.includes("DIGITMATCH"))
+    return { ok: false, error: "DIGITMATCH (Matches) is recovery-only — use DIGITDIFF in normal mode" };
+  if (body.recoveryContractTypes.includes("DIGITDIFF"))
+    return { ok: false, error: "DIGITDIFF (Differs) is normal-only — use DIGITMATCH in recovery mode" };
   if (typeof body.stake !== "number" || body.stake < 0.35)
     return { ok: false, error: "stake must be ≥ 0.35" };
   if (typeof body.stopLoss !== "number" || body.stopLoss <= 0)
