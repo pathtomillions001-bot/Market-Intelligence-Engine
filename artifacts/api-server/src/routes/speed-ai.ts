@@ -4,6 +4,7 @@ import {
   stopSession,
   getStatus,
   analyzeMarketsForStrategy,
+  scanBestMarket,
   type SpeedAIConfig,
   type SpeedContractType,
 } from "../lib/speed-ai-engine";
@@ -36,6 +37,7 @@ function validateStartBody(body: any): { ok: true; data: any } | { ok: false; er
       recoveryMultiplier:    typeof body.recoveryMultiplier === "number" ? body.recoveryMultiplier : 1.62,
       recoveryMethod:        body.recoveryMethod === "instant" ? "instant" : "split",
       maxRecoverySteps:      typeof body.maxRecoverySteps === "number" ? Math.max(1, Math.min(10, body.maxRecoverySteps)) : 3,
+      lockedSymbol:          typeof body.lockedSymbol === "string" ? body.lockedSymbol : undefined,
     },
   };
 }
@@ -66,6 +68,23 @@ router.get("/analyze", async (req, res): Promise<void> => {
   } catch (err) {
     logger.error({ err }, "SpeedAI analyze failed");
     res.status(500).json({ error: "Analysis failed" });
+  }
+});
+
+// ── Scan for best market ──────────────────────────────────────────────────────
+
+router.post("/scan", async (req, res): Promise<void> => {
+  const parsed = validateStartBody(req.body);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  try {
+    const result = await scanBestMarket(parsed.data as SpeedAIConfig);
+    res.json(result);
+  } catch (err) {
+    logger.error({ err }, "SpeedAI scan failed");
+    res.status(500).json({ error: "Scan failed" });
   }
 });
 

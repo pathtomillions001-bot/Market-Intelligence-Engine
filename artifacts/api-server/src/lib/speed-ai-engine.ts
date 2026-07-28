@@ -23,6 +23,9 @@ import { logger } from "./logger";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
+/** Minimum score (0–100) for a market to be considered "suitable" to trade */
+const SUITABLE_SCORE_THRESHOLD = 54;
+
 const DIGIT_PAYOUTS_OVER: Record<number, number> = {
   0: 1.04, 1: 1.08, 2: 1.19, 3: 1.37, 4: 1.63,
   5: 1.96, 6: 2.45, 7: 3.27, 8: 4.90,
@@ -51,6 +54,15 @@ export interface SpeedAIConfig {
   recoveryMultiplier: number;
   recoveryMethod: "split" | "instant";
   maxRecoverySteps: number;
+  /** When set, the loop trades ONLY this symbol — no per-trade market re-scanning */
+  lockedSymbol?: string;
+}
+
+export interface ScanResult {
+  suitable: boolean;
+  best: MarketScore | null;
+  allScored: MarketScore[];
+  reason: string;
 }
 
 export interface MarketScore {
@@ -295,6 +307,80 @@ export async function analyzeMarketsForStrategy(
   return scored.sort((a, b) => b.score - a.score);
 }
 
+/**
+ * Score a single market symbol across the given contract types and return the best setup.
+ */
+export async function scoreSingleMarket(
+  symbol: string,
+  displayName: string,
+  contractTypes: SpeedContractType[],
+  barriers: number[],
+): Promise<MarketScore | null> {
+  const digits = tickManager.getDigits(symbol, 200);
+  const prices = tickManager.getTicks(symbol, 100);
+  const scored: MarketScore[] = [];
+
+  for (const ct of contractTypes) {
+    if (ct === "DIGITOVER" || ct === "DIGITUNDER") {
+      const barriersToTry = barriers.length > 0 ? barriers : (ct === "DIGITOVER" ? [1, 2] : [7, 8]);
+      for (const b of barriersToTry) {
+        const s = scoreMarket(symbol, displayName, ct, b, digits, prices);
+        if (s) scored.push(s);
+      }
+    } else if (ct === "DIGITMATCH" || ct === "DIGITDIFF") {
+      const freq = digitFrequency(digits);
+      const b = pickMatchDiffBarrier(freq, ct);
+      const s = scoreMarket(symbol, displayName, ct, b, digits, prices);
+      if (s) scored.push(s);
+    } else {
+      const s = scoreMarket(symbol, displayName, ct, undefined, digits, prices);
+      if (s) scored.push(s);
+    }
+  }
+
+  return scored.sort((a, b) => b.score - a.score)[0] ?? null;
+}
+
+/**
+ * Scan ALL markets for the user's normal contract settings and return the single
+ * best market. Called before starting a session so the user can confirm before trading.
+ */
+export async function scanBestMarket(config: SpeedAIConfig): Promise<ScanResult> {
+  const candidatesBySymbol = new Map<string, MarketScore>();
+
+  for (const market of DERIV_MARKETS) {
+    const needsDigit = config.normalContractTypes.some(ct => ct.startsWith("DIGIT"));
+    if (needsDigit && !market.digitEnabled) continue;
+
+    const best = await scoreSingleMarket(
+      market.symbol,
+      market.displayName,
+      config.normalContractTypes,
+      config.normalBarriers,
+    );
+    if (best) candidatesBySymbol.set(market.symbol, best);
+  }
+
+  const allScored = [...candidatesBySymbol.values()].sort((a, b) => b.score - a.score);
+
+  if (allScored.length === 0) {
+    return {
+      suitable: false,
+      best: null,
+      allScored: [],
+      reason: "No tick data available yet — wait a few seconds and scan again",
+    };
+  }
+
+  const best = allScored[0];
+  const suitable = best.score >= SUITABLE_SCORE_THRESHOLD;
+  const reason = suitable
+    ? `${best.displayName} has a strong edge (score ${best.score.toFixed(0)}/100) for your settings`
+    : `No market shows a clear edge yet — best was ${best.displayName} at ${best.score.toFixed(0)}/100`;
+
+  return { suitable, best, allScored, reason };
+}
+
 // ── Recovery stake calculation ────────────────────────────────────────────────
 
 function computeRecoveryStake(
@@ -448,27 +534,51 @@ async function runLoop(config: SpeedAIConfig) {
   const isLive = !paperTradeMode && !!token;
   const maxStake = settings.length > 0 ? Number(settings[0].maxTradeStake) : 500;
 
+  // Resolve the locked market object once (if symbol is locked)
+  const lockedDerivsMarket = config.lockedSymbol
+    ? DERIV_MARKETS.find(m => m.symbol === config.lockedSymbol) ?? null
+    : null;
+
   while (session.running && !session.stopRequested) {
     // ── Determine trade mode (normal vs recovery) ──────────────────────────
     const inRecovery = session.recovery.inRecovery;
     const contractTypes = inRecovery ? config.recoveryContractTypes : config.normalContractTypes;
     const barriers = inRecovery ? config.recoveryBarriers : config.normalBarriers;
 
-    // ── Analyze markets ────────────────────────────────────────────────────
-    session.message = "Scanning markets…";
-    broadcast();
+    // ── Find best setup ────────────────────────────────────────────────────
+    let best: MarketScore | undefined;
 
-    const scored = await analyzeMarketsForStrategy(contractTypes, barriers);
-    session.topMarkets = scored;
-
-    if (scored.length === 0) {
-      session.message = "No markets available — waiting for tick data…";
+    if (lockedDerivsMarket) {
+      // Locked market mode: score only the one chosen market, no full scan
+      const result = await scoreSingleMarket(
+        lockedDerivsMarket.symbol,
+        lockedDerivsMarket.displayName,
+        contractTypes,
+        barriers,
+      );
+      if (!result) {
+        session.message = "Waiting for tick data on locked market…";
+        broadcast();
+        await sleep(2000);
+        continue;
+      }
+      best = result;
+      // Keep topMarkets updated for the display panel
+      session.topMarkets = [result];
+    } else {
+      // Free scan mode: evaluate all markets every trade
+      session.message = "Scanning markets…";
       broadcast();
-      await sleep(3000);
-      continue;
+      const scored = await analyzeMarketsForStrategy(contractTypes, barriers);
+      session.topMarkets = scored;
+      if (scored.length === 0) {
+        session.message = "No markets available — waiting for tick data…";
+        broadcast();
+        await sleep(3000);
+        continue;
+      }
+      best = scored[0];
     }
-
-    const best = scored[0];
     const stake = Math.round(computeRecoveryStake(session.recovery, best.payout, config, maxStake) * 100) / 100;
 
     session.currentMarket = best.displayName;

@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { X, Zap, TrendingUp, TrendingDown, Hash, Equal, ChevronRight, Loader2, StopCircle, BarChart2 } from "lucide-react";
+import {
+  X, Zap, TrendingUp, Hash, Equal, Loader2, StopCircle,
+  BarChart2, ScanSearch, CheckCircle2, AlertTriangle, RefreshCw,
+} from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
@@ -12,6 +14,7 @@ import { useGetSettings } from "@workspace/api-client-react";
 
 type ContractFamily = "overUnder" | "riseFall" | "evenOdd" | "matchDiff";
 type RecoveryMethod = "split" | "instant";
+type Step = "config" | "scanning" | "scan-result" | "running";
 
 interface SpeedConfig {
   normalFamily: ContractFamily;
@@ -26,6 +29,23 @@ interface SpeedConfig {
   recoveryMultiplier: number;
   recoveryMethod: RecoveryMethod;
   maxRecoverySteps: number;
+}
+
+interface MarketScore {
+  symbol: string;
+  displayName: string;
+  contractType: string;
+  barrier?: number;
+  score: number;
+  winProbability: number;
+  reason: string;
+}
+
+interface ScanResult {
+  suitable: boolean;
+  best: MarketScore | null;
+  allScored: MarketScore[];
+  reason: string;
 }
 
 interface SessionStatus {
@@ -55,10 +75,7 @@ interface SessionStatus {
     normalBarriers: number[];
     recoveryBarriers: number[];
   };
-  topMarkets?: Array<{
-    symbol: string; displayName: string; contractType: string;
-    barrier?: number; score: number; winProbability: number; reason: string;
-  }>;
+  topMarkets?: MarketScore[];
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -83,24 +100,23 @@ function autoMultiplier(barrier: number, contractType: "over" | "under") {
   return Math.round((1 / netPayout) * 1.02 * 100) / 100;
 }
 
-// Map family → contract types sent to API
-function familyToContracts(family: ContractFamily, overB: number, underB: number, isRecovery = false) {
+function familyToContracts(family: ContractFamily, overB: number, underB: number) {
   switch (family) {
-    case "overUnder":
-      return {
-        types:    ["DIGITOVER", "DIGITUNDER"],
-        barriers: isRecovery ? [overB, underB] : [overB, underB],
-      };
-    case "riseFall":
-      return { types: ["CALL", "PUT"], barriers: [] };
-    case "evenOdd":
-      return { types: ["DIGITEVEN", "DIGITODD"], barriers: [] };
-    case "matchDiff":
-      return { types: ["DIGITMATCH", "DIGITDIFF"], barriers: [] };
+    case "overUnder":  return { types: ["DIGITOVER", "DIGITUNDER"], barriers: [overB, underB] };
+    case "riseFall":   return { types: ["CALL", "PUT"], barriers: [] };
+    case "evenOdd":    return { types: ["DIGITEVEN", "DIGITODD"], barriers: [] };
+    case "matchDiff":  return { types: ["DIGITMATCH", "DIGITDIFF"], barriers: [] };
   }
 }
 
-// ── NumInput helper ──────────────────────────────────────────────────────────
+function scoreColor(score: number) {
+  if (score >= 60) return "text-green-400";
+  if (score >= 54) return "text-cyan-400";
+  if (score >= 48) return "text-amber-400";
+  return "text-red-400";
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
 
 function NumInput({ label, value, onChange, min, max, step = 1, suffix }: {
   label: string; value: number; onChange: (v: number) => void;
@@ -121,17 +137,10 @@ function NumInput({ label, value, onChange, min, max, step = 1, suffix }: {
   );
 }
 
-// ── Family selector ──────────────────────────────────────────────────────────
-
 function FamilySelector({ label, value, onChange, showBarriers, overBarrier, underBarrier, onOverBarrier, onUnderBarrier }: {
-  label: string;
-  value: ContractFamily;
-  onChange: (v: ContractFamily) => void;
-  showBarriers: boolean;
-  overBarrier: number;
-  underBarrier: number;
-  onOverBarrier: (v: number) => void;
-  onUnderBarrier: (v: number) => void;
+  label: string; value: ContractFamily; onChange: (v: ContractFamily) => void;
+  showBarriers: boolean; overBarrier: number; underBarrier: number;
+  onOverBarrier: (v: number) => void; onUnderBarrier: (v: number) => void;
 }) {
   return (
     <div className="space-y-2">
@@ -190,9 +199,10 @@ function FamilySelector({ label, value, onChange, showBarriers, overBarrier, und
 
 export function SpeedAIFab() {
   const [open, setOpen] = useState(false);
-  const [step, setStep] = useState<"config" | "running">("config");
+  const [step, setStep] = useState<Step>("config");
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<SessionStatus | null>(null);
+  const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const { data: settings } = useGetSettings();
 
   const [config, setConfig] = useState<SpeedConfig>({
@@ -213,20 +223,20 @@ export function SpeedAIFab() {
   const set = <K extends keyof SpeedConfig>(k: K, v: SpeedConfig[K]) =>
     setConfig(prev => ({ ...prev, [k]: v }));
 
-  // Sync defaults from settings
+  // Sync defaults from user settings
   useEffect(() => {
     if (settings) {
       const s = settings as any;
       setConfig(prev => ({
         ...prev,
-        normalOverBarrier:   s.normalOverDigit  ?? prev.normalOverBarrier,
-        normalUnderBarrier:  s.normalUnderDigit ?? prev.normalUnderBarrier,
-        recoveryOverBarrier: s.recoveryOverDigit  ?? prev.recoveryOverBarrier,
-        recoveryUnderBarrier:s.recoveryUnderDigit ?? prev.recoveryUnderBarrier,
-        recoveryMultiplier:  s.recoveryMultiplier ?? prev.recoveryMultiplier,
-        recoveryMethod:      (s.recoveryMethod ?? prev.recoveryMethod) as RecoveryMethod,
-        maxRecoverySteps:    s.maxRecoverySteps ?? prev.maxRecoverySteps,
-        stake:               s.riskAmountValue ?? prev.stake,
+        normalOverBarrier:    s.normalOverDigit    ?? prev.normalOverBarrier,
+        normalUnderBarrier:   s.normalUnderDigit   ?? prev.normalUnderBarrier,
+        recoveryOverBarrier:  s.recoveryOverDigit  ?? prev.recoveryOverBarrier,
+        recoveryUnderBarrier: s.recoveryUnderDigit ?? prev.recoveryUnderBarrier,
+        recoveryMultiplier:   s.recoveryMultiplier ?? prev.recoveryMultiplier,
+        recoveryMethod:       (s.recoveryMethod    ?? prev.recoveryMethod) as RecoveryMethod,
+        maxRecoverySteps:     s.maxRecoverySteps   ?? prev.maxRecoverySteps,
+        stake:                s.riskAmountValue    ?? prev.stake,
       }));
     }
   }, [settings]);
@@ -241,13 +251,9 @@ export function SpeedAIFab() {
         const data: SessionStatus = await res.json();
         setStatus(data);
         if (data.running) setStep("running");
-        else if (step === "running" && !data.running) {
-          // Session ended naturally
-          setStep("running"); // Stay on running to show final stats
-        }
       }
     } catch { /* ignore */ }
-  }, [step]);
+  }, []);
 
   useEffect(() => {
     if (open) {
@@ -259,7 +265,7 @@ export function SpeedAIFab() {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [open, fetchStatus]);
 
-  // Also listen to SSE
+  // SSE listener
   useEffect(() => {
     const handler = (e: Event) => {
       try {
@@ -274,29 +280,60 @@ export function SpeedAIFab() {
     return () => window.removeEventListener("sse_event", handler);
   }, []);
 
-  const handleStart = async () => {
+  // ── Build request body from current config ──────────────────────────────
+  function buildBody(lockedSymbol?: string) {
+    const normalContracts  = familyToContracts(config.normalFamily,   config.normalOverBarrier,   config.normalUnderBarrier);
+    const recoveryContracts = familyToContracts(config.recoveryFamily, config.recoveryOverBarrier, config.recoveryUnderBarrier);
+    return {
+      normalContractTypes:   normalContracts.types,
+      normalBarriers:        normalContracts.barriers,
+      recoveryContractTypes: recoveryContracts.types,
+      recoveryBarriers:      recoveryContracts.barriers,
+      stake:                 config.stake,
+      stopLoss:              config.stopLoss,
+      takeProfit:            config.takeProfit,
+      recoveryMultiplier:    config.recoveryMultiplier,
+      recoveryMethod:        config.recoveryMethod,
+      maxRecoverySteps:      config.maxRecoverySteps,
+      ...(lockedSymbol ? { lockedSymbol } : {}),
+    };
+  }
+
+  // ── Scan markets ────────────────────────────────────────────────────────
+  const handleScan = async () => {
+    setLoading(true);
+    setStep("scanning");
+    setScanResult(null);
+    try {
+      const res = await fetch("/api/speed-ai/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildBody()),
+      });
+      const data: ScanResult = await res.json();
+      if (!res.ok) {
+        toast.error((data as any).error ?? "Scan failed");
+        setStep("config");
+        return;
+      }
+      setScanResult(data);
+      setStep("scan-result");
+    } catch {
+      toast.error("Could not reach the server");
+      setStep("config");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ── Start trading on the scanned market ─────────────────────────────────
+  const handleStart = async (lockedSymbol: string) => {
     setLoading(true);
     try {
-      const normalContracts = familyToContracts(config.normalFamily, config.normalOverBarrier, config.normalUnderBarrier);
-      const recoveryContracts = familyToContracts(config.recoveryFamily, config.recoveryOverBarrier, config.recoveryUnderBarrier, true);
-
-      const body = {
-        normalContractTypes:   normalContracts.types,
-        normalBarriers:        normalContracts.barriers,
-        recoveryContractTypes: recoveryContracts.types,
-        recoveryBarriers:      recoveryContracts.barriers,
-        stake:                 config.stake,
-        stopLoss:              config.stopLoss,
-        takeProfit:            config.takeProfit,
-        recoveryMultiplier:    config.recoveryMultiplier,
-        recoveryMethod:        config.recoveryMethod,
-        maxRecoverySteps:      config.maxRecoverySteps,
-      };
-
       const res = await fetch("/api/speed-ai/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(buildBody(lockedSymbol)),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -305,8 +342,8 @@ export function SpeedAIFab() {
       }
       setStatus(data.status);
       setStep("running");
-      toast.success("⚡ SpeedAI Engine activated!");
-    } catch (err) {
+      toast.success("⚡ SpeedAI locked on market — trading now!");
+    } catch {
       toast.error("Could not start SpeedAI session");
     } finally {
       setLoading(false);
@@ -326,6 +363,7 @@ export function SpeedAIFab() {
 
   const handleReset = () => {
     setStep("config");
+    setScanResult(null);
     setStatus(null);
   };
 
@@ -340,7 +378,6 @@ export function SpeedAIFab() {
 
   return (
     <>
-      {/* Panel */}
       <AnimatePresence>
         {open && (
           <>
@@ -375,10 +412,9 @@ export function SpeedAIFab() {
                 </button>
               </div>
 
-              {/* Config step */}
+              {/* ── STEP: CONFIG ── */}
               {step === "config" && (
                 <div className="p-4 space-y-5">
-                  {/* Normal contract */}
                   <FamilySelector
                     label="Normal trade type"
                     value={config.normalFamily}
@@ -390,7 +426,6 @@ export function SpeedAIFab() {
                     onUnderBarrier={v => set("normalUnderBarrier", v)}
                   />
 
-                  {/* Recovery contract */}
                   <FamilySelector
                     label="Recovery trade type"
                     value={config.recoveryFamily}
@@ -407,8 +442,8 @@ export function SpeedAIFab() {
                     <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Risk Settings</p>
                     <div className="space-y-2 bg-white/3 rounded-xl p-3 border border-white/5">
                       <NumInput label="Stake per trade" value={config.stake} onChange={v => set("stake", v)} min={0.35} step={0.5} suffix="$" />
-                      <NumInput label="Stop loss" value={config.stopLoss} onChange={v => set("stopLoss", v)} min={0.5} step={1} suffix="$" />
-                      <NumInput label="Take profit" value={config.takeProfit} onChange={v => set("takeProfit", v)} min={0.5} step={1} suffix="$" />
+                      <NumInput label="Stop loss"        value={config.stopLoss} onChange={v => set("stopLoss", v)} min={0.5} step={1} suffix="$" />
+                      <NumInput label="Take profit"      value={config.takeProfit} onChange={v => set("takeProfit", v)} min={0.5} step={1} suffix="$" />
                     </div>
                   </div>
 
@@ -452,32 +487,160 @@ export function SpeedAIFab() {
                     </div>
                   </div>
 
-                  {/* Start button */}
+                  {/* Scan button */}
                   <Button
-                    onClick={handleStart}
+                    onClick={handleScan}
                     disabled={loading}
                     className="w-full h-10 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold text-sm shadow-lg shadow-cyan-900/40"
                   >
-                    {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Zap className="w-4 h-4 mr-2" />}
-                    Run SpeedAI
+                    <ScanSearch className="w-4 h-4 mr-2" />
+                    Scan Markets
                   </Button>
+
+                  <p className="text-[10px] text-center text-muted-foreground/60 -mt-2">
+                    AI agents will find the best market for your settings
+                  </p>
                 </div>
               )}
 
-              {/* Running / results step */}
+              {/* ── STEP: SCANNING ── */}
+              {step === "scanning" && (
+                <div className="p-6 flex flex-col items-center gap-4 text-center">
+                  {/* Animated radar */}
+                  <div className="relative w-20 h-20 flex items-center justify-center">
+                    <span className="absolute inset-0 rounded-full border-2 border-cyan-500/30 animate-ping" />
+                    <span className="absolute inset-2 rounded-full border border-cyan-500/20 animate-ping [animation-delay:0.3s]" />
+                    <div className="w-14 h-14 rounded-full bg-cyan-500/10 border border-cyan-500/40 flex items-center justify-center">
+                      <ScanSearch className="w-6 h-6 text-cyan-400 animate-pulse" />
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-white">Scanning all markets…</p>
+                    <p className="text-xs text-muted-foreground mt-1">AI agents are evaluating every market<br />against your settings</p>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[11px] text-cyan-400/70">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Analysing digit patterns &amp; probabilities
+                  </div>
+                </div>
+              )}
+
+              {/* ── STEP: SCAN RESULT ── */}
+              {step === "scan-result" && scanResult && (
+                <div className="p-4 space-y-4">
+                  {scanResult.suitable && scanResult.best ? (
+                    <>
+                      {/* Suitable market card */}
+                      <div className="rounded-xl bg-green-500/5 border border-green-500/25 p-3 space-y-2">
+                        <div className="flex items-center gap-2">
+                          <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
+                          <p className="text-xs font-semibold text-green-300">Suitable market found</p>
+                        </div>
+
+                        <div className="bg-black/30 rounded-lg p-2.5 space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <p className="text-sm font-bold text-white truncate">{scanResult.best.displayName}</p>
+                            <span className={`text-sm font-bold font-mono ${scoreColor(scanResult.best.score)}`}>
+                              {scanResult.best.score.toFixed(0)}<span className="text-[10px] font-normal text-muted-foreground">/100</span>
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-[11px]">
+                            <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 font-mono font-medium">
+                              {scanResult.best.contractType}{scanResult.best.barrier !== undefined ? ` ${scanResult.best.barrier}` : ""}
+                            </span>
+                            <span className="text-muted-foreground">{(scanResult.best.winProbability * 100).toFixed(1)}% win rate</span>
+                          </div>
+                          <p className="text-[10px] text-muted-foreground">{scanResult.best.reason}</p>
+                        </div>
+
+                        {/* Top 3 runners-up */}
+                        {scanResult.allScored.length > 1 && (
+                          <div className="space-y-1 pt-1">
+                            <p className="text-[9px] uppercase tracking-wider text-muted-foreground/60">Other markets scanned</p>
+                            {scanResult.allScored.slice(1, 4).map((m, i) => (
+                              <div key={i} className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                                <span className="w-3 text-muted-foreground/40">{i + 2}</span>
+                                <span className="flex-1 truncate">{m.displayName}</span>
+                                <span className={`font-mono font-semibold ${scoreColor(m.score)}`}>{m.score.toFixed(0)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      <p className="text-[10px] text-center text-muted-foreground/70 px-2">
+                        The engine will trade <span className="text-cyan-400 font-medium">{scanResult.best.displayName}</span> exclusively until TP or SL is hit
+                      </p>
+
+                      <Button
+                        onClick={() => handleStart(scanResult.best!.symbol)}
+                        disabled={loading}
+                        className="w-full h-10 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold text-sm shadow-lg shadow-cyan-900/40"
+                      >
+                        {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Zap className="w-4 h-4 mr-2" />}
+                        Run SpeedAI
+                      </Button>
+
+                      <button onClick={() => setStep("config")} className="w-full text-[11px] text-muted-foreground hover:text-white text-center py-1">
+                        ← Change settings
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      {/* No suitable market */}
+                      <div className="rounded-xl bg-amber-500/5 border border-amber-500/25 p-3 space-y-2">
+                        <div className="flex items-center gap-2">
+                          <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                          <p className="text-xs font-semibold text-amber-300">No suitable market found</p>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">{scanResult.reason}</p>
+
+                        {/* Show what was found anyway */}
+                        {scanResult.allScored.length > 0 && (
+                          <div className="bg-black/30 rounded-lg p-2 space-y-1 mt-1">
+                            <p className="text-[9px] uppercase tracking-wider text-muted-foreground/50 mb-1">Current best (below threshold)</p>
+                            {scanResult.allScored.slice(0, 3).map((m, i) => (
+                              <div key={i} className="flex items-center gap-2 text-[10px]">
+                                <span className="w-3 text-muted-foreground/40">{i + 1}</span>
+                                <span className="flex-1 truncate text-muted-foreground">{m.displayName}</span>
+                                <span className="font-mono text-amber-400/80">{m.score.toFixed(0)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      <p className="text-[10px] text-center text-muted-foreground/60 px-2">
+                        Market conditions don't yet match your settings. Scan again in a few seconds.
+                      </p>
+
+                      <Button
+                        onClick={handleScan}
+                        disabled={loading}
+                        className="w-full h-10 bg-gradient-to-r from-amber-600/80 to-orange-600/80 hover:from-amber-500 hover:to-orange-500 text-white font-bold text-sm"
+                      >
+                        {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <RefreshCw className="w-4 h-4 mr-2" />}
+                        Scan Again
+                      </Button>
+
+                      <button onClick={() => setStep("config")} className="w-full text-[11px] text-muted-foreground hover:text-white text-center py-1">
+                        ← Change settings
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* ── STEP: RUNNING ── */}
               {step === "running" && (
                 <div className="p-4 space-y-4">
                   {/* P&L card */}
                   <div className={`rounded-xl p-3 border ${isRunning ? "bg-cyan-500/5 border-cyan-500/20" : "bg-secondary/30 border-border"}`}>
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Session P&L</span>
-                      {isRunning && (
-                        <span className="flex items-center gap-1 text-[10px] text-cyan-400">
-                          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-                          LIVE
-                        </span>
-                      )}
-                      {!isRunning && <span className="text-[10px] text-muted-foreground">STOPPED</span>}
+                      {isRunning
+                        ? <span className="flex items-center gap-1 text-[10px] text-cyan-400"><span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />LIVE</span>
+                        : <span className="text-[10px] text-muted-foreground">STOPPED</span>}
                     </div>
                     <div className={`text-2xl font-bold font-mono ${profitColor}`}>
                       {(status?.totalProfit ?? 0) >= 0 ? "+" : ""}${Math.abs(status?.totalProfit ?? 0).toFixed(2)}
@@ -488,25 +651,19 @@ export function SpeedAIFab() {
                       <span className="text-muted-foreground">{winRate}% WR</span>
                       <span className="text-muted-foreground">{status?.tradeCount ?? 0} trades</span>
                     </div>
-                    {/* TP/SL progress bar */}
-                    {status && (
+                    {/* TP/SL bar */}
+                    {status?.config && (
                       <div className="mt-2 space-y-1">
                         <div className="flex justify-between text-[9px] text-muted-foreground">
-                          <span>SL -${status.config?.stopLoss.toFixed(2)}</span>
-                          <span>TP +${status.config?.takeProfit.toFixed(2)}</span>
+                          <span>SL -${status.config.stopLoss.toFixed(2)}</span>
+                          <span>TP +${status.config.takeProfit.toFixed(2)}</span>
                         </div>
                         <div className="h-1.5 bg-secondary rounded-full overflow-hidden relative">
-                          {/* Center line */}
                           <div className="absolute left-1/2 top-0 w-px h-full bg-white/20" />
-                          {/* Profit fill */}
-                          {status.config && (
-                            <div
-                              className={`absolute top-0 h-full rounded-full transition-all ${status.totalProfit >= 0 ? "bg-green-500 left-1/2" : "bg-red-500 right-1/2"}`}
-                              style={{
-                                width: `${Math.min(50, Math.abs(status.totalProfit) / (status.totalProfit >= 0 ? status.config.takeProfit : status.config.stopLoss) * 50)}%`,
-                              }}
-                            />
-                          )}
+                          <div
+                            className={`absolute top-0 h-full rounded-full transition-all ${status.totalProfit >= 0 ? "bg-green-500 left-1/2" : "bg-red-500 right-1/2"}`}
+                            style={{ width: `${Math.min(50, Math.abs(status.totalProfit) / (status.totalProfit >= 0 ? status.config.takeProfit : status.config.stopLoss) * 50)}%` }}
+                          />
                         </div>
                       </div>
                     )}
@@ -524,12 +681,15 @@ export function SpeedAIFab() {
                     </div>
                   )}
 
-                  {/* Current trade */}
+                  {/* Locked market + current trade */}
                   {isRunning && status?.currentMarket && (
                     <div className="flex items-center gap-2 bg-white/3 rounded-lg px-3 py-2 border border-white/5">
                       <Loader2 className="w-3 h-3 text-cyan-400 animate-spin flex-shrink-0" />
                       <div className="min-w-0">
-                        <p className="text-[10px] text-muted-foreground">Trading now</p>
+                        <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-cyan-500 inline-block" />
+                          Locked market
+                        </p>
                         <p className="text-xs font-medium truncate">{status.currentMarket}</p>
                         <p className="text-[10px] font-mono text-cyan-400">{status.currentContractType} · ${status.currentStake.toFixed(2)}</p>
                       </div>
@@ -549,32 +709,10 @@ export function SpeedAIFab() {
                     </div>
                   )}
 
-                  {/* Top markets */}
-                  {status?.topMarkets && status.topMarkets.length > 0 && (
-                    <div>
-                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 font-semibold">Top Markets</p>
-                      <div className="space-y-1">
-                        {status.topMarkets.slice(0, 4).map((m, i) => (
-                          <div key={i} className="flex items-center gap-2 text-[11px]">
-                            <span className="text-muted-foreground w-3">{i + 1}</span>
-                            <span className="flex-1 truncate">{m.displayName}</span>
-                            <span className="font-mono text-cyan-400 text-[10px]">{m.contractType}{m.barrier !== undefined ? ` ${m.barrier}` : ""}</span>
-                            <span className="font-mono font-bold" style={{ color: `hsl(${m.score * 1.2}, 70%, 55%)` }}>{m.score.toFixed(0)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
                   {/* Controls */}
                   <div className="flex gap-2">
                     {isRunning ? (
-                      <Button
-                        onClick={handleStop}
-                        disabled={loading}
-                        variant="destructive"
-                        className="flex-1 h-9 text-xs"
-                      >
+                      <Button onClick={handleStop} disabled={loading} variant="destructive" className="flex-1 h-9 text-xs">
                         <StopCircle className="w-3.5 h-3.5 mr-1.5" />
                         Stop Engine
                       </Button>
@@ -584,12 +722,12 @@ export function SpeedAIFab() {
                           New Session
                         </Button>
                         <Button
-                          onClick={handleStart}
+                          onClick={handleScan}
                           disabled={loading}
                           className="flex-1 h-9 text-xs bg-gradient-to-r from-cyan-600 to-blue-600"
                         >
-                          <Zap className="w-3.5 h-3.5 mr-1.5" />
-                          Restart
+                          <ScanSearch className="w-3.5 h-3.5 mr-1.5" />
+                          Re-scan
                         </Button>
                       </>
                     )}
@@ -609,12 +747,8 @@ export function SpeedAIFab() {
         className="fixed bottom-5 right-5 z-50 group"
         aria-label="SpeedAI Engine"
       >
-        {/* Outer glow ring — pulsing when running */}
-        {isRunning && (
-          <span className="absolute inset-0 rounded-2xl bg-cyan-500/30 animate-ping" />
-        )}
+        {isRunning && <span className="absolute inset-0 rounded-2xl bg-cyan-500/30 animate-ping" />}
 
-        {/* The FAB itself — diamond/crystal hex shape via border-radius */}
         <div className={`
           relative w-14 h-14 rounded-2xl flex flex-col items-center justify-center gap-0.5
           shadow-lg shadow-cyan-900/50 transition-all duration-200
@@ -622,26 +756,17 @@ export function SpeedAIFab() {
             ? "bg-gradient-to-br from-cyan-500 to-blue-600 shadow-cyan-500/40"
             : "bg-gradient-to-br from-[#0d1a2d] to-[#0a1525] border border-cyan-500/40 hover:border-cyan-400/70"}
         `}>
-          {/* Subtle inner shimmer */}
           <div className="absolute inset-0 rounded-2xl bg-gradient-to-tr from-white/5 to-transparent pointer-events-none" />
-
           <Zap className={`w-5 h-5 ${isRunning ? "text-white" : "text-cyan-400"}`} />
           <span className={`text-[8px] font-bold tracking-widest ${isRunning ? "text-white/90" : "text-cyan-500"}`}>
             {isRunning ? "LIVE" : "SPEED"}
           </span>
-
-          {/* Trade count badge */}
           {isRunning && status && status.tradeCount > 0 && (
-            <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-green-500 text-white text-[9px] font-bold flex items-center justify-center border border-black">
+            <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-cyan-400 text-[8px] font-bold text-black flex items-center justify-center">
               {status.tradeCount}
             </span>
           )}
         </div>
-
-        {/* Tooltip */}
-        <span className="absolute right-full mr-2 top-1/2 -translate-y-1/2 px-2 py-1 rounded-lg bg-black/80 text-white text-[11px] font-medium whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none border border-white/10">
-          SpeedAI Engine
-        </span>
       </motion.button>
     </>
   );
