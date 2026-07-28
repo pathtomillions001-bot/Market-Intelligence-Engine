@@ -403,7 +403,7 @@ export function SpeedAIFab() {
                     <Zap className="w-3.5 h-3.5 text-white" />
                   </div>
                   <div>
-                    <p className="text-xs font-bold text-white tracking-wide">SPEED AI</p>
+                    <p className="text-xs font-bold text-white tracking-wide">NEUROAI</p>
                     <p className="text-[9px] text-cyan-400/70 uppercase tracking-widest">1-Tick Engine</p>
                   </div>
                 </div>
@@ -745,21 +745,48 @@ export function SpeedAIFab() {
         whileHover={{ scale: 1.08 }}
         whileTap={{ scale: 0.95 }}
         className="fixed bottom-5 right-5 z-50 group"
-        aria-label="SpeedAI Engine"
+        aria-label="NeuroAI Engine"
       >
+        {/* Running ping ring */}
         {isRunning && <span className="absolute inset-0 rounded-2xl bg-cyan-500/30 animate-ping" />}
+
+        {/* Glowing orbital nodes */}
+        <motion.span
+          className="absolute -top-1.5 -left-1.5 w-2 h-2 rounded-full bg-cyan-400"
+          style={{ boxShadow: "0 0 8px 3px rgba(34,211,238,0.9)" }}
+          animate={{ opacity: [0.35, 1, 0.35], scale: [0.7, 1.3, 0.7] }}
+          transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
+        />
+        <motion.span
+          className="absolute -bottom-1.5 -right-1.5 w-2 h-2 rounded-full bg-blue-400"
+          style={{ boxShadow: "0 0 8px 3px rgba(96,165,250,0.9)" }}
+          animate={{ opacity: [0.35, 1, 0.35], scale: [0.7, 1.3, 0.7] }}
+          transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut", delay: 0.75 }}
+        />
+        <motion.span
+          className="absolute -top-1.5 -right-1.5 w-1.5 h-1.5 rounded-full bg-cyan-300"
+          style={{ boxShadow: "0 0 6px 2px rgba(103,232,249,0.9)" }}
+          animate={{ opacity: [0.35, 1, 0.35], scale: [0.7, 1.3, 0.7] }}
+          transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut", delay: 1.5 }}
+        />
+        <motion.span
+          className="absolute -bottom-1.5 -left-1.5 w-1.5 h-1.5 rounded-full bg-blue-300"
+          style={{ boxShadow: "0 0 6px 2px rgba(147,197,253,0.9)" }}
+          animate={{ opacity: [0.35, 1, 0.35], scale: [0.7, 1.3, 0.7] }}
+          transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut", delay: 1.1 }}
+        />
 
         <div className={`
           relative w-14 h-14 rounded-2xl flex flex-col items-center justify-center gap-0.5
-          shadow-lg shadow-cyan-900/50 transition-all duration-200
+          shadow-lg transition-all duration-200
           ${isRunning
-            ? "bg-gradient-to-br from-cyan-500 to-blue-600 shadow-cyan-500/40"
-            : "bg-gradient-to-br from-[#0d1a2d] to-[#0a1525] border border-cyan-500/40 hover:border-cyan-400/70"}
+            ? "bg-gradient-to-br from-cyan-500 to-blue-600 shadow-[0_0_24px_rgba(6,182,212,0.6)]"
+            : "bg-gradient-to-br from-[#0d1a2d] to-[#0a1525] border border-cyan-500/40 hover:border-cyan-400/70 shadow-[0_0_16px_rgba(6,182,212,0.25)] hover:shadow-[0_0_22px_rgba(6,182,212,0.45)]"}
         `}>
           <div className="absolute inset-0 rounded-2xl bg-gradient-to-tr from-white/5 to-transparent pointer-events-none" />
           <Zap className={`w-5 h-5 ${isRunning ? "text-white" : "text-cyan-400"}`} />
-          <span className={`text-[8px] font-bold tracking-widest ${isRunning ? "text-white/90" : "text-cyan-500"}`}>
-            {isRunning ? "LIVE" : "SPEED"}
+          <span className={`text-[7px] font-bold tracking-wider ${isRunning ? "text-white/90" : "text-cyan-500"}`}>
+            {isRunning ? "LIVE" : "NEUROAI"}
           </span>
           {isRunning && status && status.tradeCount > 0 && (
             <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-cyan-400 text-[8px] font-bold text-black flex items-center justify-center">
