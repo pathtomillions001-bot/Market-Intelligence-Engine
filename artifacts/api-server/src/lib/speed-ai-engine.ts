@@ -71,6 +71,14 @@ export interface MarketScore {
   contractType: SpeedContractType;
   barrier?: number;
   score: number;
+  /** Score for normal contract types (0-100) */
+  normalScore?: number;
+  /** Score for recovery contract types (0-100) */
+  recoveryScore?: number;
+  /** Best recovery contract type found for this market */
+  recoveryContractType?: SpeedContractType;
+  /** Best recovery barrier found for this market */
+  recoveryBarrier?: number;
   winProbability: number;
   payout: number;
   reason: string;
@@ -342,26 +350,72 @@ export async function scoreSingleMarket(
 }
 
 /**
- * Scan ALL markets for the user's normal contract settings and return the single
- * best market. Called before starting a session so the user can confirm before trading.
+ * Scan ALL markets for both normal and recovery contract settings, then return
+ * the single best market ranked by a weighted combined score (recovery weighted 60%,
+ * normal 40% — recovery is where losses compound so it matters more).
+ *
+ * No skip logic: every market in DERIV_MARKETS is evaluated regardless of
+ * digitEnabled — scoreMarket already returns null when insufficient data exists.
+ *
+ * Broadcasts SSE "speed_ai_scan_progress" events as each market is evaluated so
+ * the frontend can animate the scan progress in real time.
  */
 export async function scanBestMarket(config: SpeedAIConfig): Promise<ScanResult> {
   const candidatesBySymbol = new Map<string, MarketScore>();
+  const total = DERIV_MARKETS.length;
+  let scanned = 0;
 
   for (const market of DERIV_MARKETS) {
-    const needsDigit = config.normalContractTypes.some(ct => ct.startsWith("DIGIT"));
-    if (needsDigit && !market.digitEnabled) continue;
+    // Emit: this market is now being analyzed
+    broadcastSSE("speed_ai_scan_progress", {
+      scanning: market.displayName,
+      symbol: market.symbol,
+      scanned,
+      total,
+      results: [...candidatesBySymbol.values()].sort((a, b) => b.score - a.score),
+    });
 
-    const best = await scoreSingleMarket(
-      market.symbol,
-      market.displayName,
-      config.normalContractTypes,
-      config.normalBarriers,
+    // Score normal contracts on this market
+    const normalBest = await scoreSingleMarket(
+      market.symbol, market.displayName,
+      config.normalContractTypes, config.normalBarriers,
     );
-    if (best) candidatesBySymbol.set(market.symbol, best);
+
+    // Score recovery contracts on this market
+    const recoveryBest = await scoreSingleMarket(
+      market.symbol, market.displayName,
+      config.recoveryContractTypes, config.recoveryBarriers,
+    );
+
+    scanned++;
+
+    if (!normalBest && !recoveryBest) continue;
+
+    const normalScore  = normalBest?.score  ?? 0;
+    const recoveryScore = recoveryBest?.score ?? 0;
+    // Weight recovery 60% — that's where losses compound and correct positioning matters most
+    const combinedScore = Math.round((normalScore * 0.4 + recoveryScore * 0.6) * 10) / 10;
+
+    const base = normalBest ?? recoveryBest!;
+    candidatesBySymbol.set(market.symbol, {
+      ...base,
+      score:               combinedScore,
+      normalScore:         Math.round(normalScore  * 10) / 10,
+      recoveryScore:       Math.round(recoveryScore * 10) / 10,
+      recoveryContractType: recoveryBest?.contractType,
+      recoveryBarrier:     recoveryBest?.barrier,
+    });
   }
 
+  // Final progress — scan complete
   const allScored = [...candidatesBySymbol.values()].sort((a, b) => b.score - a.score);
+  broadcastSSE("speed_ai_scan_progress", {
+    scanning: null,
+    symbol: null,
+    scanned: total,
+    total,
+    results: allScored,
+  });
 
   if (allScored.length === 0) {
     return {
@@ -655,11 +709,12 @@ async function runLoop(config: SpeedAIConfig) {
       logger.info({ profit: session.totalProfit }, "SpeedAI stop loss triggered");
       return;
     }
-    if (session.recovery.recoveryStep >= config.maxRecoverySteps && session.recovery.inRecovery) {
-      session.running = false;
-      session.message = `⚠️ Max recovery steps (${config.maxRecoverySteps}) reached. Session stopped to protect capital.`;
+    // Max recovery steps reached → cap the multiplier at the last step stake but
+    // keep trading until SL or TP is hit. recordRecoveryOutcome already clamps
+    // recoveryStep to maxSteps so the stake stays at that level indefinitely.
+    if (session.recovery.inRecovery && session.recovery.recoveryStep >= config.maxRecoverySteps) {
+      session.message = `⚡ Recovery step ${config.maxRecoverySteps} — holding stake until debt cleared`;
       broadcast();
-      return;
     }
 
     // ── Brief pause between trades ─────────────────────────────────────────

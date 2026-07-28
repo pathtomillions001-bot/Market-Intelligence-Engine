@@ -48,6 +48,19 @@ interface ScanResult {
   reason: string;
 }
 
+interface ScanProgress {
+  scanning: string | null;        // display name of market currently being analyzed
+  scanningSymbol: string | null;  // symbol of market currently being analyzed
+  scanned: number;                // how many markets have finished
+  total: number;                  // total markets to scan
+  results: Array<{                // completed results so far
+    symbol: string;
+    score: number;
+    normalScore?: number;
+    recoveryScore?: number;
+  }>;
+}
+
 interface SessionStatus {
   running: boolean;
   sessionId: string | null;
@@ -77,6 +90,52 @@ interface SessionStatus {
   };
   topMarkets?: MarketScore[];
 }
+
+// ── Scan market groups (for progress visualization) ──────────────────────────
+
+const SCAN_MARKET_GROUPS: { label: string; col: number; markets: { symbol: string; short: string }[] }[] = [
+  {
+    label: "Volatility",
+    col: 0,
+    markets: [
+      { symbol: "R_10",   short: "V10"  },
+      { symbol: "R_25",   short: "V25"  },
+      { symbol: "R_50",   short: "V50"  },
+      { symbol: "R_75",   short: "V75"  },
+      { symbol: "R_100",  short: "V100" },
+    ],
+  },
+  {
+    label: "Volatility 1s",
+    col: 1,
+    markets: [
+      { symbol: "1HZ10V",  short: "V10" },
+      { symbol: "1HZ25V",  short: "V25" },
+      { symbol: "1HZ50V",  short: "V50" },
+      { symbol: "1HZ75V",  short: "V75" },
+      { symbol: "1HZ100V", short: "V100" },
+    ],
+  },
+  {
+    label: "Jump",
+    col: 0,
+    markets: [
+      { symbol: "JD10",  short: "J10"  },
+      { symbol: "JD25",  short: "J25"  },
+      { symbol: "JD50",  short: "J50"  },
+      { symbol: "JD75",  short: "J75"  },
+      { symbol: "JD100", short: "J100" },
+    ],
+  },
+  {
+    label: "Indices",
+    col: 1,
+    markets: [
+      { symbol: "RDBULL", short: "Bull" },
+      { symbol: "RDBEAR", short: "Bear" },
+    ],
+  },
+];
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -215,6 +274,9 @@ export function SpeedAIFab() {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<SessionStatus | null>(null);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  const [scanProgress, setScanProgress] = useState<ScanProgress>({
+    scanning: null, scanningSymbol: null, scanned: 0, total: 17, results: [],
+  });
   const { data: settings } = useGetSettings();
 
   const [config, setConfig] = useState<SpeedConfig>({
@@ -286,6 +348,22 @@ export function SpeedAIFab() {
           setStatus(data.data as SessionStatus);
           if ((data.data as SessionStatus).running) setStep("running");
         }
+        if (data.type === "speed_ai_scan_progress" && data.data) {
+          const p = data.data as {
+            scanning: string | null;
+            symbol: string | null;
+            scanned: number;
+            total: number;
+            results: Array<{ symbol: string; score: number; normalScore?: number; recoveryScore?: number }>;
+          };
+          setScanProgress({
+            scanning: p.scanning,
+            scanningSymbol: p.symbol,
+            scanned: p.scanned,
+            total: p.total,
+            results: p.results,
+          });
+        }
       } catch { /* ignore */ }
     };
     window.addEventListener("sse_event", handler);
@@ -316,6 +394,7 @@ export function SpeedAIFab() {
     setLoading(true);
     setStep("scanning");
     setScanResult(null);
+    setScanProgress({ scanning: null, scanningSymbol: null, scanned: 0, total: 17, results: [] });
     try {
       const res = await fetch("/api/speed-ai/scan", {
         method: "POST",
@@ -519,23 +598,118 @@ export function SpeedAIFab() {
 
               {/* ── STEP: SCANNING ── */}
               {step === "scanning" && (
-                <div className="p-6 flex flex-col items-center gap-4 text-center">
-                  {/* Animated radar */}
-                  <div className="relative w-20 h-20 flex items-center justify-center">
-                    <span className="absolute inset-0 rounded-full border-2 border-cyan-500/30 animate-ping" />
-                    <span className="absolute inset-2 rounded-full border border-cyan-500/20 animate-ping [animation-delay:0.3s]" />
-                    <div className="w-14 h-14 rounded-full bg-cyan-500/10 border border-cyan-500/40 flex items-center justify-center">
-                      <ScanSearch className="w-6 h-6 text-cyan-400 animate-pulse" />
+                <div className="p-4 space-y-3">
+                  {/* Header + progress count */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-5 h-5 rounded-full bg-cyan-500/15 border border-cyan-500/40 flex items-center justify-center">
+                        <Loader2 className="w-3 h-3 text-cyan-400 animate-spin" />
+                      </div>
+                      <span className="text-xs font-bold text-white tracking-wide">Neural Scan</span>
+                    </div>
+                    <span className="text-[11px] font-mono text-cyan-400/80">
+                      {scanProgress.scanned} <span className="text-muted-foreground/50">/</span> {scanProgress.total || 17}
+                    </span>
+                  </div>
+
+                  {/* Progress bar */}
+                  <div className="h-1 bg-white/5 rounded-full overflow-hidden">
+                    <motion.div
+                      className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full"
+                      animate={{ width: `${(scanProgress.scanned / (scanProgress.total || 17)) * 100}%` }}
+                      transition={{ duration: 0.4, ease: "easeOut" }}
+                    />
+                  </div>
+
+                  {/* Currently-analyzing hero card */}
+                  <div className="relative rounded-xl border overflow-hidden min-h-[56px] flex items-center px-3 py-2.5 gap-3
+                    bg-cyan-500/5 border-cyan-500/25">
+                    {/* Animated shimmer sweep */}
+                    <motion.div
+                      className="absolute inset-0 bg-gradient-to-r from-transparent via-cyan-400/8 to-transparent pointer-events-none"
+                      animate={{ x: ["-110%", "210%"] }}
+                      transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+                    />
+                    <div className="relative w-8 h-8 flex-shrink-0">
+                      <motion.span
+                        className="absolute inset-0 rounded-full border border-cyan-500/40"
+                        animate={{ scale: [1, 1.45], opacity: [0.6, 0] }}
+                        transition={{ duration: 1.1, repeat: Infinity, ease: "easeOut" }}
+                      />
+                      <div className="absolute inset-0 rounded-full bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center">
+                        <ScanSearch className="w-3.5 h-3.5 text-cyan-400" />
+                      </div>
+                    </div>
+                    <div className="relative flex-1 min-w-0">
+                      <p className="text-[9px] uppercase tracking-widest text-cyan-400/60 mb-0.5">Analyzing</p>
+                      <p className="text-xs font-bold text-white truncate">
+                        {scanProgress.scanning ?? "Preparing scan…"}
+                      </p>
+                    </div>
+                    {/* Pulsing wave dots */}
+                    <div className="relative flex items-center gap-0.5 flex-shrink-0">
+                      {[0, 1, 2, 3].map(i => (
+                        <motion.span
+                          key={i}
+                          className="w-1 h-1 rounded-full bg-cyan-400"
+                          animate={{ opacity: [0.2, 1, 0.2], scaleY: [0.6, 1.4, 0.6] }}
+                          transition={{ duration: 0.7, repeat: Infinity, delay: i * 0.12, ease: "easeInOut" }}
+                        />
+                      ))}
                     </div>
                   </div>
-                  <div>
-                    <p className="text-sm font-semibold text-white">Scanning all markets…</p>
-                    <p className="text-xs text-muted-foreground mt-1">AI agents are evaluating every market<br />against your settings</p>
+
+                  {/* Market groups — 2-column layout */}
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-3">
+                    {SCAN_MARKET_GROUPS.map(group => (
+                      <div key={group.label} className="space-y-1">
+                        <p className="text-[8.5px] uppercase tracking-widest text-muted-foreground/40 font-semibold">
+                          {group.label}
+                        </p>
+                        {group.markets.map(m => {
+                          const result = scanProgress.results.find(r => r.symbol === m.symbol);
+                          const isActive = scanProgress.scanningSymbol === m.symbol;
+                          return (
+                            <motion.div
+                              key={m.symbol}
+                              className={`flex items-center justify-between px-2 py-1 rounded-md transition-colors ${
+                                isActive
+                                  ? "bg-cyan-500/15 border border-cyan-500/35"
+                                  : "bg-white/3 border border-transparent"
+                              }`}
+                              animate={isActive ? { boxShadow: ["0 0 0px rgba(6,182,212,0)", "0 0 6px rgba(6,182,212,0.3)", "0 0 0px rgba(6,182,212,0)"] } : {}}
+                              transition={{ duration: 1.2, repeat: Infinity }}
+                            >
+                              <span className={`text-[10px] font-mono font-semibold ${
+                                isActive ? "text-cyan-300" : result ? "text-white/70" : "text-muted-foreground/40"
+                              }`}>
+                                {m.short}
+                              </span>
+                              {result ? (
+                                <span className={`text-[9px] font-bold font-mono ${scoreColor(result.score)}`}>
+                                  {result.score.toFixed(0)}
+                                </span>
+                              ) : isActive ? (
+                                <motion.span
+                                  className="text-[9px] text-cyan-400 font-mono"
+                                  animate={{ opacity: [0.3, 1, 0.3] }}
+                                  transition={{ duration: 0.5, repeat: Infinity }}
+                                >
+                                  ···
+                                </motion.span>
+                              ) : (
+                                <span className="text-[9px] text-muted-foreground/25 font-mono">—</span>
+                              )}
+                            </motion.div>
+                          );
+                        })}
+                      </div>
+                    ))}
                   </div>
-                  <div className="flex items-center gap-1.5 text-[11px] text-cyan-400/70">
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    Analysing digit patterns &amp; probabilities
-                  </div>
+
+                  <p className="text-[9px] text-center text-muted-foreground/40">
+                    Scoring both normal &amp; recovery contracts per market
+                  </p>
                 </div>
               )}
 
@@ -564,6 +738,29 @@ export function SpeedAIFab() {
                             </span>
                             <span className="text-muted-foreground">{(scanResult.best.winProbability * 100).toFixed(1)}% win rate</span>
                           </div>
+                          {/* Normal / Recovery score breakdown */}
+                          {(scanResult.best.normalScore !== undefined || scanResult.best.recoveryScore !== undefined) && (
+                            <div className="flex gap-2 pt-0.5">
+                              <div className="flex-1 bg-white/5 rounded px-2 py-1">
+                                <p className="text-[8px] uppercase tracking-wider text-muted-foreground/50 mb-0.5">Normal</p>
+                                <span className={`text-[11px] font-bold font-mono ${scoreColor(scanResult.best.normalScore ?? 0)}`}>
+                                  {(scanResult.best.normalScore ?? 0).toFixed(0)}
+                                </span>
+                              </div>
+                              <div className="flex-1 bg-white/5 rounded px-2 py-1">
+                                <p className="text-[8px] uppercase tracking-wider text-amber-400/50 mb-0.5">Recovery</p>
+                                <span className={`text-[11px] font-bold font-mono ${scoreColor(scanResult.best.recoveryScore ?? 0)}`}>
+                                  {(scanResult.best.recoveryScore ?? 0).toFixed(0)}
+                                </span>
+                              </div>
+                              <div className="flex-1 bg-cyan-500/8 rounded px-2 py-1 border border-cyan-500/20">
+                                <p className="text-[8px] uppercase tracking-wider text-cyan-400/60 mb-0.5">Combined</p>
+                                <span className={`text-[11px] font-bold font-mono ${scoreColor(scanResult.best.score)}`}>
+                                  {scanResult.best.score.toFixed(0)}
+                                </span>
+                              </div>
+                            </div>
+                          )}
                           <p className="text-[10px] text-muted-foreground">{scanResult.best.reason}</p>
                         </div>
 
@@ -575,6 +772,11 @@ export function SpeedAIFab() {
                               <div key={i} className="flex items-center gap-2 text-[10px] text-muted-foreground">
                                 <span className="w-3 text-muted-foreground/40">{i + 2}</span>
                                 <span className="flex-1 truncate">{m.displayName}</span>
+                                <span className="text-muted-foreground/40 font-mono text-[9px]">
+                                  {m.normalScore !== undefined ? `N${(m.normalScore).toFixed(0)}` : ""}
+                                  {m.normalScore !== undefined && m.recoveryScore !== undefined ? " · " : ""}
+                                  {m.recoveryScore !== undefined ? `R${(m.recoveryScore).toFixed(0)}` : ""}
+                                </span>
                                 <span className={`font-mono font-semibold ${scoreColor(m.score)}`}>{m.score.toFixed(0)}</span>
                               </div>
                             ))}
@@ -583,7 +785,7 @@ export function SpeedAIFab() {
                       </div>
 
                       <p className="text-[10px] text-center text-muted-foreground/70 px-2">
-                        The engine will trade <span className="text-cyan-400 font-medium">{scanResult.best.displayName}</span> exclusively until TP or SL is hit
+                        All trades locked to <span className="text-cyan-400 font-medium">{scanResult.best.displayName}</span> — rescan to change market
                       </p>
 
                       <Button
