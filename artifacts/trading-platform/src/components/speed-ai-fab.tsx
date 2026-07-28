@@ -742,50 +742,70 @@ export function SpeedAIFab() {
       {/* FAB */}
       <motion.button
         onClick={() => setOpen(o => !o)}
-        whileHover={{ scale: 1.08 }}
-        whileTap={{ scale: 0.95 }}
-        className="fixed bottom-5 right-5 z-50 group"
+        whileHover={{ scale: 1.06 }}
+        whileTap={{ scale: 0.94 }}
+        className="fixed bottom-5 right-5 z-50"
         aria-label="NeuroAI Engine"
       >
-        {/* Running ping ring */}
-        {isRunning && <span className="absolute inset-0 rounded-2xl bg-cyan-500/30 animate-ping" />}
-
-        {/* Glowing orbital nodes */}
-        <motion.span
-          className="absolute -top-1.5 -left-1.5 w-2 h-2 rounded-full bg-cyan-400"
-          style={{ boxShadow: "0 0 8px 3px rgba(34,211,238,0.9)" }}
-          animate={{ opacity: [0.35, 1, 0.35], scale: [0.7, 1.3, 0.7] }}
-          transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
-        />
-        <motion.span
-          className="absolute -bottom-1.5 -right-1.5 w-2 h-2 rounded-full bg-blue-400"
-          style={{ boxShadow: "0 0 8px 3px rgba(96,165,250,0.9)" }}
-          animate={{ opacity: [0.35, 1, 0.35], scale: [0.7, 1.3, 0.7] }}
-          transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut", delay: 0.75 }}
-        />
-        <motion.span
-          className="absolute -top-1.5 -right-1.5 w-1.5 h-1.5 rounded-full bg-cyan-300"
-          style={{ boxShadow: "0 0 6px 2px rgba(103,232,249,0.9)" }}
-          animate={{ opacity: [0.35, 1, 0.35], scale: [0.7, 1.3, 0.7] }}
-          transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut", delay: 1.5 }}
-        />
-        <motion.span
-          className="absolute -bottom-1.5 -left-1.5 w-1.5 h-1.5 rounded-full bg-blue-300"
-          style={{ boxShadow: "0 0 6px 2px rgba(147,197,253,0.9)" }}
-          animate={{ opacity: [0.35, 1, 0.35], scale: [0.7, 1.3, 0.7] }}
-          transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut", delay: 1.1 }}
+        {/* Dim static base ring */}
+        <div
+          className="absolute pointer-events-none"
+          style={{
+            inset: "-1.5px",
+            borderRadius: "20px",
+            border: "1px solid rgba(34,211,238,0.13)",
+          }}
         />
 
+        {/* Rotating conic sweep — scanner arc */}
+        <motion.div
+          className="absolute pointer-events-none"
+          style={{
+            inset: "-1.5px",
+            borderRadius: "20px",
+            padding: "1.5px",
+            background: isRunning
+              ? "conic-gradient(from 0deg, transparent 0%, transparent 50%, rgba(34,211,238,0.15) 65%, rgba(34,211,238,1) 78%, rgba(167,243,208,1) 82%, rgba(34,211,238,1) 86%, rgba(34,211,238,0.15) 98%, transparent 100%)"
+              : "conic-gradient(from 0deg, transparent 0%, transparent 60%, rgba(34,211,238,0.1) 72%, rgba(34,211,238,0.85) 80%, rgba(167,243,208,0.95) 83%, rgba(34,211,238,0.85) 86%, rgba(34,211,238,0.1) 95%, transparent 100%)",
+            WebkitMask: "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
+            WebkitMaskComposite: "destination-out",
+            maskComposite: "exclude",
+          }}
+          animate={{ rotate: 360 }}
+          transition={{ duration: isRunning ? 1.8 : 3.5, repeat: Infinity, ease: "linear" }}
+        />
+
+        {/* Soft breathing outer glow */}
+        <motion.div
+          className="absolute inset-0 rounded-[18px] pointer-events-none"
+          animate={{
+            boxShadow: isRunning
+              ? ["0 0 18px 2px rgba(6,182,212,0.5)", "0 0 32px 6px rgba(6,182,212,0.75)", "0 0 18px 2px rgba(6,182,212,0.5)"]
+              : ["0 0 10px 0px rgba(6,182,212,0.15)", "0 0 20px 3px rgba(6,182,212,0.32)", "0 0 10px 0px rgba(6,182,212,0.15)"],
+          }}
+          transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+        />
+
+        {/* Running pulse ring */}
+        {isRunning && (
+          <motion.span
+            className="absolute inset-0 rounded-[18px] border border-cyan-400/40 pointer-events-none"
+            animate={{ scale: [1, 1.35], opacity: [0.6, 0] }}
+            transition={{ duration: 1.4, repeat: Infinity, ease: "easeOut" }}
+          />
+        )}
+
+        {/* Button face */}
         <div className={`
-          relative w-14 h-14 rounded-2xl flex flex-col items-center justify-center gap-0.5
-          shadow-lg transition-all duration-200
+          relative w-14 h-14 rounded-[18px] flex flex-col items-center justify-center gap-0.5
+          transition-all duration-300
           ${isRunning
-            ? "bg-gradient-to-br from-cyan-500 to-blue-600 shadow-[0_0_24px_rgba(6,182,212,0.6)]"
-            : "bg-gradient-to-br from-[#0d1a2d] to-[#0a1525] border border-cyan-500/40 hover:border-cyan-400/70 shadow-[0_0_16px_rgba(6,182,212,0.25)] hover:shadow-[0_0_22px_rgba(6,182,212,0.45)]"}
+            ? "bg-gradient-to-br from-cyan-500 to-blue-600"
+            : "bg-gradient-to-br from-[#0d1a2d] to-[#0a1525]"}
         `}>
-          <div className="absolute inset-0 rounded-2xl bg-gradient-to-tr from-white/5 to-transparent pointer-events-none" />
-          <Zap className={`w-5 h-5 ${isRunning ? "text-white" : "text-cyan-400"}`} />
-          <span className={`text-[7px] font-bold tracking-wider ${isRunning ? "text-white/90" : "text-cyan-500"}`}>
+          <div className="absolute inset-0 rounded-[18px] bg-gradient-to-tr from-white/8 to-transparent pointer-events-none" />
+          <Zap className={`w-5 h-5 drop-shadow-sm ${isRunning ? "text-white" : "text-cyan-300"}`} />
+          <span className={`text-[7px] font-bold tracking-wider ${isRunning ? "text-white/90" : "text-cyan-400/90"}`}>
             {isRunning ? "LIVE" : "NEUROAI"}
           </span>
           {isRunning && status && status.tradeCount > 0 && (
