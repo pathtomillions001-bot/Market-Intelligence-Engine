@@ -32,6 +32,8 @@ export const settingsTable = pgTable("settings", {
   recoveryUnderDigit: integer("recovery_under_digit").notNull().default(6),
   recoveryMethod: text("recovery_method").notNull().default("split"),
   recoveryStateJson: text("recovery_state_json"),
+  riskAmountType: text("risk_amount_type").notNull().default("fixed"),
+  riskAmountValue: numeric("risk_amount_value", { precision: 20, scale: 2 }).notNull().default("1.00"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

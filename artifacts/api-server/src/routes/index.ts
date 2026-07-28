@@ -6,6 +6,7 @@ import tradesRouter from "./trades";
 import analyticsRouter from "./analytics";
 import aiRouter from "./ai";
 import settingsRouter from "./settings";
+import speedAiRouter from "./speed-ai";
 
 const router: IRouter = Router();
 
@@ -16,5 +17,6 @@ router.use("/trades", tradesRouter);
 router.use("/analytics", analyticsRouter);
 router.use("/ai", aiRouter);
 router.use("/settings", settingsRouter);
+router.use("/speed-ai", speedAiRouter);
 
 export default router;

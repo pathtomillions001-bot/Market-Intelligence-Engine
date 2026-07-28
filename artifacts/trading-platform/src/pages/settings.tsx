@@ -8,7 +8,7 @@ import { motion } from "framer-motion";
 import { useState, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Info, TrendingUp, TrendingDown, Hash, Equal, Shuffle } from "lucide-react";
+import { Info, TrendingUp, TrendingDown, Hash, Equal, Shuffle, DollarSign, Percent } from "lucide-react";
 
 function SettingRow({ label, description, children }: { label: string; description?: string; children: React.ReactNode }) {
   return (
@@ -82,6 +82,8 @@ export default function Settings() {
 
   const [form, setForm] = useState({
     riskProfile: "moderate" as "conservative" | "moderate" | "aggressive",
+    riskAmountType: "fixed" as "fixed" | "percentage",
+    riskAmountValue: 1,
     maxRiskPerTrade: 2,
     dailyTarget: 50,
     dailyLossLimit: 30,
@@ -114,6 +116,8 @@ export default function Settings() {
     if (settings) {
       setForm({
         riskProfile: settings.riskProfile as any,
+        riskAmountType: ((settings as any).riskAmountType ?? "fixed") as "fixed" | "percentage",
+        riskAmountValue: (settings as any).riskAmountValue ?? 1,
         maxRiskPerTrade: settings.maxRiskPerTrade,
         dailyTarget: settings.dailyTarget,
         dailyLossLimit: settings.dailyLossLimit,
@@ -242,7 +246,36 @@ export default function Settings() {
               </SelectContent>
             </Select>
           </SettingRow>
-          <SettingRow label="Max Risk Per Trade" description="% of balance to risk per trade.">
+          <SettingRow label="Risk Amount Type" description="Choose how you specify the amount to risk per trade.">
+            <div className="flex rounded-lg overflow-hidden border border-border">
+              <button
+                onClick={() => set("riskAmountType", "fixed")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors ${form.riskAmountType === "fixed" ? "bg-primary text-primary-foreground" : "bg-secondary/50 text-muted-foreground hover:text-foreground"}`}
+              >
+                <DollarSign className="w-3 h-3" /> Fixed $
+              </button>
+              <button
+                onClick={() => set("riskAmountType", "percentage")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors ${form.riskAmountType === "percentage" ? "bg-primary text-primary-foreground" : "bg-secondary/50 text-muted-foreground hover:text-foreground"}`}
+              >
+                <Percent className="w-3 h-3" /> % Balance
+              </button>
+            </div>
+          </SettingRow>
+          <SettingRow
+            label={form.riskAmountType === "fixed" ? "Risk Amount" : "Risk Percentage"}
+            description={form.riskAmountType === "fixed" ? "Fixed dollar amount to risk per trade." : "Percentage of current balance to risk per trade."}
+          >
+            <NumInput
+              value={form.riskAmountValue}
+              onChange={(v) => set("riskAmountValue", v)}
+              min={form.riskAmountType === "fixed" ? 0.35 : 0.1}
+              max={form.riskAmountType === "fixed" ? 50000 : 50}
+              step={form.riskAmountType === "fixed" ? 0.5 : 0.1}
+              suffix={form.riskAmountType === "fixed" ? "$" : "%"}
+            />
+          </SettingRow>
+          <SettingRow label="Max Risk Per Trade" description="% of balance — absolute safety ceiling regardless of risk amount setting.">
             <NumInput value={form.maxRiskPerTrade} onChange={(v) => set("maxRiskPerTrade", v)} min={0.1} max={10} step={0.1} suffix="%" />
           </SettingRow>
           <SettingRow label="Max Stake Per Trade" description="Hard cap per trade regardless of balance.">
