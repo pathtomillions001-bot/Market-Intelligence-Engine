@@ -680,6 +680,34 @@ router.get("/deriv-journal", async (_req, res): Promise<void> => {
   res.json({ source: "deriv" as const, trades: mapped, todayTrades: journalStats.todayTradesList, stats: journalStats });
 });
 
+// ── Today's session — local DB, no limits ─────────────────────────────────────
+// Source of truth for the Analytics page "Today's Session" view.
+// Reads directly from the local DB where every trade is written synchronously on
+// execution. This is intentionally separate from the Deriv journal so that the
+// daily analytics are never subject to Deriv's profit_table pagination delays or
+// the race condition between the one-shot 500-record fallback and the paginated
+// cache building in the background.
+router.get("/today-session", async (_req, res): Promise<void> => {
+  const today = getTodayStart();
+
+  const rows = await db
+    .select()
+    .from(tradesTable)
+    .where(sql`${tradesTable.createdAt} >= ${today} AND ${tradesTable.status} IN ('won', 'lost')`)
+    .orderBy(tradesTable.createdAt); // oldest → newest (for charts/timeline)
+
+  const todayTrades = rows.map((t) => ({
+    ...formatTrade(t),
+    won: t.status === "won",
+  }));
+
+  // Streak requires newest-first — pass a reversed copy
+  const newestFirst = [...todayTrades].reverse();
+  const todayStats = computeStatsCore(newestFirst);
+
+  res.json({ todayTrades, todayStats });
+});
+
 router.get("/:id", async (req, res): Promise<void> => {
   const parseResult = GetTradeParams.safeParse(req.params);
   if (!parseResult.success) {

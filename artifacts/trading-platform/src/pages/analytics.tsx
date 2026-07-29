@@ -47,32 +47,24 @@ function contractColor(ct: string) {
 
 // ── Data hooks ────────────────────────────────────────────────────────────────
 
-// Same query key AND same endpoint as Dashboard/Journal ("derivJournal") — this is
-// what keeps "today's" profit/win-rate/streak/best-trade in sync across every page.
-// Previously Analytics used its own query key + its own client-side midnight filter,
-// which could drift from the Dashboard/Journal numbers (different fetch timing, and
-// the server's day boundary vs the browser's day boundary are not guaranteed to be
-// the same instant). Now Analytics reads the exact same `todayTrades` list and
-// `stats.todayStats` the backend already computed — no re-derivation, no drift.
+// Reads today's trades directly from the local database — no Deriv journal dependency.
+// Every trade is written to the local DB synchronously when it executes, so this is
+// always complete, stable, and has no record cap. It uses its own query key so it is
+// fully independent from the Dashboard/Journal Deriv journal cache, eliminating the
+// race condition where the journal toggles between 500 (one-shot fallback) and the
+// full paginated count while the background fetch is still building.
 function useTodayTrades() {
   return useQuery({
-    queryKey: ["derivJournal"],
+    queryKey: ["todaySession"],
     queryFn: async () => {
-      const journal = await fetch("/api/trades/deriv-journal").then(r => r.json());
-      if (journal?.source === "deriv" || journal?.source === "none") {
-        return { todayTrades: journal.todayTrades ?? [], todayStats: journal.stats?.todayStats ?? null };
-      }
-      // No Deriv connection at all — fall back to local DB, filtered client-side
-      // (there is no backend "today" computation to defer to on this path).
-      const local = await fetch("/api/trades?limit=10000").then(r => r.json());
-      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-      const todayTrades = (Array.isArray(local) ? local : [])
-        .filter((t: any) => (t.status === "won" || t.status === "lost") && new Date(t.createdAt) >= todayStart)
-        .sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-      return { todayTrades, todayStats: null };
+      const result = await fetch("/api/trades/today-session").then(r => r.json());
+      return {
+        todayTrades: result.todayTrades ?? [],
+        todayStats: result.todayStats ?? null,
+      };
     },
-    refetchInterval: 10_000,
-    staleTime: 5_000,
+    refetchInterval: 5_000,
+    staleTime: 3_000,
   });
 }
 
@@ -360,13 +352,11 @@ export default function Analytics() {
   const serverStats = data?.todayStats ?? null;
   const { data: drawdown } = useGetDrawdownAnalysis({ query: { refetchInterval: 15000 } } as any);
 
-  // Same SSE-driven invalidation Dashboard/Journal use, on the same "derivJournal"
-  // query key — so a trade completing anywhere in the app updates Analytics with
-  // the same zero-latency feel, not just its 10s poll.
+  // When a trade completes, immediately refresh the local-DB session data.
   useEffect(() => {
     const es = new EventSource("/api/ai/events");
-    es.addEventListener("trade_completed", () => queryClient.invalidateQueries({ queryKey: ["derivJournal"] }));
-    es.addEventListener("journal_refreshed", () => queryClient.invalidateQueries({ queryKey: ["derivJournal"] }));
+    es.addEventListener("trade_completed", () => queryClient.invalidateQueries({ queryKey: ["todaySession"] }));
+    es.addEventListener("journal_refreshed", () => queryClient.invalidateQueries({ queryKey: ["todaySession"] }));
     return () => es.close();
   }, [queryClient]);
 
