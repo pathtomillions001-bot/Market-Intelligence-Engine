@@ -1667,7 +1667,7 @@ export async function waitForContractResult(
       // 4 s poll — digit contracts settle within 5-15 ticks (~5-15s at 1 Hz),
       // so 4 s still catches settlement quickly while cutting WS message rate
       // by 4× vs the old 1 s interval that was triggering Deriv's rate limit.
-      pollInterval = setInterval(poll, 4_000);
+      pollInterval = setInterval(poll, 2_000);
     });
 
     ws.on("message", (data) => {
