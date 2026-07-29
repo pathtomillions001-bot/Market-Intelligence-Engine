@@ -253,7 +253,6 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     recoveryMethod:         (s?.recoveryMethod === "instant" ? "instant" : "split") as "split" | "instant",
     recoveryMultiplier:     s ? Math.max(1.1, Number(s.recoveryMultiplier ?? 1.5)) : 1.5,
     maxRecoverySteps:       s?.maxRecoverySteps ?? 3,
-    recoveryAutoMode:       s?.recoveryAutoMode ?? false,
   };
 }
 
@@ -981,7 +980,6 @@ async function runAutonomousLoop() {
         tradingSettings.recoveryMultiplier,
         tradingSettings.recoveryMethod,
         tradingSettings.maxRecoverySteps,
-        tradingSettings.recoveryAutoMode,
       );
     }
 

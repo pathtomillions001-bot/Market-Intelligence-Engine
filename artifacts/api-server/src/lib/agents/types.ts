@@ -90,7 +90,6 @@ export interface TradingSettings {
   recoveryMethod: "split" | "instant";
   recoveryMultiplier: number;
   maxRecoverySteps: number;
-  recoveryAutoMode: boolean;
 }
 
 export interface DailyStats {
