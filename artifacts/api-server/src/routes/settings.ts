@@ -45,6 +45,7 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     recoveryOverDigit: s.recoveryOverDigit,
     recoveryUnderDigit: s.recoveryUnderDigit,
     recoveryMethod: (s as any).recoveryMethod ?? "split",
+    recoveryAutoMode: (s as any).recoveryAutoMode ?? false,
     riskAmountType: (s as any).riskAmountType ?? "fixed",
     riskAmountValue: Number((s as any).riskAmountValue ?? 1),
   };
@@ -103,6 +104,7 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).recoveryOverDigit !== undefined) updateData.recoveryOverDigit = (updates as any).recoveryOverDigit;
   if ((updates as any).recoveryUnderDigit !== undefined) updateData.recoveryUnderDigit = (updates as any).recoveryUnderDigit;
   if ((updates as any).recoveryMethod !== undefined) (updateData as any).recoveryMethod = (updates as any).recoveryMethod;
+  if ((updates as any).recoveryAutoMode !== undefined) (updateData as any).recoveryAutoMode = (updates as any).recoveryAutoMode;
   if ((updates as any).riskAmountType !== undefined) (updateData as any).riskAmountType = (updates as any).riskAmountType;
   if ((updates as any).riskAmountValue !== undefined) (updateData as any).riskAmountValue = String((updates as any).riskAmountValue);
 
