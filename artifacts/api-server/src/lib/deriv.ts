@@ -1162,34 +1162,6 @@ class DerivJournalManager extends EventEmitter {
     }
   }
 
-  /**
-   * Immediately inject a just-settled trade into the cache as a synthetic
-   * profit_table transaction so the journal updates without waiting for the
-   * full multi-page Deriv re-fetch (which can take several seconds).
-   *
-   * Always follow this with forceRefresh() so the real Deriv data eventually
-   * reconciles and replaces the synthetic entry.
-   *
-   * @param rawTx - Object in Deriv profit_table transaction shape.
-   *   Use `_barrier` (number | null) for pre-parsed barrier so the
-   *   deriv-journal route can skip longcode parsing on synthetic entries.
-   */
-  prependOptimistic(rawTx: any): void {
-    // Skip if this exact trade is already in the cache (concurrent refresh
-    // beat us to it) — prevents duplicate journal entries.
-    if (
-      rawTx.transaction_id != null &&
-      this.cachedTransactions.some((t) => t.transaction_id === rawTx.transaction_id)
-    ) {
-      return;
-    }
-    this.cachedTransactions = [rawTx, ...this.cachedTransactions];
-    this.lastFetchMs = Date.now();
-    // Emit "refreshed" so the global SSE handler in ai.ts immediately
-    // broadcasts journal_refreshed to all connected clients.
-    this.emit("refreshed", this.cachedTransactions);
-  }
-
   private stopTimers() {
     if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
     if (this.refreshTimer) { clearInterval(this.refreshTimer); this.refreshTimer = null; }
