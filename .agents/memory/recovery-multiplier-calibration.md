@@ -1,35 +1,60 @@
 ---
-name: Recovery auto-mode step multiplier formula
-description: Auto-mode recovery uses a step-based geometric formula (K=0.777/netPayout), not full single-trade recovery. Analytics 500-trade fallback removed.
+name: Recovery auto-mode intelligent stake formula
+description: Auto-mode recovery uses K-calibrated step 1, then debt-aware linear-capped stakes for steps 2+ with method-specific baseFactor (instant=3.0, split=2.0).
 ---
 
-## Auto-mode recovery: step-based geometric formula
+## Auto-mode recovery: intelligent debt-aware formula
 
-Instead of "recover everything in one shot" (`minRecovery = unrecoveredAmount/netPayout × 1.02`),
-auto mode now uses a calibrated per-barrier step sequence in `computeDynamicStake()`:
+`computeDynamicStake()` in `recovery-engine.ts`, auto-mode block:
 
+### Step 1: K-calibrated entry (always)
 ```
 K = 0.777
-step1Mult  = min(K / netPayout, 15)   // e.g. 2.10× for OVER 3/UNDER 6 (net=0.37)
-growthRatio = 1 + step1Mult            // e.g. 3.10 for OVER 3
-absoluteMult = step1Mult × growthRatio^(recoveryStep - 1)
-stake = baseStake × absoluteMult
+step1Mult      = min(K / netPayout, 15)
+step1Reference = baseStake × step1Mult
+stake          = step1Reference
+```
+e.g. OVER 3/UNDER 6 (net=0.37): step1Mult=2.10, step1Reference=$1.47 for $0.70 base.
+A win at step 1 recovers ~77.7% of the original loss (partial by design — keeps entry conservative).
+
+### Steps 2+: debt-aware with linearly growing cap
+```
+stepOffset = recoveryStep - 2        // 0 at step 2, 1 at step 3, …
+baseFactor = instant ? 3.0 : 2.0    // method-specific starting ceiling
+capFactor  = baseFactor + stepOffset × 0.5
+cap        = step1Reference × capFactor
+
+stake = min(minRecovery, cap)        // accept partial recovery when capped
 ```
 
-Verified against user examples:
-- OVER 3/UNDER 6 (net≈0.37): step1=2.10×, step2≈3.10× relative → stake ~$4.56 vs user's $4.50 ✓
-- OVER 4/UNDER 5 (net≈0.457): step1=1.70×, step2≈2.70× relative
+Where `minRecovery = unrecoveredAmount / netPayout × 1.02`.
 
-**Why K=0.777:** derived from user example "OVER 3/UNDER 6 step-1 multiplier = 2.1". Since 2.1 × 0.37 = 0.777, each win recovers ~77.7% of the initial base stake rather than 100% — allowing partial recovery over several wins instead of one enormous bet.
+Cap schedule for OVER 3 (step1Ref=$1.47):
+| Step | Instant cap | Split cap |
+|------|------------|-----------|
+| 1    | $1.47      | $1.47     |
+| 2    | $4.41 (3.0×) | $2.94 (2.0×) |
+| 3    | $5.15 (3.5×) | $3.68 (2.5×) |
+| 4    | $5.88 (4.0×) | $4.41 (3.0×) |
+| 5    | $6.62 (4.5×) | $5.15 (3.5×) |
 
-**Cap at 15×:** for near-zero net-payout barriers (DIGITDIFF, OVER 0/1) where K/net would be absurd (>15×), clamped at 15. The `maxExposure` cap provides a further safety backstop.
+**Old geometric produced: step 2=$4.56, step 3=$14.13, step 4=$43.80 — rejected as too aggressive.**
 
-**Why not single-trade recovery:** the old formula caused greedy escalation (2.76×, 3.76×, 4.76×…) because it tried to cover the FULL accumulated debt in each step. The new formula accepts that recovery may span 2-3 wins; `unrecoveredAmount` shrinks naturally with each partial win.
+### Key properties
+- When `minRecovery < cap` (debt is small after partial wins), only the exact-needed stake is used — never overshoot.
+- When capped, partial recovery: remaining debt carries forward and shrinks with each subsequent win.
+- **Split**: starts lower (2×), grows slower — conservative, takes more wins but stakes stay small.
+- **Instant**: starts higher (3×), same growth rate — faster recovery attempt but still bounded.
+- Both caps grow linearly (+0.5× per consecutive loss), never exponentially.
 
-## Analytics 500-trade oscillation fix
+### Why K=0.777
+Derived from user example: OVER 3/UNDER 6 step-1 multiplier = 2.10; 2.10 × 0.37 = 0.777.
+Each step-1 win recovers ~77.7% of the base stake, not 100% — intentionally partial to keep entry gentle.
 
-`getDerivTransactions()` in `trades.ts` previously fell back to `fetchDerivProfitTable(token, 500)` when the JournalManager cache was empty. This returned at most 500 trades, causing the UI to show 500 → then jump to the real full count once pagination completed.
+### Manual mode (recoveryAutoMode=false)
+Uses `recoveryMultiplier` from settings.  
+- Instant: `splitEquivalentStake = baseStake × recoveryMultiplier`; jumps to `minRecovery` only when that's insufficient.
+- Split: progressive cap = `max(recoveryMultiplier, 1/netPayout×1.05) + stepOffset` per loss.
 
-**Fix:** removed the fallback entirely. Now returns `[]` when cache is empty and kicks `journalManager.forceRefresh()`. The next poll (5-10 s) gets the fully-paginated dataset. Also removed the now-unused `fetchDerivProfitTable` import from `trades.ts`.
-
-**How to apply:** never add a single-shot `fetchDerivProfitTable` fallback back to `getDerivTransactions`. The journalManager is the sole paginated source; empty cache = brief loading state, not a stale 500-trade snapshot.
+## Analytics 500-trade oscillation fix (separate issue, same file context)
+`getDerivTransactions()` in `trades.ts` no longer falls back to `fetchDerivProfitTable(500)` when the JournalManager cache is empty. Returns `[]` + kicks `forceRefresh()`. Prevents 500→full-count flip in the Analytics UI.

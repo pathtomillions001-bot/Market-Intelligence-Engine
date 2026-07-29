@@ -217,41 +217,64 @@ function computeDynamicStake(
   const maxExposure = Math.min(balance * maxExposurePct, maxTradeStake);
 
   // ── AUTO MODE ────────────────────────────────────────────────────────────────
-  // Per-barrier calibrated step multipliers. Instead of "recover everything in
-  // one shot" (which produced greedy stakes: 2.76×, then 3.76×, then 4.76×…),
-  // we use a smooth geometric sequence keyed to the barrier's real net payout:
+  // Intelligent stake sizing that adapts to both the barrier's real payout and
+  // the actual accumulated debt, while keeping stakes predictable and bounded.
   //
-  //   K = 0.777  ← calibrated so step 1 wins back ~77.7% of the initial base
-  //               stake. Derived from user example: OVER 3/UNDER 6 with live
-  //               net payout ≈ 0.37 → step-1 multiplier = 0.777/0.37 = 2.10.
+  // STEP 1: always the K-calibrated gentle entry.
+  //   K = 0.777 → step1Mult = K / netPayout (capped at 15 for low-payout barriers)
+  //   e.g. OVER 3/UNDER 6 (net=0.37) → 2.10× base → $1.47 for $0.70 base stake.
+  //   A single win here recovers ~77.7% of the initial loss; accepting partial
+  //   recovery on step 1 keeps the entry stake conservative.
   //
-  //   step-1 absolute multiplier = K / netPayout
-  //     e.g. net=0.37 (OVER 3/UNDER 6) → 2.10×; net=0.457 (OVER 4/UNDER 5) → 1.70×
+  // STEPS 2+: target the actual accumulated debt, but cap the stake using a
+  //   LINEARLY growing ceiling (not geometric) so repeated consecutive losses
+  //   never create an exponential runaway in required stake size.
   //
-  //   step-N absolute multiplier = (K/net) × (1 + K/net)^(N−1)
-  //     The inter-step growth ratio r = 1 + K/net is constant per barrier:
-  //     e.g. OVER 3/UNDER 6: r ≈ 3.10  → step 2 ≈ 2.10×3.10 = 6.51× base
-  //          OVER 4/UNDER 5: r ≈ 2.70  → step 2 ≈ 1.70×2.70 = 4.59× base
+  //   cap = step1Reference × (baseFactor + (recoveryStep − 2) × 0.5)
   //
-  // Because each WIN only partially reduces unrecoveredAmount (the recovery
-  // engine subtracts the actual profit earned), the debt clears gradually over
-  // a few successful trades rather than one enormous bet — exactly the
-  // non-greedy behaviour the user asked for.
+  //   recoveryMethod determines baseFactor:
+  //     INSTANT (recover quickly): baseFactor = 3.0
+  //       step 2: 3.0×, step 3: 3.5×, step 4: 4.0×, step 5: 4.5× step1Ref
+  //     SPLIT (recover conservatively): baseFactor = 2.0
+  //       step 2: 2.0×, step 3: 2.5×, step 4: 3.0×, step 5: 3.5× step1Ref
   //
-  // Cap: step1Mult is clamped at 15 for near-zero net-payout barriers (e.g.
-  // DIGITDIFF netPayout 0.04) where the formula would otherwise produce
-  // mathematically valid but practically absurd multipliers (>19×).
+  //   stake = min(exactDebtRecovery, cap)
+  //
+  //   When the cap is hit, only partial recovery happens — the remaining debt
+  //   persists and shrinks with subsequent wins. When minRecovery < cap (small
+  //   remaining debt), the exact-recovery stake is used; we never overshoot.
+  //
+  // Example: OVER 3/UNDER 6, base=$0.70, step1Ref=$1.47, all consecutive losses:
+  //   INSTANT → step1=$1.47, step2=min($5.97,$4.41)=$4.41,
+  //             step3=min($18.13,$5.15)=$5.15, step4=min($32.33,$5.88)=$5.88
+  //   SPLIT   → step1=$1.47, step2=min($5.97,$2.94)=$2.94,
+  //             step3=min($14.07,$3.68)=$3.68, step4=min($22.17,$4.41)=$4.41
+  //   (Old geometric had: step2=$4.56, step3=$14.13, step4=$43.80 — too aggressive)
   if (recoveryAutoMode) {
-    if (baseStake > 0 && netPayout > 0) {
-      const K          = 0.777;
-      const step1Mult  = Math.min(K / netPayout, 15);   // e.g. 2.10 for OVER 3
-      const growthRatio = 1 + step1Mult;                // constant per-step factor
-      const absMult    = step1Mult * Math.pow(growthRatio, Math.max(0, recoveryStep - 1));
-      const stake      = baseStake * absMult;
-      return Math.max(0.35, Math.min(stake, maxExposure, maxTradeStake));
+    if (baseStake <= 0 || netPayout <= 0) {
+      return Math.max(0.35, Math.min(minRecovery, maxExposure, maxTradeStake));
     }
-    // baseStake unknown (edge case on very first call) — fall back to exact-minimum
-    return Math.max(0.35, Math.min(minRecovery, maxExposure, maxTradeStake));
+
+    const K           = 0.777;
+    const step1Mult   = Math.min(K / netPayout, 15);     // e.g. 2.10 for OVER 3
+    const step1Reference = baseStake * step1Mult;        // e.g. $1.47 for $0.70 base
+
+    if (recoveryStep <= 1) {
+      // Step 1: always the calibrated entry stake — not the full debt recovery amount.
+      return Math.max(0.35, Math.min(step1Reference, maxExposure, maxTradeStake));
+    }
+
+    // Steps 2+: intelligent cap grows linearly per consecutive loss.
+    // INSTANT starts higher (faster recovery), SPLIT starts lower (more conservative).
+    const stepOffset  = recoveryStep - 2;                // 0 at step 2, 1 at step 3, …
+    const baseFactor  = recoveryMethod === "instant" ? 3.0 : 2.0;
+    const capFactor   = baseFactor + stepOffset * 0.5;
+    const cap         = step1Reference * capFactor;
+
+    // Use whichever is smaller: exact debt recovery or the intelligent cap.
+    // Partial recovery is accepted when capped — remaining debt carries forward.
+    const stake = Math.min(minRecovery, cap);
+    return Math.max(0.35, Math.min(stake, maxExposure, maxTradeStake));
   }
 
   // ── MANUAL MODE ──────────────────────────────────────────────────────────────
