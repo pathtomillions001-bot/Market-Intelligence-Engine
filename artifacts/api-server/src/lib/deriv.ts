@@ -1116,12 +1116,9 @@ class DerivJournalManager extends EventEmitter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
-  private quickRefreshTimer: ReturnType<typeof setInterval> | null = null;
   private lastPongMs = Date.now();
   /** Accumulates transactions across paginated fetches */
   private fetchAccumulator: any[] = [];
-  /** True while processing the fast recent-trades check (not a full paginated fetch) */
-  private isQuickFetch = false;
 
   setCredentials(bearerToken: string, accountId: string) {
     const changed = this.bearerToken !== bearerToken || this.accountId !== accountId;
@@ -1131,7 +1128,6 @@ class DerivJournalManager extends EventEmitter {
       this.reconnectDelay = 3000;
       this.connect();
       this.startRefreshTimer();
-      this.startQuickRefreshTimer();
     }
   }
 
@@ -1147,7 +1143,6 @@ class DerivJournalManager extends EventEmitter {
     this.accountId = null;
     this.cachedTransactions = [];
     this.fetchAccumulator = [];
-    this.isQuickFetch = false;
     this.lastFetchMs = 0;
     this.stopTimers();
     if (this.ws) { try { this.ws.terminate(); } catch { /* ignore */ } this.ws = null; }
@@ -1170,7 +1165,6 @@ class DerivJournalManager extends EventEmitter {
   private stopTimers() {
     if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
     if (this.refreshTimer) { clearInterval(this.refreshTimer); this.refreshTimer = null; }
-    if (this.quickRefreshTimer) { clearInterval(this.quickRefreshTimer); this.quickRefreshTimer = null; }
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
   }
 
@@ -1179,36 +1173,9 @@ class DerivJournalManager extends EventEmitter {
     this.refreshTimer = setInterval(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
         this.fetchAccumulator = [];
-        this.isQuickFetch = false;
         this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
       }
     }, 60_000);
-  }
-
-  /**
-   * Fast recent-trades check — fires every 3 seconds.
-   * Fetches only the latest 100 transactions and merges any new ones into the
-   * cache without replacing it.  Only runs when:
-   *   1. The WS is open
-   *   2. We are NOT mid-pagination (fetchAccumulator is empty)
-   *   3. We already have a baseline cache (avoids racing with the first full fetch)
-   *
-   * Because the payload is a single request (≤100 rows) it resolves in ~200ms,
-   * making the journal feel near-real-time for new trades.
-   */
-  private startQuickRefreshTimer() {
-    if (this.quickRefreshTimer) clearInterval(this.quickRefreshTimer);
-    this.quickRefreshTimer = setInterval(() => {
-      if (
-        this.ws?.readyState === WebSocket.OPEN &&
-        this.fetchAccumulator.length === 0 &&
-        !this.isQuickFetch &&
-        this.cachedTransactions.length > 0
-      ) {
-        this.isQuickFetch = true;
-        this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 100 }));
-      }
-    }, 3_000);
   }
 
   private async connect() {
@@ -1238,10 +1205,8 @@ class DerivJournalManager extends EventEmitter {
       logger.info("JournalManager: connected via OTP WS — fetching profit table");
       // No authorize message — OTP URL is pre-authenticated
       this.fetchAccumulator = [];
-      this.isQuickFetch = false;
       this.ws!.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
       this.startPing();
-      this.startQuickRefreshTimer();
     });
 
     this.ws.on("message", (data) => {
@@ -1249,23 +1214,6 @@ class DerivJournalManager extends EventEmitter {
         const msg = JSON.parse(data.toString());
         if (msg.msg_type === "profit_table" && msg.profit_table) {
           const batch: any[] = msg.profit_table.transactions ?? [];
-
-          // ── Quick-fetch path: merge new transactions into the existing cache ──
-          if (this.isQuickFetch) {
-            this.isQuickFetch = false;
-            const cachedIds = new Set(this.cachedTransactions.map((t: any) => t.transaction_id));
-            const newTxs = batch.filter((t: any) => !cachedIds.has(t.transaction_id));
-            if (newTxs.length > 0) {
-              // Prepend new transactions (they are the most recent — DESC sort)
-              this.cachedTransactions = [...newTxs, ...this.cachedTransactions];
-              this.lastFetchMs = Date.now();
-              logger.info({ newCount: newTxs.length, total: this.cachedTransactions.length }, "JournalManager: quick refresh — new trades detected");
-              this.emit("refreshed", this.cachedTransactions);
-            }
-            return;
-          }
-
-          // ── Full paginated fetch path ─────────────────────────────────────────
           this.fetchAccumulator.push(...batch);
 
           if (batch.length >= JOURNAL_FETCH_LIMIT) {
@@ -1293,7 +1241,6 @@ class DerivJournalManager extends EventEmitter {
           // overwrite the complete cache with a truncated set.
           // Keep the previous complete cache intact; the next refresh cycle will retry.
           this.fetchAccumulator = [];
-          this.isQuickFetch = false;
         }
       } catch { /* ignore */ }
     });

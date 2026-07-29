@@ -93,8 +93,8 @@ export default function Trades() {
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ["derivJournal"],
     queryFn: fetchDerivJournal,
-    refetchInterval: 1000,
-    staleTime: 500,
+    refetchInterval: 20000,
+    staleTime: 5000,
   });
 
   // SSE: zero-latency trade insertion

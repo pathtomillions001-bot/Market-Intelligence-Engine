@@ -443,8 +443,8 @@ export default function Dashboard() {
   const { data: journalData } = useQuery({
     queryKey: ["derivJournal"],
     queryFn: () => fetch("/api/trades/deriv-journal").then(r => r.json()),
-    refetchInterval: 1000,
-    staleTime: 500,
+    refetchInterval: 10000,
+    staleTime: 5000,
   });
   // Dashboard shows a clean slate every day — pull the day-scoped `todayStats`
   // (win rate, streak, totals) rather than the all-time numbers. Full history
