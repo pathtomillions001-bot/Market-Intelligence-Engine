@@ -405,6 +405,23 @@ router.post("/", async (req, res): Promise<void> => {
       }
     } catch { /* ignore */ }
 
+    // Optimistic journal inject — put the settled trade into the cache RIGHT NOW
+    // so any frontend refetch triggered by trade_completed already sees it,
+    // without waiting for the full multi-page Deriv re-fetch to complete.
+    journalManager.prependOptimistic({
+      transaction_id: -openTrade.id,        // negative → no collision with real Deriv IDs
+      contract_id:    openTrade.id,
+      underlying_symbol: symbol,
+      contract_type:  contractType,
+      buy_price:      stake,
+      sell_price:     actualPayout,         // 0 when lost; stake + profit when won
+      _barrier:       barrier ?? null,      // pre-parsed; skips longcode extraction
+      purchase_time:  Math.floor(Date.now() / 1000),
+      sell_time:      Math.floor(Date.now() / 1000),
+      duration:       tradeDuration,
+      duration_unit:  durationUnit ?? "t",
+      longcode:       null,
+    });
     broadcastSSE("trade_completed", {
       trade: {
         id: closedTrade.id, symbol, displayName, contractType: normalizeDerivContractType(contractType),
@@ -416,11 +433,8 @@ router.post("/", async (req, res): Promise<void> => {
         aiConfidence: winProbability, isAutonomous: isAutonomous ?? false, source: "live",
       }
     });
-    // Immediately refresh the Deriv profit_table so journal + streak reflect this trade
-    // Broadcast journal_refreshed once Deriv confirms the updated profit_table
-    journalManager.once("refreshed", () => {
-      broadcastSSE("journal_refreshed", { ts: Date.now() });
-    });
+    // Background reconciliation: replace the synthetic entry with the real
+    // Deriv profit_table data once all pages arrive.
     journalManager.forceRefresh();
 
     // Fire-and-forget: Trade Intelligence analysis — stores why this trade won/lost in DB
@@ -661,7 +675,10 @@ router.get("/deriv-journal", async (_req, res): Promise<void> => {
     // See extractBarrierFromLongcode() — parses the specific barrier phrase,
     // not just "the last digit anywhere in the sentence" (which used to pick up
     // the duration's tick count instead of the actual barrier).
-    const barrier = extractBarrierFromLongcode(t.longcode);
+    // Prefer the pre-parsed `_barrier` field injected by prependOptimistic()
+    // on synthetic (optimistic) entries; fall back to longcode parsing for
+    // real Deriv profit_table transactions that never carry this field.
+    const barrier = (t._barrier !== undefined ? t._barrier : extractBarrierFromLongcode(t.longcode));
     return {
       id: t.transaction_id,
       symbol: t.underlying_symbol ?? "—",

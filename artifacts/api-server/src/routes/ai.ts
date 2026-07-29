@@ -1200,6 +1200,24 @@ async function runAutonomousLoop() {
       const hardLimit = freshSettingsForCooldown[0]?.consecutiveLossLimit ?? 3;
       const cooldownMins = freshSettingsForCooldown[0]?.cooldownMinutes ?? 30;
       if (sessionLossCount >= hardLimit) {
+        // Optimistic inject so journal is instant even when cooldown stops the engine
+        if (!paperTradeMode && token) {
+          journalManager.prependOptimistic({
+            transaction_id: -openTrade.id,
+            contract_id:    openTrade.id,
+            underlying_symbol: bestMarket.symbol,
+            contract_type:  effectiveContractType,
+            buy_price:      stake,
+            sell_price:     actualPayout,
+            _barrier:       effectiveBarrier ?? null,
+            purchase_time:  Math.floor(Date.now() / 1000),
+            sell_time:      Math.floor(Date.now() / 1000),
+            duration,
+            duration_unit:  "t",
+            longcode:       null,
+          });
+          journalManager.forceRefresh();
+        }
         broadcastSSE("trade_completed", {
           symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
           contract: effectiveContractType,
@@ -1210,7 +1228,6 @@ async function runAutonomousLoop() {
           ev: analysis.expectedValue,
           regime: output.regime,
         });
-        if (!paperTradeMode && token) journalManager.forceRefresh();
         logger.info({
           symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
           stake, ev: analysis.expectedValue, contract: effectiveContractType,
@@ -1228,6 +1245,24 @@ async function runAutonomousLoop() {
     tradesExecutedToday++;
     lastTradeTime = new Date();
 
+    // Optimistic inject — journal updates instantly without waiting for Deriv re-fetch
+    if (!paperTradeMode && token) {
+      journalManager.prependOptimistic({
+        transaction_id: -openTrade.id,
+        contract_id:    openTrade.id,
+        underlying_symbol: bestMarket.symbol,
+        contract_type:  effectiveContractType,
+        buy_price:      stake,
+        sell_price:     actualPayout,
+        _barrier:       effectiveBarrier ?? null,
+        purchase_time:  Math.floor(Date.now() / 1000),
+        sell_time:      Math.floor(Date.now() / 1000),
+        duration,
+        duration_unit:  "t",
+        longcode:       null,
+      });
+      journalManager.forceRefresh();
+    }
     broadcastSSE("trade_completed", {
       symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
       contract: effectiveContractType,
@@ -1238,8 +1273,6 @@ async function runAutonomousLoop() {
       ev: analysis.expectedValue,
       regime: output.regime,
     });
-    // Force-refresh the Deriv journal immediately so dashboard stats update right away
-    if (!paperTradeMode && token) journalManager.forceRefresh();
     logger.info({
       symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
       stake, ev: analysis.expectedValue,
