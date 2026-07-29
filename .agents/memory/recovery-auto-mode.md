@@ -5,6 +5,9 @@ description: recoveryAutoMode field — how manual vs auto changes stake sizing 
 
 # Recovery Auto Mode
 
+## UI badge — contract-type-aware
+`suggestedMultiplierInfo` in settings.tsx detects the actual recovery type from `preferredContractTypes` using the engine's own priority: DIGITMATCH (9× → 0.13×) → EVEN/ODD (1.96× → 1.04×) → OVER/UNDER (barrier-dependent). Badge shows "Calibrated to DIGITMATCH (9×)" etc. — not always the OVER digit. Backend uses the actual trade payout at runtime so it's always correct; the badge is display only.
+
 ## The rule
 `recoveryAutoMode` (DB column `recovery_auto_mode`, boolean, default `false`) controls how `computeDynamicStake` sizes recovery stakes.
 

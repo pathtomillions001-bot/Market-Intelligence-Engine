@@ -197,23 +197,40 @@ export default function Settings() {
 
   if (isLoading) return <div className="p-8 text-muted-foreground text-sm animate-pulse">Loading settings…</div>;
 
-  // Auto-suggest a recovery multiplier calibrated to the selected recovery barrier's REAL
-  // Deriv payout (mirrors DIGIT_PAYOUTS in api-server/src/lib/agents/digit-probability.ts).
-  // Using a generic formula disconnected from the actual payout table silently mismatched
-  // the multiplier to the barrier — e.g. OVER 3's real payout is 1.37× (needs ~2.76× stake
-  // to cover one loss), not the 1.62× a rough approximation suggested. That mismatch was
-  // the true cause of "instant recovery uses way more than expected" reports: the stake
-  // math was correct, but the multiplier fed into it didn't match the barrier being traded.
+  // Auto-suggest a recovery multiplier calibrated to the contract type the engine will
+  // actually use for recovery — mirrors the engine's own tiered priority:
+  //   DIGITMATCH (9× payout) → EVEN/ODD (~1.96×) → OVER/UNDER (barrier-dependent)
+  // The multiplier = 1/(payout-1) × 1.02 so that one winning trade exactly covers
+  // one base-stake loss.  The backend computes this per-trade from the actual payout,
+  // so this badge is just a UI preview of what Auto mode will produce.
   const DIGITOVER_PAYOUTS: Record<number, number> = {
     0: 1.04, 1: 1.08, 2: 1.19, 3: 1.37, 4: 1.63, 5: 1.96, 6: 2.45, 7: 3.27, 8: 4.90,
   };
-  const suggestedMultiplier = (() => {
-    const payout = DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63;
+  const suggestedMultiplierInfo = (() => {
+    const types = form.preferredContractTypes;
+    let payout: number;
+    let label: string;
+
+    if (types.includes("DIGITMATCH")) {
+      // Recovery scanner uses DIGITMATCH when available — 9× gross payout
+      payout = 9.0;
+      label = "DIGITMATCH (9×)";
+    } else if (types.includes("DIGITEVEN") || types.includes("DIGITODD")) {
+      // EVEN/ODD recovery — ~1.96× payout
+      payout = 1.96;
+      label = "EVEN/ODD (1.96×)";
+    } else {
+      // Default: OVER/UNDER — use the configured recovery digit barrier
+      payout = DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63;
+      label = `OVER ${form.recoveryOverDigit} (${payout.toFixed(2)}×)`;
+    }
+
     const netPayout = payout - 1;
-    if (netPayout <= 0) return 9.0;
-    // Minimum multiplier so that one win at this payout exactly covers one base-stake loss.
-    return Math.round((1 / netPayout) * 1.02 * 100) / 100;
+    if (netPayout <= 0) return { mult: 9.0, label };
+    const mult = Math.round((1 / netPayout) * 1.02 * 100) / 100;
+    return { mult, label };
   })();
+  const suggestedMultiplier = suggestedMultiplierInfo.mult;
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-8 max-w-3xl mx-auto space-y-5 pb-24">
@@ -419,11 +436,11 @@ export default function Settings() {
                       Auto ≈ {suggestedMultiplier}×
                     </div>
                     <span className="text-xs text-muted-foreground">
-                      Calibrated to OVER {form.recoveryOverDigit} payout ({(DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63).toFixed(2)}×)
+                      Calibrated to {suggestedMultiplierInfo.label}
                     </span>
                   </div>
                   <div className="text-[11px] text-muted-foreground mt-1.5">
-                    Updates automatically when you change the recovery barrier digits below.
+                    Matches your enabled recovery contract types. Enable/disable contract types above to change.
                   </div>
                 </div>
               )}
