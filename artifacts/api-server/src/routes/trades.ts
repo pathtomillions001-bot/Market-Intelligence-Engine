@@ -687,7 +687,14 @@ router.get("/deriv-journal", async (_req, res): Promise<void> => {
   });
 
   const journalStats = computeJournalStats(mapped);
-  res.json({ source: "deriv" as const, trades: mapped, todayTrades: journalStats.todayTradesList, stats: journalStats });
+  // Disable Express ETag / HTTP caching so the client always gets fresh data
+  // and React Query doesn't receive stale 304 responses after a journalManager refresh.
+  res.set("Cache-Control", "no-store");
+  // Limit the trade list to the 200 most recent for display.
+  // Stats are computed from the full set above — only the rendered list is capped.
+  // This reduces the JSON payload from ~1 MB (5000+ trades) to ~40 KB, which
+  // eliminates the main-thread JSON.parse stall that froze the FAB and delayed navigation.
+  res.json({ source: "deriv" as const, trades: mapped.slice(0, 200), todayTrades: journalStats.todayTradesList, stats: journalStats });
 });
 
 router.get("/:id", async (req, res): Promise<void> => {

@@ -1,6 +1,6 @@
 import { motion } from "framer-motion";
 import { useEffect, useRef } from "react";
-import { ChevronRight, Brain } from "lucide-react";
+import { ChevronRight, Clock, ShieldCheck, Zap, PlugZap } from "lucide-react";
 
 // ── Floating particles canvas ─────────────────────────────────────────────────
 function Particles() {
@@ -160,9 +160,9 @@ function HexIcon() {
 }
 
 const FEATURES = [
-  { icon: "⏰", label: "24/7", sub: "Markets Never Close" },
-  { icon: "🛡", label: "Secure", sub: "Powered by Deriv" },
-  { icon: "⚡", label: "Fast", sub: "Instant Execution" },
+  { Icon: Clock,        label: "24/7",   sub: "Markets Never Close", color: "#4CC9FF" },
+  { Icon: ShieldCheck,  label: "Secure", sub: "Powered by Deriv",    color: "#00F5D4" },
+  { Icon: Zap,          label: "Fast",   sub: "Instant Execution",   color: "#8B5CF6" },
 ];
 
 export default function LandingPage({ onEnter }: { onEnter: () => void }) {
@@ -280,12 +280,12 @@ export default function LandingPage({ onEnter }: { onEnter: () => void }) {
 
             {/* Feature icons */}
             <div className="grid grid-cols-3 gap-2 mb-4">
-              {FEATURES.map((f) => (
-                <div key={f.label} className="flex flex-col items-center gap-1 p-2.5 rounded-xl"
+              {FEATURES.map(({ Icon, label, sub, color }) => (
+                <div key={label} className="flex flex-col items-center gap-1.5 p-2.5 rounded-xl"
                   style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(76,201,255,0.08)" }}>
-                  <span className="text-lg">{f.icon}</span>
-                  <span className="text-[11px] font-bold text-white">{f.label}</span>
-                  <span className="text-[9px] text-center leading-snug" style={{ color: "rgba(160,170,200,0.55)" }}>{f.sub}</span>
+                  <Icon className="w-4 h-4" style={{ color }} strokeWidth={1.8} />
+                  <span className="text-[11px] font-bold text-white">{label}</span>
+                  <span className="text-[9px] text-center leading-snug" style={{ color: "rgba(160,170,200,0.55)" }}>{sub}</span>
                 </div>
               ))}
             </div>
@@ -293,22 +293,30 @@ export default function LandingPage({ onEnter }: { onEnter: () => void }) {
             {/* Separator */}
             <div className="h-px mb-4" style={{ background: "linear-gradient(90deg, transparent, rgba(139,92,246,0.12), transparent)" }} />
 
-            {/* Smart trades callout */}
+            {/* AI capability callout */}
             <motion.div
-              className="flex items-center gap-2 mb-4 px-3 py-2 rounded-xl"
-              animate={{ opacity: [0.75, 1, 0.75] }}
-              transition={{ duration: 2.5, repeat: Infinity }}
-              style={{ background: "rgba(139,92,246,0.07)", border: "1px solid rgba(139,92,246,0.2)" }}
+              className="flex items-center gap-2.5 mb-4 px-3 py-2.5 rounded-xl"
+              animate={{ opacity: [0.8, 1, 0.8] }}
+              transition={{ duration: 3, repeat: Infinity }}
+              style={{ background: "rgba(76,201,255,0.05)", border: "1px solid rgba(76,201,255,0.14)" }}
             >
-              <span className="text-[11px] font-semibold" style={{ color: "#8B5CF6" }}>✦</span>
-              <span className="text-[11px] font-medium flex-1" style={{ color: "rgba(200,180,255,0.85)" }}>
-                Smart Trades. Smarter You.
-              </span>
-              <motion.span
-                animate={{ x: [0, 4, 0] }}
-                transition={{ duration: 1.4, repeat: Infinity }}
-                style={{ color: "#8B5CF6", fontSize: 14 }}
-              >→</motion.span>
+              <div className="flex flex-col gap-0.5 flex-1">
+                <span className="text-[10px] font-bold tracking-widest uppercase" style={{ color: "#4CC9FF" }}>
+                  8 AI Agents · 17+ Markets
+                </span>
+                <span className="text-[10px]" style={{ color: "rgba(160,175,210,0.7)" }}>
+                  Neural ensemble scoring every tick, every trade.
+                </span>
+              </div>
+              <div className="flex flex-col items-end gap-0.5">
+                <span className="text-[9px] font-bold" style={{ color: "#00F5D4" }}>LIVE</span>
+                <motion.div
+                  className="w-1.5 h-1.5 rounded-full"
+                  animate={{ opacity: [1, 0.3, 1] }}
+                  transition={{ duration: 1.2, repeat: Infinity }}
+                  style={{ background: "#00F5D4", boxShadow: "0 0 6px #00F5D4" }}
+                />
+              </div>
             </motion.div>
 
             {/* CTA buttons */}
@@ -323,7 +331,7 @@ export default function LandingPage({ onEnter }: { onEnter: () => void }) {
                   boxShadow: "0 0 28px rgba(76,201,255,0.35), 0 0 60px rgba(139,92,246,0.2), inset 0 1px 0 rgba(255,255,255,0.2)",
                 }}
               >
-                <Brain className="w-4 h-4" />
+                <PlugZap className="w-4 h-4" />
                 Connect with Deriv
                 <ChevronRight className="w-3.5 h-3.5" />
               </motion.button>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -90,44 +90,60 @@ export default function Trades() {
   const pendingRef = useRef<JournalTrade[]>([]);
   const [pendingTrades, setPendingTrades] = useState<JournalTrade[]>([]);
 
+  // Debounce timer ref — prevents stacking rapid SSE-triggered invalidations
+  const invalidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleInvalidate = useCallback(() => {
+    if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
+    invalidateTimerRef.current = setTimeout(() => {
+      queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
+    }, 400);
+  }, [queryClient]);
+
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ["derivJournal"],
     queryFn: fetchDerivJournal,
-    // Poll every 2 s so stale/empty data self-corrects quickly without
-    // overwhelming the server. Background refetches don't show a loading
-    // spinner so the FAB is never blocked by this.
-    refetchInterval: 2000,
-    staleTime: 1500,
-    // Only re-render when the actual data or loading flag changes —
-    // prevents the FAB from freezing due to refetch-status churn.
+    // 5 s background poll — fast enough for auto-recovery when SSE misses.
+    // refetchIntervalInBackground: false means the timer PAUSES whenever the
+    // browser tab loses focus or the user navigates to another page, which
+    // eliminates the navigation lag and FAB freeze caused by constant JSON
+    // parsing while the journal isn't even visible.
+    refetchInterval: 5000,
+    refetchIntervalInBackground: false,
+    staleTime: 3000,
+    // Only re-render when the actual data or loading flag changes.
     notifyOnChangeProps: ["data", "isLoading", "isFetching"],
   });
 
-  // SSE: zero-latency trade insertion
+  // SSE: zero-latency trade insertion + authoritative journal sync
   useEffect(() => {
     const es = new EventSource("/api/ai/events");
+
     es.addEventListener("trade_completed", (e: MessageEvent) => {
       try {
         const payload = JSON.parse(e.data);
         const trade: JournalTrade | null = payload?.trade ?? null;
         if (trade) {
-          // Prepend to pending immediately — dedupe by id
-          // The 2 s poll + journal_refreshed will sync the confirmed list;
-          // no need to invalidate here (avoids stacking an extra refetch).
+          // Show the trade immediately in the pending list before Deriv syncs
           pendingRef.current = [trade, ...pendingRef.current.filter((t) => t.id !== trade.id)];
           setPendingTrades([...pendingRef.current]);
         }
+        // Debounced invalidation — pulls confirmed data from journalManager
+        // once Deriv's profit_table reflects the settled contract.
+        scheduleInvalidate();
       } catch { /* ignore */ }
     });
-    // journal_refreshed fires AFTER Deriv profit_table is confirmed — this is
-    // the authoritative signal to pull fresh data. trade_started is omitted
-    // deliberately: it fires before a trade settles and adds an unnecessary
-    // refetch that competes with the FAB's own polling.
+
+    // journal_refreshed fires AFTER the full profit_table is re-fetched from
+    // Deriv — this is the authoritative "new trades are live" signal.
     es.addEventListener("journal_refreshed", () => {
-      queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
+      scheduleInvalidate();
     });
-    return () => es.close();
-  }, [queryClient]);
+
+    return () => {
+      es.close();
+      if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
+    };
+  }, [queryClient, scheduleInvalidate]);
 
   // Once fresh journal data arrives, drop pending trades that are now in the journal
   useEffect(() => {
