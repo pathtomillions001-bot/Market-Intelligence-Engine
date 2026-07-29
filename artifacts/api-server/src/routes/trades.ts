@@ -71,7 +71,7 @@ async function getDerivTransactions(token: string): Promise<any[]> {
   // Always prefer the persistent manager's cache — even if stale — because it
   // holds the COMPLETE paginated result set (potentially >500 trades).
   // fetchDerivProfitTable is a single-shot fetch capped at 500 trades; calling it
-  // whenever the 20s freshness window expires was the root cause of the
+  // whenever the freshness window expires was the root cause of the
   // 1062 ↔ 500 oscillation seen in Analytics/Journal.
   // Only fall back to the one-shot fetch when the cache is completely empty
   // (e.g. server just started and the manager hasn't completed its first
@@ -80,8 +80,10 @@ async function getDerivTransactions(token: string): Promise<any[]> {
   if (cached.length > 0) {
     return cached;
   }
-  // Cache truly empty — do a best-effort one-shot fetch while the background
-  // manager completes its full paginated load.
+  // Cache empty — kick the persistent manager so it starts fetching immediately
+  // (safe no-op if the WS isn't open yet; the manager will fetch on connect).
+  journalManager.forceRefresh();
+  // Best-effort one-shot fetch while the background manager warms up.
   try {
     return await fetchDerivProfitTable(token, 500);
   } catch {

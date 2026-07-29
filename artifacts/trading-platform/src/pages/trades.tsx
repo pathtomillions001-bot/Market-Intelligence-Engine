@@ -93,8 +93,14 @@ export default function Trades() {
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ["derivJournal"],
     queryFn: fetchDerivJournal,
-    refetchInterval: 20000,
-    staleTime: 5000,
+    // Poll every 2 s so stale/empty data self-corrects quickly without
+    // overwhelming the server. Background refetches don't show a loading
+    // spinner so the FAB is never blocked by this.
+    refetchInterval: 2000,
+    staleTime: 1500,
+    // Only re-render when the actual data or loading flag changes —
+    // prevents the FAB from freezing due to refetch-status churn.
+    notifyOnChangeProps: ["data", "isLoading", "isFetching"],
   });
 
   // SSE: zero-latency trade insertion
@@ -106,18 +112,18 @@ export default function Trades() {
         const trade: JournalTrade | null = payload?.trade ?? null;
         if (trade) {
           // Prepend to pending immediately — dedupe by id
+          // The 2 s poll + journal_refreshed will sync the confirmed list;
+          // no need to invalidate here (avoids stacking an extra refetch).
           pendingRef.current = [trade, ...pendingRef.current.filter((t) => t.id !== trade.id)];
           setPendingTrades([...pendingRef.current]);
         }
-        // Immediate invalidation — Deriv data arrives via journal_refreshed event
-        queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
       } catch { /* ignore */ }
     });
-    // journal_refreshed fires AFTER Deriv profit_table is confirmed — invalidate for clean sync
+    // journal_refreshed fires AFTER Deriv profit_table is confirmed — this is
+    // the authoritative signal to pull fresh data. trade_started is omitted
+    // deliberately: it fires before a trade settles and adds an unnecessary
+    // refetch that competes with the FAB's own polling.
     es.addEventListener("journal_refreshed", () => {
-      queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
-    });
-    es.addEventListener("trade_started", () => {
       queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
     });
     return () => es.close();
