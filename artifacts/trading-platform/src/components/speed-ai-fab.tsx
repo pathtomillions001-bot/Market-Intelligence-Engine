@@ -37,6 +37,8 @@ interface MarketScore {
   contractType: string;
   barrier?: number;
   score: number;
+  normalScore?: number;
+  recoveryScore?: number;
   winProbability: number;
   reason: string;
 }
@@ -302,7 +304,8 @@ export function SpeedAIFab() {
     }));
   }, [settings]);
 
-  // Poll session status
+  // Poll session status — runs at 1 s when panel is open, 3 s in background
+  // to keep the badge trade-count live even when the panel is closed.
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchStatus = useCallback(async () => {
@@ -317,50 +320,88 @@ export function SpeedAIFab() {
   }, []);
 
   useEffect(() => {
-    if (open) {
-      fetchStatus();
-      pollRef.current = setInterval(fetchStatus, 1000);
-    } else {
-      if (pollRef.current) clearInterval(pollRef.current);
-    }
+    // Always poll — just at different rates
+    fetchStatus();
+    const intervalMs = open ? 1000 : 3000;
+    pollRef.current = setInterval(fetchStatus, intervalMs);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [open, fetchStatus]);
 
   // Own EventSource — receives speed_ai_update and speed_ai_scan_progress events
-  // directly from the server without depending on window.sse_event (which is only
-  // dispatched by page-level EventSource handlers that may not be mounted).
-  useEffect(() => {
-    const es = new EventSource("/api/ai/events");
+  // directly from the server without depending on window.sse_event.
+  //
+  // RAF batching: multiple rapid SSE events are coalesced into a single React
+  // state update per animation frame, preventing mid-animation re-render storms
+  // that caused the FAB panel to visually freeze during active trading.
+  //
+  // Auto-reconnect: the EventSource is recreated on error so a transient server
+  // restart never leaves the panel silently stale.
+  const pendingStatusRef = useRef<SessionStatus | null>(null);
+  const rafRef = useRef<number | null>(null);
 
-    es.addEventListener("speed_ai_update", (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data) as SessionStatus;
-        setStatus(data);
-        if (data.running) setStep("running");
-      } catch { /* ignore */ }
+  const applyStatus = useCallback((data: SessionStatus) => {
+    pendingStatusRef.current = data;
+    if (rafRef.current !== null) return; // already queued for this frame
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      const latest = pendingStatusRef.current;
+      if (!latest) return;
+      pendingStatusRef.current = null;
+      setStatus(latest);
+      if (latest.running) setStep("running");
     });
-
-    es.addEventListener("speed_ai_scan_progress", (e: MessageEvent) => {
-      try {
-        const p = JSON.parse(e.data) as {
-          scanning: string | null;
-          symbol: string | null;
-          scanned: number;
-          total: number;
-          results: Array<{ symbol: string; score: number; normalScore?: number; recoveryScore?: number }>;
-        };
-        setScanProgress({
-          scanning: p.scanning,
-          scanningSymbol: p.symbol,
-          scanned: p.scanned,
-          total: p.total,
-          results: p.results,
-        });
-      } catch { /* ignore */ }
-    });
-
-    return () => es.close();
   }, []);
+
+  useEffect(() => {
+    let es: EventSource;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let destroyed = false;
+
+    function connect() {
+      if (destroyed) return;
+      es = new EventSource("/api/ai/events");
+
+      es.addEventListener("speed_ai_update", (e: MessageEvent) => {
+        try { applyStatus(JSON.parse(e.data) as SessionStatus); } catch { /* ignore */ }
+      });
+
+      es.addEventListener("speed_ai_scan_progress", (e: MessageEvent) => {
+        try {
+          const p = JSON.parse(e.data) as {
+            scanning: string | null;
+            symbol: string | null;
+            scanned: number;
+            total: number;
+            results: Array<{ symbol: string; score: number; normalScore?: number; recoveryScore?: number }>;
+          };
+          setScanProgress({
+            scanning: p.scanning,
+            scanningSymbol: p.symbol,
+            scanned: p.scanned,
+            total: p.total,
+            results: p.results,
+          });
+        } catch { /* ignore */ }
+      });
+
+      es.onerror = () => {
+        es.close();
+        if (!destroyed) {
+          // Back-off 2 s before reconnecting to avoid hammering the server
+          reconnectTimer = setTimeout(connect, 2000);
+        }
+      };
+    }
+
+    connect();
+
+    return () => {
+      destroyed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+      es?.close();
+    };
+  }, [applyStatus]);
 
   // ── Build request body from current config ──────────────────────────────
   function buildBody(lockedSymbol?: string) {

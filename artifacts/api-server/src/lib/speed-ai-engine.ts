@@ -89,6 +89,8 @@ interface SpeedRecoveryState {
   recoveryStep: number;
   unrecoveredAmount: number;
   baseStake: number;
+  /** Losses taken while already IN recovery (resets to 0 on any recovery win) */
+  consecutiveRecoveryLosses: number;
 }
 
 export interface SpeedAIStatus {
@@ -137,7 +139,7 @@ let session: {
   winCount: 0,
   lossCount: 0,
   currentStake: 0,
-  recovery: { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: 0 },
+  recovery: { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: 0, consecutiveRecoveryLosses: 0 },
   topMarkets: [],
   stopRequested: false,
 };
@@ -500,25 +502,31 @@ function recordRecoveryOutcome(
     if (rec.inRecovery) {
       const remaining = rec.unrecoveredAmount - Math.max(0, profit);
       if (remaining <= 0.005) {
-        return { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: rec.baseStake };
+        return { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: rec.baseStake, consecutiveRecoveryLosses: 0 };
       }
-      return { ...rec, unrecoveredAmount: remaining };
+      // Partial win while in recovery: clear the consecutive loss streak
+      return { ...rec, unrecoveredAmount: remaining, consecutiveRecoveryLosses: 0 };
     }
     return rec;
   }
   // Loss
   if (!rec.inRecovery) {
+    // First loss — entering recovery. consecutiveRecoveryLosses starts at 0
+    // because the normal trade that lost is NOT a recovery trade.
     return {
       inRecovery: true,
       recoveryStep: 1,
       unrecoveredAmount: stake,
       baseStake: rec.baseStake > 0 ? rec.baseStake : stake,
+      consecutiveRecoveryLosses: 0,
     };
   }
+  // Already in recovery and lost again — this IS a consecutive recovery loss
   return {
     ...rec,
     recoveryStep: Math.min(rec.recoveryStep + 1, Math.max(1, maxSteps)),
     unrecoveredAmount: rec.unrecoveredAmount + stake,
+    consecutiveRecoveryLosses: rec.consecutiveRecoveryLosses + 1,
   };
 }
 
@@ -582,7 +590,7 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
     winCount: 0,
     lossCount: 0,
     currentStake: config.stake,
-    recovery: { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: config.stake },
+    recovery: { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: config.stake, consecutiveRecoveryLosses: 0 },
     topMarkets: [],
     stopRequested: false,
     message: "Analyzing markets…",
@@ -627,6 +635,17 @@ async function runLoop(config: SpeedAIConfig) {
     return;
   }
 
+  // ── Execution latency tracker ──────────────────────────────────────────────
+  // Exponential moving average of round-trip time from proposal to settlement.
+  // Logged every trade so timing regressions are visible in server logs.
+  let avgExecLatencyMs = 800;
+
+  // ── Pre-analyzed result cache ──────────────────────────────────────────────
+  // Market analysis is kicked off in parallel with the post-trade sleep so the
+  // next iteration can start executing immediately without waiting for scan time.
+  // Null means the next iteration must scan fresh.
+  let preAnalyzedScored: MarketScore[] | null = null;
+
   while (session.running && !session.stopRequested) {
     // ── Determine trade mode (normal vs recovery) ──────────────────────────
     const inRecovery = session.recovery.inRecovery;
@@ -637,36 +656,97 @@ async function runLoop(config: SpeedAIConfig) {
     let best: MarketScore | undefined;
 
     if (lockedDerivsMarket) {
-      // Locked market mode: score only the one chosen market, no full scan
-      const result = await scoreSingleMarket(
-        lockedDerivsMarket.symbol,
-        lockedDerivsMarket.displayName,
-        contractTypes,
-        barriers,
-      );
-      if (!result) {
-        session.message = "Waiting for tick data on locked market…";
-        broadcast();
-        await sleep(2000);
-        continue;
+      // Locked market mode — use pre-analyzed if it covers this symbol
+      const cached = preAnalyzedScored?.find(m => m.symbol === lockedDerivsMarket.symbol);
+      preAnalyzedScored = null;
+
+      if (cached) {
+        best = cached;
+      } else {
+        const result = await scoreSingleMarket(
+          lockedDerivsMarket.symbol,
+          lockedDerivsMarket.displayName,
+          contractTypes,
+          barriers,
+        );
+        if (!result) {
+          session.message = "Waiting for tick data on locked market…";
+          broadcast();
+          await sleep(2000);
+          continue;
+        }
+        best = result;
       }
-      best = result;
-      // Keep topMarkets updated for the display panel
-      session.topMarkets = [result];
+      session.topMarkets = [best];
     } else {
-      // Free scan mode: evaluate all markets every trade
-      session.message = "Scanning markets…";
-      broadcast();
-      const scored = await analyzeMarketsForStrategy(contractTypes, barriers);
-      session.topMarkets = scored;
-      if (scored.length === 0) {
-        session.message = "No markets available — waiting for tick data…";
+      // Free scan mode — use pre-analyzed batch if available
+      if (preAnalyzedScored) {
+        const scored = preAnalyzedScored;
+        preAnalyzedScored = null;
+        session.topMarkets = scored;
+        if (scored.length === 0) {
+          session.message = "No markets available — waiting for tick data…";
+          broadcast();
+          await sleep(3000);
+          continue;
+        }
+        best = scored[0];
+      } else {
+        session.message = "Scanning markets…";
         broadcast();
-        await sleep(3000);
-        continue;
+        const scored = await analyzeMarketsForStrategy(contractTypes, barriers);
+        session.topMarkets = scored;
+        if (scored.length === 0) {
+          session.message = "No markets available — waiting for tick data…";
+          broadcast();
+          await sleep(3000);
+          continue;
+        }
+        best = scored[0];
       }
-      best = scored[0];
     }
+
+    // ── Consecutive recovery loss gate ────────────────────────────────────────
+    // If we've taken 2 losses already while in recovery, the 3rd recovery trade
+    // must be the best possible setup — no rushing. We pause 3 s for the market
+    // to stabilise, do a full fresh deep scan, and only proceed when a market
+    // clears a raised score threshold (65+). If nothing clears the bar yet, we
+    // wait another 4 s and retry rather than firing blindly into a losing streak.
+    if (inRecovery && session.recovery.consecutiveRecoveryLosses >= 2) {
+      session.message = `⚡ ${session.recovery.consecutiveRecoveryLosses} consecutive recovery losses — deep analysis, waiting for best setup…`;
+      broadcast();
+      logger.warn(
+        { consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses, symbol: best.symbol },
+        "SpeedAI recovery streak gate triggered",
+      );
+
+      // Stabilisation pause — let the market breathe before fresh analysis
+      await sleep(3000);
+      if (!session.running || session.stopRequested) break;
+
+      // Full deep rescan (ignores any pre-analyzed cache)
+      const deepScored = await analyzeMarketsForStrategy(contractTypes, barriers);
+      if (deepScored.length > 0) {
+        session.topMarkets = deepScored;
+        const candidate = lockedDerivsMarket
+          ? (deepScored.find(m => m.symbol === lockedDerivsMarket.symbol) ?? deepScored[0])
+          : deepScored[0];
+
+        if (candidate.score < 65) {
+          // Below raised threshold — skip this iteration and let the market evolve
+          session.message = `⏸ Recovery streak — waiting for setup ≥65 (best now: ${candidate.score.toFixed(0)}/100)…`;
+          broadcast();
+          await sleep(4000);
+          continue;
+        }
+        best = candidate;
+        logger.info(
+          { symbol: best.symbol, score: best.score, consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses },
+          "SpeedAI recovery streak gate cleared — proceeding with high-confidence setup",
+        );
+      }
+    }
+
     const stake = Math.round(computeRecoveryStake(session.recovery, best.payout, config, maxStake) * 100) / 100;
 
     session.currentMarket = best.displayName;
@@ -676,6 +756,7 @@ async function runLoop(config: SpeedAIConfig) {
     broadcast();
 
     // ── Execute trade ──────────────────────────────────────────────────────
+    const execStart = Date.now();
     let won: boolean;
     let profit: number;
 
@@ -701,6 +782,7 @@ async function runLoop(config: SpeedAIConfig) {
           barrier: best.barrier,
           stake: Math.round(stake * 100) / 100,
           inRecovery,
+          consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses,
           configuredOverBarrier: cfgOver,
           configuredUnderBarrier: cfgUnder,
         }, "SpeedAI executing trade with exact user barriers");
@@ -730,6 +812,16 @@ async function runLoop(config: SpeedAIConfig) {
       profit = won ? stake * (best.payout - 1) : -stake;
     }
 
+    // ── Track execution latency ────────────────────────────────────────────
+    const execLatencyMs = Date.now() - execStart;
+    avgExecLatencyMs = Math.round(avgExecLatencyMs * 0.7 + execLatencyMs * 0.3);
+    if (isLive) {
+      logger.info(
+        { execLatencyMs, avgExecLatencyMs, symbol: best.symbol, contractType: best.contractType },
+        "SpeedAI 1-tick execution latency",
+      );
+    }
+
     // ── Record outcome ─────────────────────────────────────────────────────
     session.tradeCount++;
     session.totalProfit = Math.round((session.totalProfit + profit) * 100) / 100;
@@ -750,6 +842,7 @@ async function runLoop(config: SpeedAIConfig) {
       } catch { /* best-effort */ }
     }
 
+    // Broadcast immediately — zero delay between trade result and UI update
     broadcast();
 
     // ── Check TP / SL ──────────────────────────────────────────────────────
@@ -768,15 +861,50 @@ async function runLoop(config: SpeedAIConfig) {
       return;
     }
     // Max recovery steps reached → cap the multiplier at the last step stake but
-    // keep trading until SL or TP is hit. recordRecoveryOutcome already clamps
-    // recoveryStep to maxSteps so the stake stays at that level indefinitely.
+    // keep trading until SL or TP is hit.
     if (session.recovery.inRecovery && session.recovery.recoveryStep >= config.maxRecoverySteps) {
       session.message = `⚡ Recovery step ${config.maxRecoverySteps} — holding stake until debt cleared`;
       broadcast();
     }
 
-    // ── Brief pause between trades ─────────────────────────────────────────
-    await sleep(isLive ? 1500 : 800);
+    // ── Pre-analyze next trade while pausing ──────────────────────────────────
+    // Kick off the next market scan in the background so the next iteration can
+    // execute immediately with a fresh result instead of waiting for analysis time.
+    // This effectively removes scan latency from the critical path on every trade.
+    //
+    // Skip pre-analysis when the consecutive recovery gate will fire next iteration
+    // (it forces its own deep scan — pre-analyzed result would be discarded anyway).
+    const nextInRecovery = session.recovery.inRecovery;
+    const nextContractTypes = nextInRecovery ? config.recoveryContractTypes : config.normalContractTypes;
+    const nextBarriers = nextInRecovery ? config.recoveryBarriers : config.normalBarriers;
+    const willTriggerGate = nextInRecovery && session.recovery.consecutiveRecoveryLosses >= 2;
+
+    // Pause duration: shorter than before because analysis overlaps with it.
+    // The 500 ms gives the Deriv WS a moment before the next proposal, while
+    // the pre-analysis completes in the background.
+    const pauseMs = isLive ? 500 : 300;
+
+    if (!willTriggerGate) {
+      const preAnalyzePromise = lockedDerivsMarket
+        ? scoreSingleMarket(lockedDerivsMarket.symbol, lockedDerivsMarket.displayName, nextContractTypes, nextBarriers)
+            .then(r => r ? [r] : [])
+        : analyzeMarketsForStrategy(nextContractTypes, nextBarriers);
+
+      await sleep(pauseMs);
+      if (!session.running || session.stopRequested) break;
+
+      // Collect the pre-analyzed result; errors are non-fatal (next iteration scans fresh)
+      try {
+        const result = await preAnalyzePromise;
+        preAnalyzedScored = result.length > 0 ? result : null;
+      } catch {
+        preAnalyzedScored = null;
+      }
+    } else {
+      // Gate will handle its own deep scan — just wait
+      await sleep(pauseMs);
+      preAnalyzedScored = null;
+    }
   }
 
   if (!session.running && !session.message?.startsWith("✅") && !session.message?.startsWith("🛑") && !session.message?.startsWith("⚠️")) {
