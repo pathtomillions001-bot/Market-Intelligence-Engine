@@ -280,22 +280,26 @@ export function SpeedAIFab() {
   const set = <K extends keyof SpeedConfig>(k: K, v: SpeedConfig[K]) =>
     setConfig(prev => ({ ...prev, [k]: v }));
 
-  // Sync defaults from user settings
+  // Sync defaults from user settings — ONE TIME only on first successful load.
+  // React Query refetches settings every 30 s and on window focus; without this
+  // guard the useEffect would fire on every refetch and silently overwrite any
+  // values the user changed manually inside the FAB panel.
+  const settingsLoadedRef = useRef(false);
   useEffect(() => {
-    if (settings) {
-      const s = settings as any;
-      setConfig(prev => ({
-        ...prev,
-        normalOverBarrier:    s.normalOverDigit    ?? prev.normalOverBarrier,
-        normalUnderBarrier:   s.normalUnderDigit   ?? prev.normalUnderBarrier,
-        recoveryOverBarrier:  s.recoveryOverDigit  ?? prev.recoveryOverBarrier,
-        recoveryUnderBarrier: s.recoveryUnderDigit ?? prev.recoveryUnderBarrier,
-        recoveryMultiplier:   s.recoveryMultiplier ?? prev.recoveryMultiplier,
-        recoveryMethod:       (s.recoveryMethod    ?? prev.recoveryMethod) as RecoveryMethod,
-        maxRecoverySteps:     s.maxRecoverySteps   ?? prev.maxRecoverySteps,
-        stake:                s.riskAmountValue    ?? prev.stake,
-      }));
-    }
+    if (!settings || settingsLoadedRef.current) return;
+    settingsLoadedRef.current = true;
+    const s = settings as any;
+    setConfig(prev => ({
+      ...prev,
+      normalOverBarrier:    s.normalOverDigit    ?? prev.normalOverBarrier,
+      normalUnderBarrier:   s.normalUnderDigit   ?? prev.normalUnderBarrier,
+      recoveryOverBarrier:  s.recoveryOverDigit  ?? prev.recoveryOverBarrier,
+      recoveryUnderBarrier: s.recoveryUnderDigit ?? prev.recoveryUnderBarrier,
+      recoveryMultiplier:   s.recoveryMultiplier ?? prev.recoveryMultiplier,
+      recoveryMethod:       (s.recoveryMethod    ?? prev.recoveryMethod) as RecoveryMethod,
+      maxRecoverySteps:     s.maxRecoverySteps   ?? prev.maxRecoverySteps,
+      stake:                s.riskAmountValue    ?? prev.stake,
+    }));
   }, [settings]);
 
   // Poll session status
@@ -322,35 +326,40 @@ export function SpeedAIFab() {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [open, fetchStatus]);
 
-  // SSE listener
+  // Own EventSource — receives speed_ai_update and speed_ai_scan_progress events
+  // directly from the server without depending on window.sse_event (which is only
+  // dispatched by page-level EventSource handlers that may not be mounted).
   useEffect(() => {
-    const handler = (e: Event) => {
+    const es = new EventSource("/api/ai/events");
+
+    es.addEventListener("speed_ai_update", (e: MessageEvent) => {
       try {
-        const data = JSON.parse((e as CustomEvent).detail ?? "{}");
-        if (data.type === "speed_ai_update" && data.data) {
-          setStatus(data.data as SessionStatus);
-          if ((data.data as SessionStatus).running) setStep("running");
-        }
-        if (data.type === "speed_ai_scan_progress" && data.data) {
-          const p = data.data as {
-            scanning: string | null;
-            symbol: string | null;
-            scanned: number;
-            total: number;
-            results: Array<{ symbol: string; score: number; normalScore?: number; recoveryScore?: number }>;
-          };
-          setScanProgress({
-            scanning: p.scanning,
-            scanningSymbol: p.symbol,
-            scanned: p.scanned,
-            total: p.total,
-            results: p.results,
-          });
-        }
+        const data = JSON.parse(e.data) as SessionStatus;
+        setStatus(data);
+        if (data.running) setStep("running");
       } catch { /* ignore */ }
-    };
-    window.addEventListener("sse_event", handler);
-    return () => window.removeEventListener("sse_event", handler);
+    });
+
+    es.addEventListener("speed_ai_scan_progress", (e: MessageEvent) => {
+      try {
+        const p = JSON.parse(e.data) as {
+          scanning: string | null;
+          symbol: string | null;
+          scanned: number;
+          total: number;
+          results: Array<{ symbol: string; score: number; normalScore?: number; recoveryScore?: number }>;
+        };
+        setScanProgress({
+          scanning: p.scanning,
+          scanningSymbol: p.symbol,
+          scanned: p.scanned,
+          total: p.total,
+          results: p.results,
+        });
+      } catch { /* ignore */ }
+    });
+
+    return () => es.close();
   }, []);
 
   // ── Build request body from current config ──────────────────────────────
@@ -610,7 +619,8 @@ export function SpeedAIFab() {
                     </div>
                     <div className="text-right">
                       <span className="text-sm font-bold font-mono text-cyan-400">
-                        {scanProgress.scanned}
+                        {/* Show 1-based index while actively scanning a market, exact count once done */}
+                        {scanProgress.scanning !== null ? scanProgress.scanned + 1 : scanProgress.scanned}
                       </span>
                       <span className="text-xs text-muted-foreground/40 font-mono"> / {scanProgress.total || 17}</span>
                     </div>

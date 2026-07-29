@@ -778,8 +778,14 @@ async function runAutonomousLoop() {
     }
 
     const { market: bestMarket, output } = bestResult;
-    // Rebuild ctx with real token for live trade execution (scan used null for speed)
-    const ctx = buildScanContext(bestMarket, balance, tradingSettings, daily, token, account?.currency ?? "USD");
+    // Rebuild ctx with real token for live trade execution (scan used null for speed).
+    // Carry recoveryBarrierOverride so any post-tournament coordinator/master-decision
+    // call still sees the correct normal-vs-recovery barrier pair rather than falling
+    // back to the ALLOWED_BARRIERS constant default.
+    const ctx = {
+      ...buildScanContext(bestMarket, balance, tradingSettings, daily, token, account?.currency ?? "USD"),
+      recoveryBarrierOverride: activeBarrierOverride,
+    };
     currentMarket = bestMarket.symbol;
 
     // ── Guard: block if there is already an open/in-progress trade ───────────

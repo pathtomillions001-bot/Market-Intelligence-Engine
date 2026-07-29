@@ -284,12 +284,17 @@ function pickMatchDiffBarrier(freq: number[], contractType: "DIGITMATCH" | "DIGI
 
 /**
  * Extract OVER and UNDER barriers from the barriers array.
- * Convention (set by familyToContracts): barriers[0] = OVER barrier, barriers[1] = UNDER barrier.
- * The user's exact choice is ALWAYS used — no auto-picking or substitution.
+ * Convention (set by familyToContracts in the frontend):
+ *   barriers[0] = OVER barrier, barriers[1] = UNDER barrier.
+ *
+ * IMPORTANT: each barrier has its OWN independent default.
+ * We never reuse barriers[0] (the OVER value) as the UNDER fallback — that was a
+ * prior bug that caused DIGITUNDER trades to use the OVER digit barrier when only
+ * one element was supplied, silently trading the wrong digit.
  */
 function extractBarriers(barriers: number[]): { overBarrier: number; underBarrier: number } {
-  const overBarrier  = barriers.length > 0 ? barriers[0] : 1;
-  const underBarrier = barriers.length > 1 ? barriers[1] : barriers.length > 0 ? barriers[0] : 8;
+  const overBarrier  = barriers.length > 0 ? barriers[0] : 1;  // default OVER 1  (~90% win)
+  const underBarrier = barriers.length > 1 ? barriers[1] : 8;  // default UNDER 8 (~80% win) — NEVER fall back to barriers[0]
   return { overBarrier, underBarrier };
 }
 
@@ -676,6 +681,30 @@ async function runLoop(config: SpeedAIConfig) {
 
     if (isLive) {
       try {
+        // ── Strict barrier validation — verify the trade uses exactly what was configured ──
+        // This catches any future regression where best.barrier drifts from the user's config.
+        const { overBarrier: cfgOver, underBarrier: cfgUnder } = extractBarriers(barriers);
+        if (best.contractType === "DIGITOVER" && best.barrier !== cfgOver) {
+          logger.error({ expected: cfgOver, actual: best.barrier, contractType: "DIGITOVER" },
+            "SpeedAI barrier mismatch — forcing configured OVER barrier");
+          best = { ...best, barrier: cfgOver };
+        }
+        if (best.contractType === "DIGITUNDER" && best.barrier !== cfgUnder) {
+          logger.error({ expected: cfgUnder, actual: best.barrier, contractType: "DIGITUNDER" },
+            "SpeedAI barrier mismatch — forcing configured UNDER barrier");
+          best = { ...best, barrier: cfgUnder };
+        }
+
+        logger.info({
+          symbol: best.symbol,
+          contractType: best.contractType,
+          barrier: best.barrier,
+          stake: Math.round(stake * 100) / 100,
+          inRecovery,
+          configuredOverBarrier: cfgOver,
+          configuredUnderBarrier: cfgUnder,
+        }, "SpeedAI executing trade with exact user barriers");
+
         const liveResult = await executeLiveTrade(token!, {
           symbol: best.symbol,
           contractType: best.contractType,
