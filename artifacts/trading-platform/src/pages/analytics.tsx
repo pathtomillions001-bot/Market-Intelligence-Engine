@@ -71,8 +71,8 @@ function useTodayTrades() {
         .sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
       return { todayTrades, todayStats: null };
     },
-    refetchInterval: 10_000,
-    staleTime: 5_000,
+    refetchInterval: 1_000,
+    staleTime: 500,
   });
 }
 
