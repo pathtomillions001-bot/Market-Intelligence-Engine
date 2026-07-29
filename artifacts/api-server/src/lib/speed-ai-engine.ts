@@ -104,6 +104,7 @@ export interface SpeedAIStatus {
   inRecovery: boolean;
   recoveryStep: number;
   unrecoveredAmount: number;
+  consecutiveRecoveryLosses: number;
   currentMarket?: string;
   currentContractType?: string;
   lastResult?: "won" | "lost";
@@ -298,6 +299,140 @@ function extractBarriers(barriers: number[]): { overBarrier: number; underBarrie
   const overBarrier  = barriers.length > 0 ? barriers[0] : 1;  // default OVER 1  (~90% win)
   const underBarrier = barriers.length > 1 ? barriers[1] : 8;  // default UNDER 8 (~80% win) — NEVER fall back to barriers[0]
   return { overBarrier, underBarrier };
+}
+
+// ── Intelligent recovery scanner ─────────────────────────────────────────────
+
+/**
+ * Minimum win probability for an intelligent recovery setup.
+ * 60% = meaningful edge above chance for digit contracts (~50% theoretical).
+ */
+const SMART_RECOVERY_MIN_WIN_P = 0.60;
+
+/**
+ * Full-universe intelligent recovery scanner — activated after 2+ consecutive
+ * recovery losses. Unlike normal scanning (which only tests user-configured
+ * contract types and barriers), this function tests EVERY viable contract type ×
+ * barrier combination across ALL markets and validates each candidate across two
+ * independent time windows.
+ *
+ * A candidate must pass ALL of:
+ *   1. winProbability ≥ 60% in BOTH the 50-tick (short) AND 150-tick (medium) window
+ *   2. Positive expected value (EV > 0)
+ *   3. Window consistency: |score_50 − score_150| ≤ 15 — rules out noise spikes
+ *
+ * The returned setup may use a completely different contract type and barrier
+ * than what the user configured. When consecutive losses indicate the configured
+ * approach isn't working, the AI takes full control and finds whatever IS working
+ * across the entire market universe right now.
+ *
+ * Sorted by EV (winP × netPayout − lossP) — maximises debt recovery speed while
+ * respecting the win-probability floor.
+ */
+async function findSafestRecoverySetup(): Promise<MarketScore | null> {
+  // OVER barriers from highest win-rate down: OVER 1 = 90% theoretical win
+  const OVER_BARRIERS:  readonly number[] = [1, 2, 3, 4, 5, 6, 7, 8];
+  // UNDER barriers from highest win-rate down: UNDER 9 = 90% theoretical win
+  const UNDER_BARRIERS: readonly number[] = [9, 8, 7, 6, 5, 4, 3, 2, 1];
+
+  const candidates: MarketScore[] = [];
+
+  for (const market of DERIV_MARKETS) {
+    if (!market.digitEnabled) continue;
+
+    // Two independent time windows for dual-consensus validation
+    const digits50  = tickManager.getDigits(market.symbol, 50);
+    const digits150 = tickManager.getDigits(market.symbol, 150);
+    // Skip markets without enough tick data in both windows
+    if (digits50.length < 40 || digits150.length < 80) continue;
+
+    // ── Test all OVER barriers ────────────────────────────────────────────────
+    for (const b of OVER_BARRIERS) {
+      const s50  = scoreMarket(market.symbol, market.displayName, "DIGITOVER", b, digits50,  []);
+      const s150 = scoreMarket(market.symbol, market.displayName, "DIGITOVER", b, digits150, []);
+      if (!s50 || !s150) continue;
+      if (s50.winProbability  < SMART_RECOVERY_MIN_WIN_P) continue;
+      if (s150.winProbability < SMART_RECOVERY_MIN_WIN_P) continue;
+      if (Math.abs(s50.score - s150.score) > 15) continue; // noise spike — skip
+      const winP = Math.min(s50.winProbability, s150.winProbability); // conservative
+      const ev   = winP * (s50.payout - 1) - (1 - winP);
+      if (ev <= 0) continue;
+      candidates.push({
+        ...s50,
+        score: Math.round((s50.score + s150.score) / 2),
+        winProbability: winP,
+        reason: `Smart OVER ${b}: ${(winP*100).toFixed(1)}% consensus (50+150t), EV${ev>=0?"+":""}${(ev*100).toFixed(1)}%`,
+      });
+    }
+
+    // ── Test all UNDER barriers ───────────────────────────────────────────────
+    for (const b of UNDER_BARRIERS) {
+      const s50  = scoreMarket(market.symbol, market.displayName, "DIGITUNDER", b, digits50,  []);
+      const s150 = scoreMarket(market.symbol, market.displayName, "DIGITUNDER", b, digits150, []);
+      if (!s50 || !s150) continue;
+      if (s50.winProbability  < SMART_RECOVERY_MIN_WIN_P) continue;
+      if (s150.winProbability < SMART_RECOVERY_MIN_WIN_P) continue;
+      if (Math.abs(s50.score - s150.score) > 15) continue;
+      const winP = Math.min(s50.winProbability, s150.winProbability);
+      const ev   = winP * (s50.payout - 1) - (1 - winP);
+      if (ev <= 0) continue;
+      candidates.push({
+        ...s50,
+        score: Math.round((s50.score + s150.score) / 2),
+        winProbability: winP,
+        reason: `Smart UNDER ${b}: ${(winP*100).toFixed(1)}% consensus (50+150t), EV${ev>=0?"+":""}${(ev*100).toFixed(1)}%`,
+      });
+    }
+
+    // ── Test DIGITDIFF with AI-chosen coldest digit ───────────────────────────
+    const freq150 = digitFrequency(digits150);
+    const coldDigit = pickMatchDiffBarrier(freq150, "DIGITDIFF");
+    const d50  = scoreMarket(market.symbol, market.displayName, "DIGITDIFF", coldDigit, digits50,  []);
+    const d150 = scoreMarket(market.symbol, market.displayName, "DIGITDIFF", coldDigit, digits150, []);
+    if (d50 && d150 &&
+        d50.winProbability  >= SMART_RECOVERY_MIN_WIN_P &&
+        d150.winProbability >= SMART_RECOVERY_MIN_WIN_P &&
+        Math.abs(d50.score - d150.score) <= 15) {
+      const winP = Math.min(d50.winProbability, d150.winProbability);
+      const ev   = winP * (d50.payout - 1) - (1 - winP);
+      if (ev > 0) {
+        candidates.push({
+          ...d50,
+          score: Math.round((d50.score + d150.score) / 2),
+          winProbability: winP,
+          reason: `Smart DIFF digit ${coldDigit}: ${(winP*100).toFixed(1)}% consensus (50+150t), EV${ev>=0?"+":""}${(ev*100).toFixed(1)}%`,
+        });
+      }
+    }
+
+    // ── Test EVEN / ODD ───────────────────────────────────────────────────────
+    for (const ct of ["DIGITEVEN", "DIGITODD"] as const) {
+      const e50  = scoreMarket(market.symbol, market.displayName, ct, undefined, digits50,  []);
+      const e150 = scoreMarket(market.symbol, market.displayName, ct, undefined, digits150, []);
+      if (!e50 || !e150) continue;
+      if (e50.winProbability  < SMART_RECOVERY_MIN_WIN_P) continue;
+      if (e150.winProbability < SMART_RECOVERY_MIN_WIN_P) continue;
+      if (Math.abs(e50.score - e150.score) > 15) continue;
+      const winP = Math.min(e50.winProbability, e150.winProbability);
+      const ev   = winP * (e50.payout - 1) - (1 - winP);
+      if (ev <= 0) continue;
+      candidates.push({
+        ...e50,
+        score: Math.round((e50.score + e150.score) / 2),
+        winProbability: winP,
+        reason: `Smart ${ct}: ${(winP*100).toFixed(1)}% consensus (50+150t), EV${ev>=0?"+":""}${(ev*100).toFixed(1)}%`,
+      });
+    }
+  }
+
+  if (candidates.length === 0) return null;
+
+  // Rank by EV: winP × netPayout − lossP. Captures both win-rate and reward quality.
+  return candidates.sort((a, b) => {
+    const evA = a.winProbability * (a.payout - 1) - (1 - a.winProbability);
+    const evB = b.winProbability * (b.payout - 1) - (1 - b.winProbability);
+    return evB - evA;
+  })[0];
 }
 
 export async function analyzeMarketsForStrategy(
@@ -554,6 +689,7 @@ export function getStatus(): SpeedAIStatus {
     inRecovery: session.recovery.inRecovery,
     recoveryStep: session.recovery.recoveryStep,
     unrecoveredAmount: Math.round(session.recovery.unrecoveredAmount * 100) / 100,
+    consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses,
     currentMarket: session.currentMarket,
     currentContractType: session.currentContractType,
     lastResult: session.lastResult,
@@ -707,43 +843,50 @@ async function runLoop(config: SpeedAIConfig) {
     }
 
     // ── Consecutive recovery loss gate ────────────────────────────────────────
-    // If we've taken 2 losses already while in recovery, the 3rd recovery trade
-    // must be the best possible setup — no rushing. We pause 3 s for the market
-    // to stabilise, do a full fresh deep scan, and only proceed when a market
-    // clears a raised score threshold (65+). If nothing clears the bar yet, we
-    // wait another 4 s and retry rather than firing blindly into a losing streak.
+    // After 2 consecutive losses while in recovery the AI takes full control:
+    // it runs findSafestRecoverySetup(), which scans EVERY contract type ×
+    // barrier × market with dual-window (50t + 150t) consensus validation.
+    // The setup it selects may differ completely from the user-configured
+    // recovery contract types — that is intentional. If the configured setup
+    // keeps losing, the AI finds whatever is actually working right now.
+    let intelligentRecoveryOverride = false;
+
     if (inRecovery && session.recovery.consecutiveRecoveryLosses >= 2) {
-      session.message = `⚡ ${session.recovery.consecutiveRecoveryLosses} consecutive recovery losses — deep analysis, waiting for best setup…`;
+      session.message = `⚡ ${session.recovery.consecutiveRecoveryLosses} recovery losses in a row — AI scanning all markets for safest setup…`;
       broadcast();
       logger.warn(
         { consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses, symbol: best.symbol },
-        "SpeedAI recovery streak gate triggered",
+        "SpeedAI intelligent recovery gate triggered",
       );
 
       // Stabilisation pause — let the market breathe before fresh analysis
       await sleep(3000);
       if (!session.running || session.stopRequested) break;
 
-      // Full deep rescan (ignores any pre-analyzed cache)
-      const deepScored = await analyzeMarketsForStrategy(contractTypes, barriers);
-      if (deepScored.length > 0) {
-        session.topMarkets = deepScored;
-        const candidate = lockedDerivsMarket
-          ? (deepScored.find(m => m.symbol === lockedDerivsMarket.symbol) ?? deepScored[0])
-          : deepScored[0];
+      // Run the full-universe intelligent scanner
+      const smartSetup = await findSafestRecoverySetup();
 
-        if (candidate.score < 65) {
-          // Below raised threshold — skip this iteration and let the market evolve
-          session.message = `⏸ Recovery streak — waiting for setup ≥65 (best now: ${candidate.score.toFixed(0)}/100)…`;
-          broadcast();
-          await sleep(4000);
-          continue;
-        }
-        best = candidate;
+      if (smartSetup) {
+        best = smartSetup;
+        intelligentRecoveryOverride = true; // AI has full control of contract + barrier
+        session.topMarkets = [smartSetup];
         logger.info(
-          { symbol: best.symbol, score: best.score, consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses },
-          "SpeedAI recovery streak gate cleared — proceeding with high-confidence setup",
+          {
+            symbol: best.symbol,
+            contractType: best.contractType,
+            barrier: best.barrier,
+            winProbability: best.winProbability,
+            score: best.score,
+            consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses,
+          },
+          "SpeedAI intelligent recovery: AI-selected safest setup across all markets",
         );
+      } else {
+        // Nothing passes 60% dual-window consensus — wait for markets to evolve
+        session.message = `⏸ No high-confidence recovery setup found — waiting for markets to settle…`;
+        broadcast();
+        await sleep(5000);
+        continue;
       }
     }
 
@@ -762,18 +905,23 @@ async function runLoop(config: SpeedAIConfig) {
 
     if (isLive) {
       try {
-        // ── Strict barrier validation — verify the trade uses exactly what was configured ──
-        // This catches any future regression where best.barrier drifts from the user's config.
-        const { overBarrier: cfgOver, underBarrier: cfgUnder } = extractBarriers(barriers);
-        if (best.contractType === "DIGITOVER" && best.barrier !== cfgOver) {
-          logger.error({ expected: cfgOver, actual: best.barrier, contractType: "DIGITOVER" },
-            "SpeedAI barrier mismatch — forcing configured OVER barrier");
-          best = { ...best, barrier: cfgOver };
-        }
-        if (best.contractType === "DIGITUNDER" && best.barrier !== cfgUnder) {
-          logger.error({ expected: cfgUnder, actual: best.barrier, contractType: "DIGITUNDER" },
-            "SpeedAI barrier mismatch — forcing configured UNDER barrier");
-          best = { ...best, barrier: cfgUnder };
+        // ── Barrier validation ────────────────────────────────────────────────
+        // During normal trading, enforce the user's configured barriers so no
+        // accidental drift sneaks through. Skip enforcement when the intelligent
+        // recovery override is active — the AI has deliberately chosen a different
+        // barrier and overriding it back would defeat the whole purpose.
+        if (!intelligentRecoveryOverride) {
+          const { overBarrier: cfgOver, underBarrier: cfgUnder } = extractBarriers(barriers);
+          if (best.contractType === "DIGITOVER" && best.barrier !== cfgOver) {
+            logger.error({ expected: cfgOver, actual: best.barrier, contractType: "DIGITOVER" },
+              "SpeedAI barrier mismatch — forcing configured OVER barrier");
+            best = { ...best, barrier: cfgOver };
+          }
+          if (best.contractType === "DIGITUNDER" && best.barrier !== cfgUnder) {
+            logger.error({ expected: cfgUnder, actual: best.barrier, contractType: "DIGITUNDER" },
+              "SpeedAI barrier mismatch — forcing configured UNDER barrier");
+            best = { ...best, barrier: cfgUnder };
+          }
         }
 
         logger.info({
@@ -783,9 +931,8 @@ async function runLoop(config: SpeedAIConfig) {
           stake: Math.round(stake * 100) / 100,
           inRecovery,
           consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses,
-          configuredOverBarrier: cfgOver,
-          configuredUnderBarrier: cfgUnder,
-        }, "SpeedAI executing trade with exact user barriers");
+          intelligentRecoveryOverride,
+        }, intelligentRecoveryOverride ? "SpeedAI executing AI-selected recovery trade" : "SpeedAI executing trade with exact user barriers");
 
         const liveResult = await executeLiveTrade(token!, {
           symbol: best.symbol,

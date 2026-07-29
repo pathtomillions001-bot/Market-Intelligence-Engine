@@ -74,6 +74,7 @@ interface SessionStatus {
   inRecovery: boolean;
   recoveryStep: number;
   unrecoveredAmount: number;
+  consecutiveRecoveryLosses: number;
   currentMarket?: string;
   currentContractType?: string;
   lastResult?: "won" | "lost";
@@ -1008,30 +1009,46 @@ export function SpeedAIFab() {
                   )}
 
                   {/* Recovery indicator */}
-                  {status?.inRecovery && (
-                    <div className={`flex items-center gap-2 rounded-lg px-3 py-2 border text-xs ${
-                      status.config && status.recoveryStep >= status.config.maxRecoverySteps
-                        ? "bg-purple-500/8 border-purple-500/25"
-                        : "bg-amber-500/5 border-amber-500/20"
-                    }`}>
-                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                        status.config && status.recoveryStep >= status.config.maxRecoverySteps
-                          ? "bg-purple-400"
-                          : "bg-amber-400"
-                      }`} />
-                      <div className="flex-1 min-w-0">
-                        {status.config && status.recoveryStep >= status.config.maxRecoverySteps ? (
-                          <p className="text-purple-300 font-medium">
-                            Max steps — stake locked · ${status.unrecoveredAmount.toFixed(2)} debt
-                          </p>
-                        ) : (
-                          <p className="text-amber-400">
-                            Recovery step {status.recoveryStep}{status.config ? `/${status.config.maxRecoverySteps}` : ""} · ${status.unrecoveredAmount.toFixed(2)} to recover
+                  {status?.inRecovery && (() => {
+                    const atMaxSteps = !!(status.config && status.recoveryStep >= status.config.maxRecoverySteps);
+                    const aiOverride = (status.consecutiveRecoveryLosses ?? 0) >= 2;
+                    const streakColor = atMaxSteps ? "bg-purple-500/8 border-purple-500/25"
+                      : aiOverride ? "bg-red-500/8 border-red-500/25"
+                      : "bg-amber-500/5 border-amber-500/20";
+                    const dotColor = atMaxSteps ? "bg-purple-400" : aiOverride ? "bg-red-400 animate-pulse" : "bg-amber-400";
+                    return (
+                      <div className={`rounded-lg px-3 py-2 border text-xs ${streakColor}`}>
+                        <div className="flex items-center gap-2">
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
+                          <div className="flex-1 min-w-0">
+                            {atMaxSteps ? (
+                              <p className="text-purple-300 font-medium">
+                                Max steps — stake locked · ${status.unrecoveredAmount.toFixed(2)} debt
+                              </p>
+                            ) : (
+                              <p className={aiOverride ? "text-red-400 font-medium" : "text-amber-400"}>
+                                Recovery step {status.recoveryStep}{status.config ? `/${status.config.maxRecoverySteps}` : ""} · ${status.unrecoveredAmount.toFixed(2)} to recover
+                              </p>
+                            )}
+                          </div>
+                          {/* Consecutive recovery loss streak badge */}
+                          {(status.consecutiveRecoveryLosses ?? 0) > 0 && (
+                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full flex-shrink-0 ${
+                              aiOverride ? "bg-red-500/25 text-red-300" : "bg-amber-500/20 text-amber-400"
+                            }`}>
+                              {status.consecutiveRecoveryLosses}× loss streak
+                            </span>
+                          )}
+                        </div>
+                        {/* AI override indicator */}
+                        {aiOverride && (
+                          <p className="mt-1 text-[9px] text-red-400/80 pl-3.5">
+                            ⚡ AI full control — scanning all markets for safest setup
                           </p>
                         )}
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   {/* Controls */}
                   <div className="flex gap-2">
