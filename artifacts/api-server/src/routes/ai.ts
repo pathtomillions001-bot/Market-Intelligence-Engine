@@ -252,6 +252,7 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     recoveryUnderDigit:     Math.min(9, Math.max(1, s?.recoveryUnderDigit ?? 5)),
     recoveryMethod:         (s?.recoveryMethod === "instant" ? "instant" : "split") as "split" | "instant",
     recoveryMultiplier:     s ? Math.max(1.1, Number(s.recoveryMultiplier ?? 1.5)) : 1.5,
+    recoveryAutoMode:       s?.recoveryAutoMode ?? true,
     maxRecoverySteps:       s?.maxRecoverySteps ?? 3,
   };
 }
@@ -980,6 +981,7 @@ async function runAutonomousLoop() {
         tradingSettings.recoveryMultiplier,
         tradingSettings.recoveryMethod,
         tradingSettings.maxRecoverySteps,
+        tradingSettings.recoveryAutoMode,
       );
     }
 

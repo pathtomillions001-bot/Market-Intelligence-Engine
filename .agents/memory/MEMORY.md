@@ -33,6 +33,7 @@
 - [Matchdiff market-scanner gap](matchdiff-market-scanner-gap.md) — market-scanner.ts never modeled a "matchdiff" family; a family missing from enabledFamilies zeroes eligibility even if downstream logic is correct.
 - [Longcode barrier parsing](longcode-barrier-parsing.md) — never grab "last digit in the longcode string" for OVER/UNDER barriers; the trailing "after N ticks" clause corrupts it. Match the specific barrier phrase.
 - [Recovery multiplier calibration](recovery-multiplier-calibration.md) — recoveryMultiplier must be derived from the real Deriv payout of the configured barrier (1/(payout-1)×1.02), not a disconnected formula; Instant mode escalates past it only when needed to fully cover the debt.
+- [Recovery Auto Mode](recovery-auto-mode.md) — recoveryAutoMode:bool (default true) = AI uses exact minRecovery stake; false = manual multiplier-driven split cap. Both modes keep method+steps.
 - [Streak calc needs newest-first input](streak-order-dependency.md) — any streak-counting function that assumes trades[0]=most recent breaks silently if fed an ascending-sorted list; always pass a newest-first copy in.
 - [AI engine quality improvements](ai-engine-quality-improvements.md) — payout-calibrated split cap in recovery-engine.ts; digit ticks expanded to [1,3,5]; structural loss pattern detection blocks repeat losing combos.
 - [SpeedAI engine improvements](speed-ai-improvements.md) — RAF batching for SSE stops FAB freeze; pre-analysis overlaps post-trade sleep; recovery gate blocks 3rd consecutive loss until score ≥65.

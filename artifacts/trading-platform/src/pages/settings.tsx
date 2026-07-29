@@ -94,6 +94,7 @@ export default function Settings() {
     maxTradeStake: 500,
     autonomousEnabled: false,
     recoveryMode: false,
+    recoveryAutoMode: true,
     recoveryMethod: "split" as "split" | "instant",
     recoveryMultiplier: 1.62,
     maxRecoverySteps: 3,
@@ -127,6 +128,7 @@ export default function Settings() {
         maxTradeStake: (settings as any).maxTradeStake ?? 500,
         autonomousEnabled: settings.autonomousEnabled,
         recoveryMode: (settings as any).recoveryMode ?? false,
+        recoveryAutoMode: (settings as any).recoveryAutoMode ?? true,
         recoveryMethod: ((settings as any).recoveryMethod ?? "split") as "split" | "instant",
         recoveryMultiplier: (settings as any).recoveryMultiplier ?? 1.62,
         maxRecoverySteps: (settings as any).maxRecoverySteps ?? 3,
@@ -348,65 +350,134 @@ export default function Settings() {
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Recovery Mode</CardTitle>
           <CardDescription className="text-xs">
-            When enabled, after a loss the engine escalates stake size to recover the lost amount. Recovery is tracked as a single global state — it does not reset to normal until a win fully covers the accumulated unrecovered amount; partial wins leave the remainder active.
+            When enabled, after a loss the engine escalates stake size to recover the lost amount. Recovery is tracked as a single global state — it does not reset to normal until a win fully covers the accumulated unrecovered amount.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <SettingRow label="Enable Recovery Mode" description="Automatically increase stake after a loss to recover.">
             <Switch checked={form.recoveryMode} onCheckedChange={(v) => set("recoveryMode", v)} />
           </SettingRow>
-          <SettingRow
-            label="Recovery Method"
-            description="Split: stake is capped at Multiplier × base stake per trade — recovery spreads across multiple wins. Instant: AI uses the minimum stake needed to recover the full loss in the next single winning trade."
-          >
-            <Select value={form.recoveryMethod} onValueChange={(v) => set("recoveryMethod", v)}>
-              <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="split">Split</SelectItem>
-                <SelectItem value="instant">Instant</SelectItem>
-              </SelectContent>
-            </Select>
-          </SettingRow>
-          <SettingRow
-            label="Recovery Multiplier"
-            description={form.recoveryMethod === "instant"
-              ? "Not used in Instant mode — AI computes the exact stake to recover the full loss in one trade."
-              : `Calibrate to your recovery barrier payout. Step 1 stakes Multiplier × base; each consecutive loss adds 1.0 (e.g. 1.62 → 2.62 → 3.62). OVER 3 / UNDER 6 ≈ 1.62×.`}
-          >
-            <div className="flex items-center gap-1.5">
-              <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", v)} min={1.1} max={10} step={0.01} suffix="×" disabled={form.recoveryMethod === "instant"} />
-              {form.recoveryMethod === "split" && Math.abs(suggestedMultiplier - form.recoveryMultiplier) > 0.01 && (
-                <button
-                  onClick={() => set("recoveryMultiplier", suggestedMultiplier)}
-                  className="text-[10px] px-1.5 py-1 rounded bg-primary/10 text-primary border border-primary/30 hover:bg-primary/20 transition-colors font-medium whitespace-nowrap"
-                  title={`Auto-set to ${suggestedMultiplier}× (calibrated to OVER ${form.recoveryOverDigit} payout)`}
-                >
-                  Auto {suggestedMultiplier}×
-                </button>
-              )}
-            </div>
-          </SettingRow>
-          <SettingRow
-            label="Max Recovery Steps"
-            description="Maximum consecutive stake escalations before the engine stops escalating further."
-          >
-            <NumInput value={form.maxRecoverySteps} onChange={(v) => set("maxRecoverySteps", v)} min={1} max={10} />
-          </SettingRow>
+
           {form.recoveryMode && (
-            <div className="mt-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
-              <div className="text-xs font-medium text-amber-400 mb-1">Split mode escalation (×base stake per step)</div>
-              <div className="text-[10px] text-muted-foreground mb-2">Each step covers the previous step's stake. Win at any step = full coverage of that step's loss.</div>
-              <div className="flex gap-2 flex-wrap">
-                {Array.from({ length: form.maxRecoverySteps }, (_, i) => i).map((i) => (
-                  <div key={i} className="text-center">
-                    <div className="text-[10px] text-muted-foreground">Step {i + 1}</div>
-                    <div className="text-xs font-mono font-bold text-amber-400">
-                      ×{(form.recoveryMultiplier + i).toFixed(2)}
-                    </div>
+            <>
+              {/* Auto / Manual mode selector */}
+              <div className="mt-3 mb-1">
+                <div className="text-xs font-medium text-foreground mb-2">Recovery Calculator Mode</div>
+                <div className="flex rounded-lg overflow-hidden border border-border w-full">
+                  <button
+                    onClick={() => set("recoveryAutoMode", true)}
+                    className={`flex-1 flex flex-col items-center gap-0.5 px-3 py-2.5 text-xs font-medium transition-colors ${form.recoveryAutoMode ? "bg-primary text-primary-foreground" : "bg-secondary/40 text-muted-foreground hover:text-foreground"}`}
+                  >
+                    <span className="font-semibold">Auto</span>
+                    <span className={`text-[10px] ${form.recoveryAutoMode ? "text-primary-foreground/80" : "text-muted-foreground"}`}>AI computes exact stake</span>
+                  </button>
+                  <button
+                    onClick={() => set("recoveryAutoMode", false)}
+                    className={`flex-1 flex flex-col items-center gap-0.5 px-3 py-2.5 text-xs font-medium transition-colors border-l border-border ${!form.recoveryAutoMode ? "bg-primary text-primary-foreground" : "bg-secondary/40 text-muted-foreground hover:text-foreground"}`}
+                  >
+                    <span className="font-semibold">Manual</span>
+                    <span className={`text-[10px] ${!form.recoveryAutoMode ? "text-primary-foreground/80" : "text-muted-foreground"}`}>Set your own multiplier</span>
+                  </button>
+                </div>
+                {form.recoveryAutoMode ? (
+                  <div className="mt-2 p-2.5 bg-primary/5 border border-primary/20 rounded-lg text-[11px] text-muted-foreground">
+                    <span className="text-primary font-medium">Auto mode: </span>
+                    The AI calculates the exact minimum stake needed to cover the lost amount based on your recovery barrier's real payout (OVER {form.recoveryOverDigit} / UNDER {form.recoveryUnderDigit} → {((DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63) - 1).toFixed(2)}× net). No multiplier needed — stake is always just enough, not a cent more.
                   </div>
-                ))}
+                ) : (
+                  <div className="mt-2 p-2.5 bg-secondary/20 border border-border rounded-lg text-[11px] text-muted-foreground">
+                    <span className="text-foreground font-medium">Manual mode: </span>
+                    You set the multiplier. Each step stakes Multiplier × base stake; consecutive losses add 1.0× (e.g. 2.84 → 3.84 → 4.84).
+                  </div>
+                )}
               </div>
-            </div>
+
+              {/* Recovery Method — available in both modes */}
+              <SettingRow
+                label="Recovery Method"
+                description="Split: stake is capped at Multiplier × base stake per trade — recovery spreads across multiple wins. Instant: uses the minimum stake needed to recover the full accumulated loss in the next single winning trade."
+              >
+                <Select value={form.recoveryMethod} onValueChange={(v) => set("recoveryMethod", v)}>
+                  <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="split">Split</SelectItem>
+                    <SelectItem value="instant">Instant</SelectItem>
+                  </SelectContent>
+                </Select>
+              </SettingRow>
+
+              {/* Recovery Multiplier — manual mode only */}
+              {!form.recoveryAutoMode && (
+                <SettingRow
+                  label="Recovery Multiplier"
+                  description={`Step 1 stakes Multiplier × base; each consecutive loss adds 1.0 (e.g. ${form.recoveryMultiplier.toFixed(2)} → ${(form.recoveryMultiplier + 1).toFixed(2)} → ${(form.recoveryMultiplier + 2).toFixed(2)}). Calibrate to your recovery barrier payout — OVER 3/UNDER 6 needs ≈${suggestedMultiplier}×.`}
+                >
+                  <div className="flex items-center gap-1.5">
+                    <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", v)} min={1.1} max={10} step={0.01} suffix="×" />
+                    {Math.abs(suggestedMultiplier - form.recoveryMultiplier) > 0.01 && (
+                      <button
+                        onClick={() => set("recoveryMultiplier", suggestedMultiplier)}
+                        className="text-[10px] px-1.5 py-1 rounded bg-primary/10 text-primary border border-primary/30 hover:bg-primary/20 transition-colors font-medium whitespace-nowrap"
+                        title={`Auto-set to ${suggestedMultiplier}× (calibrated to OVER ${form.recoveryOverDigit} payout)`}
+                      >
+                        Auto {suggestedMultiplier}×
+                      </button>
+                    )}
+                  </div>
+                </SettingRow>
+              )}
+
+              {/* Max Recovery Steps — available in both modes */}
+              <SettingRow
+                label="Max Recovery Steps"
+                description="Maximum consecutive stake escalations before the engine stops escalating further."
+              >
+                <NumInput value={form.maxRecoverySteps} onChange={(v) => set("maxRecoverySteps", v)} min={1} max={10} />
+              </SettingRow>
+
+              {/* Escalation preview */}
+              <div className="mt-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
+                {form.recoveryAutoMode ? (
+                  <>
+                    <div className="text-xs font-medium text-amber-400 mb-1">Auto mode — stake per step (× base stake)</div>
+                    <div className="text-[10px] text-muted-foreground mb-2">
+                      Each step stakes exactly enough to recover the accumulated debt at OVER {form.recoveryOverDigit} / UNDER {form.recoveryUnderDigit} ({(DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63).toFixed(2)}× payout, {((DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63) - 1).toFixed(2)}× net).
+                    </div>
+                    <div className="flex gap-2 flex-wrap">
+                      {(() => {
+                        const netPayout = (DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63) - 1;
+                        const steps: number[] = [];
+                        let debt = 1; // starting from 1× base stake loss
+                        for (let i = 0; i < form.maxRecoverySteps; i++) {
+                          const stepMult = netPayout > 0 ? (debt / netPayout) * 1.02 : debt * 3;
+                          steps.push(stepMult);
+                          if (i + 1 < form.maxRecoverySteps) debt += stepMult; // accumulate debt for next step
+                        }
+                        return steps.map((mult, i) => (
+                          <div key={i} className="text-center">
+                            <div className="text-[10px] text-muted-foreground">Step {i + 1}</div>
+                            <div className="text-xs font-mono font-bold text-amber-400">×{mult.toFixed(2)}</div>
+                          </div>
+                        ));
+                      })()}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-xs font-medium text-amber-400 mb-1">Manual mode escalation (×base stake per step)</div>
+                    <div className="text-[10px] text-muted-foreground mb-2">Each step covers the previous step's stake. Win at any step = full coverage.</div>
+                    <div className="flex gap-2 flex-wrap">
+                      {Array.from({ length: form.maxRecoverySteps }, (_, i) => i).map((i) => (
+                        <div key={i} className="text-center">
+                          <div className="text-[10px] text-muted-foreground">Step {i + 1}</div>
+                          <div className="text-xs font-mono font-bold text-amber-400">×{(form.recoveryMultiplier + i).toFixed(2)}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            </>
           )}
         </CardContent>
       </Card>

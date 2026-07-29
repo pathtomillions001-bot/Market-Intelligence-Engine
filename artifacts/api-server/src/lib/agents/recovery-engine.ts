@@ -197,19 +197,18 @@ function computeDynamicStake(
   maxTradeStake: number,
   riskProfile: "conservative" | "moderate" | "aggressive",
   baseStake: number,
-  recoveryMultiplier: number,  // from settings (default 1.62 for OVER 3 / UNDER 6)
+  recoveryMultiplier: number,  // from settings (default 1.62); only used in manual mode
   recoveryMethod: "split" | "instant",
   recoveryStep: number,        // how many consecutive recovery losses so far (drives progressive cap)
   maxRecoverySteps: number,    // from settings — bounds instant mode's exposure the same way split mode is bounded
+  recoveryAutoMode: boolean,   // true = AI computes exact stake; false = manual multiplier-driven
 ): number {
   const netPayout = payout - 1;
   if (netPayout <= 0) return 0.35;
 
   // Exact minimum stake to recover the full unrecovered amount in one win,
-  // plus a 5% buffer for Deriv's decimal rounding and near-1.0 payout edge cases.
-  // 5% (vs the old 2%) ensures net profit genuinely covers the debt even when the
-  // live Deriv payout differs slightly from the cached proposal value.
-  const minRecovery = (unrecoveredAmount / netPayout) * 1.05;
+  // plus a 2% buffer for Deriv's decimal rounding and near-1.0 payout edge cases.
+  const minRecovery = (unrecoveredAmount / netPayout) * 1.02;
 
   // Profile-based safety cap: never risk more than this fraction of balance.
   const maxExposurePct = riskProfile === "conservative" ? 0.08
@@ -217,6 +216,22 @@ function computeDynamicStake(
     : 0.12;   // moderate
   const maxExposure = Math.min(balance * maxExposurePct, maxTradeStake);
 
+  // ── AUTO MODE ────────────────────────────────────────────────────────────────
+  // AI-computed stake: the exact minimum to recover the full accumulated debt
+  // given this barrier's real payout — no multiplier, no progressive cap.
+  // Split vs Instant still governs the recovery *style* choice the user made,
+  // but both use the same minimum stake calculation here so there is no
+  // unnecessary over-exposure.
+  //
+  // Capital-protection guard still applies: for very-low net-payout barriers
+  // (OVER 0, OVER 1, DIGITDIFF — netPayout < 0.15) the math-minimum would be
+  // enormous (26× debt for net 0.04). We cap at maxExposure to protect capital;
+  // recovery will take multiple steps instead of one.
+  if (recoveryAutoMode) {
+    return Math.max(0.35, Math.min(minRecovery, maxExposure, maxTradeStake));
+  }
+
+  // ── MANUAL MODE ──────────────────────────────────────────────────────────────
   // Capital-protection override: for very-low net-payout contracts such as
   // DIGITDIFF (payout 1.04×, netPayout = 0.04), full instant recovery in one
   // trade would require a stake ≈ 26× the accumulated debt — dangerously
@@ -225,10 +240,7 @@ function computeDynamicStake(
   // happens gradually over multiple near-certain wins rather than one huge bet.
   //
   // Threshold: netPayout < 0.15 covers DIGITDIFF (0.04) while leaving all
-  // DIGITOVER/DIGITUNDER barriers (minimum 0.04 at OVER 8 — wait, actually
-  // OVER 8 payout is 4.9, netPayout = 3.9) and DIGITMATCH (8.0) unaffected.
-  // Note: DIGITOVER 0 payout=1.04, netPayout=0.04 — also a low-payout barrier,
-  // same protection applies.
+  // DIGITOVER/DIGITUNDER barriers (minimum OVER 8 netPayout = 3.9) unaffected.
   const isLowNetPayout = netPayout < 0.15;
 
   if (recoveryMethod === "instant" && !isLowNetPayout) {
@@ -237,11 +249,7 @@ function computeDynamicStake(
     // should never stake more than Split's own step-1 stake just because it's
     // "instant". Only when the accumulated debt is too large for that multiplier to
     // cover in one shot does the stake grow — and even then, only up to the exact
-    // minimum needed to fully recover (plus a 2% rounding buffer), never further.
-    //
-    // Example: lose $40 with $1.62x-equivalent stake sized to cover exactly that —
-    // this should win back ~$42 (loss + small profit), not a large stake sized to
-    // win $75, which would needlessly expose more capital than the debt requires.
+    // minimum needed to fully recover (plus a 5% rounding buffer), never further.
     const splitEquivalentStake = baseStake > 0 ? baseStake * recoveryMultiplier : minRecovery;
     const stake = (splitEquivalentStake * netPayout >= unrecoveredAmount)
       ? splitEquivalentStake   // the standard multiplier already covers the debt — use it, nothing bigger
@@ -298,6 +306,7 @@ export function getDynamicRecoveryStake(
   recoveryMultiplier = 1.62,
   recoveryMethod: "split" | "instant" = "split",
   maxRecoverySteps = 3,
+  recoveryAutoMode = true,
 ): number {
   ensureFreshDay();
   if (!state.inRecovery) {
@@ -308,6 +317,7 @@ export function getDynamicRecoveryStake(
   const raw = computeDynamicStake(
     state.unrecoveredAmount, payoutMultiplier, winProbability01, balance, maxTradeStake, riskProfile,
     state.baseStake, recoveryMultiplier, recoveryMethod, state.recoveryStep, maxRecoverySteps,
+    recoveryAutoMode,
   );
   return Math.max(0.35, Math.min(raw, maxTradeStake));
 }
@@ -420,9 +430,10 @@ export function loadState(json: string): void {
         unrecoveredAmount: parsed.reduce((sum: number, s: any) => sum + (Number(s?.unrecoveredAmount) || 0), 0),
         baseStake:         Math.max(0, ...parsed.map((s: any) => Number(s?.baseStake) || 0)),
         streakLossCount:   parsed.reduce((sum: number, s: any) => sum + (Number(s?.streakLossCount) || 0), 0),
-        streakStartAmount: parsed.reduce((sum: number, s: any) => sum + (Number(s?.streakStartAmount) || 0), 0),
+        streakStartAmount:        parsed.reduce((sum: number, s: any) => sum + (Number(s?.streakStartAmount) || 0), 0),
         // Legacy per-family rows predate this feature — always treat as "not today".
-        resetDate:         "",
+        resetDate:                "",
+        consecutiveMatchLosses:   0,
       };
       if (!inRecovery) state = freshState();
       ensureFreshDay();

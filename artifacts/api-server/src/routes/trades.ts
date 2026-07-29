@@ -40,6 +40,7 @@ function buildTradingSettingsForManual(s: any, preferredContractTypes: string[])
     recoveryUnderDigit:     s?.recoveryUnderDigit ?? 5,
     recoveryMethod:         (s?.recoveryMethod === "instant" ? "instant" : "split") as "split" | "instant",
     recoveryMultiplier:     s ? Math.max(1.1, Number(s.recoveryMultiplier ?? 1.5)) : 1.5,
+    recoveryAutoMode:       s?.recoveryAutoMode ?? true,
     maxRecoverySteps:       s?.maxRecoverySteps ?? 3,
   };
 }

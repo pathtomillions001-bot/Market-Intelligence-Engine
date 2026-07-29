@@ -865,6 +865,7 @@ export const UpdateSettingsBody = zod.object({
   "recoveryOverDigit": zod.number().optional(),
   "recoveryUnderDigit": zod.number().optional(),
   "recoveryMethod": zod.string().optional(),
+  "recoveryAutoMode": zod.boolean().optional().describe('Auto-compute recovery stake from barrier payout; hide manual multiplier'),
   "allowedMarkets": zod.union([zod.string(), zod.array(zod.string())]).optional(),
   "riskAmountType": zod.enum(["fixed", "percentage"]).optional(),
   "riskAmountValue": zod.number().optional()

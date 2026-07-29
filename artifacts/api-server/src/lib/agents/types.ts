@@ -89,6 +89,7 @@ export interface TradingSettings {
   recoveryUnderDigit: number;
   recoveryMethod: "split" | "instant";
   recoveryMultiplier: number;
+  recoveryAutoMode: boolean;
   maxRecoverySteps: number;
 }
 
