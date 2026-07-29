@@ -35,3 +35,5 @@
 - [Streak calc needs newest-first input](streak-order-dependency.md) — any streak-counting function that assumes trades[0]=most recent breaks silently if fed an ascending-sorted list; always pass a newest-first copy in.
 - [AI engine quality improvements](ai-engine-quality-improvements.md) — payout-calibrated split cap in recovery-engine.ts; digit ticks expanded to [1,3,5]; structural loss pattern detection blocks repeat losing combos.
 - [SpeedAI engine improvements](speed-ai-improvements.md) — RAF batching for SSE stops FAB freeze; pre-analysis overlaps post-trade sleep; recovery gate blocks 3rd consecutive loss until score ≥65.
+- [SpeedAI recovery scanner constraints](speed-ai-recovery-scanner.md) — tiered priority (OVER/UNDER → EVEN/ODD → DIGITMATCH); only barriers with ≥ user's payout; never DIGITDIFF or RISE/FALL.
+- [Deriv journal pagination](journal-pagination.md) — profit_table max 500/call; JournalManager chains offset pages until batch < 500; user had 3500+ trades before the cap caused analytics blackout.

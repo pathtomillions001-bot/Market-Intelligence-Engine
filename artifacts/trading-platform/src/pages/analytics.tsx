@@ -64,7 +64,7 @@ function useTodayTrades() {
       }
       // No Deriv connection at all — fall back to local DB, filtered client-side
       // (there is no backend "today" computation to defer to on this path).
-      const local = await fetch("/api/trades?limit=500").then(r => r.json());
+      const local = await fetch("/api/trades?limit=10000").then(r => r.json());
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
       const todayTrades = (Array.isArray(local) ? local : [])
         .filter((t: any) => (t.status === "won" || t.status === "lost") && new Date(t.createdAt) >= todayStart)

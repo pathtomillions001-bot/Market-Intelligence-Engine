@@ -1103,6 +1103,9 @@ export function invalidateBalanceCache() { cachedBalanceAt = 0; }
  *  3. Send profit_table requests on the open connection
  *  4. On disconnect, fetch a fresh OTP URL and reconnect
  */
+/** Max transactions per Deriv profit_table request (Deriv hard limit is 500) */
+const JOURNAL_FETCH_LIMIT = 500;
+
 class DerivJournalManager extends EventEmitter {
   private ws: WebSocket | null = null;
   private bearerToken: string | null = null;
@@ -1114,6 +1117,8 @@ class DerivJournalManager extends EventEmitter {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private lastPongMs = Date.now();
+  /** Accumulates transactions across paginated fetches */
+  private fetchAccumulator: any[] = [];
 
   setCredentials(bearerToken: string, accountId: string) {
     const changed = this.bearerToken !== bearerToken || this.accountId !== accountId;
@@ -1137,6 +1142,7 @@ class DerivJournalManager extends EventEmitter {
     this.bearerToken = null;
     this.accountId = null;
     this.cachedTransactions = [];
+    this.fetchAccumulator = [];
     this.lastFetchMs = 0;
     this.stopTimers();
     if (this.ws) { try { this.ws.terminate(); } catch { /* ignore */ } this.ws = null; }
@@ -1151,7 +1157,8 @@ class DerivJournalManager extends EventEmitter {
 
   forceRefresh() {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 500 }));
+      this.fetchAccumulator = [];
+      this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
     }
   }
 
@@ -1165,7 +1172,8 @@ class DerivJournalManager extends EventEmitter {
     if (this.refreshTimer) clearInterval(this.refreshTimer);
     this.refreshTimer = setInterval(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 500 }));
+        this.fetchAccumulator = [];
+        this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
       }
     }, 60_000);
   }
@@ -1196,7 +1204,8 @@ class DerivJournalManager extends EventEmitter {
       this.reconnectDelay = 3000;
       logger.info("JournalManager: connected via OTP WS — fetching profit table");
       // No authorize message — OTP URL is pre-authenticated
-      this.ws!.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: 500 }));
+      this.fetchAccumulator = [];
+      this.ws!.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
       this.startPing();
     });
 
@@ -1204,16 +1213,34 @@ class DerivJournalManager extends EventEmitter {
       try {
         const msg = JSON.parse(data.toString());
         if (msg.msg_type === "profit_table" && msg.profit_table) {
-          this.cachedTransactions = msg.profit_table.transactions ?? [];
-          this.lastFetchMs = Date.now();
-          logger.info({ count: this.cachedTransactions.length }, "JournalManager: profit table refreshed");
-          this.emit("refreshed", this.cachedTransactions);
+          const batch: any[] = msg.profit_table.transactions ?? [];
+          this.fetchAccumulator.push(...batch);
+
+          if (batch.length >= JOURNAL_FETCH_LIMIT) {
+            // There may be more pages — fetch the next batch using offset
+            const offset = this.fetchAccumulator.length;
+            logger.info({ received: batch.length, totalSoFar: offset }, "JournalManager: fetching next page");
+            this.ws!.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT, offset }));
+          } else {
+            // All pages received — commit to cache
+            this.cachedTransactions = this.fetchAccumulator;
+            this.fetchAccumulator = [];
+            this.lastFetchMs = Date.now();
+            logger.info({ count: this.cachedTransactions.length }, "JournalManager: profit table refreshed");
+            this.emit("refreshed", this.cachedTransactions);
+          }
         }
         if (msg.msg_type === "pong" || msg.msg_type === "ping") {
           this.lastPongMs = Date.now();
         }
         if (msg.error) {
           logger.warn({ code: msg.error.code, message: msg.error.message }, "JournalManager: error");
+          // On error during pagination, commit whatever we have so far (better than nothing)
+          if (this.fetchAccumulator.length > 0) {
+            this.cachedTransactions = this.fetchAccumulator;
+            this.fetchAccumulator = [];
+            this.lastFetchMs = Date.now();
+          }
         }
       } catch { /* ignore */ }
     });
