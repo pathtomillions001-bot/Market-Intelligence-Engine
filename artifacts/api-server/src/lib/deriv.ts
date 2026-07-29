@@ -1119,6 +1119,8 @@ class DerivJournalManager extends EventEmitter {
   private lastPongMs = Date.now();
   /** Accumulates transactions across paginated fetches */
   private fetchAccumulator: any[] = [];
+  /** Debounce timer for transaction-triggered refreshes */
+  private txDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   setCredentials(bearerToken: string, accountId: string) {
     const changed = this.bearerToken !== bearerToken || this.accountId !== accountId;
@@ -1166,16 +1168,27 @@ class DerivJournalManager extends EventEmitter {
     if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
     if (this.refreshTimer) { clearInterval(this.refreshTimer); this.refreshTimer = null; }
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    if (this.txDebounceTimer) { clearTimeout(this.txDebounceTimer); this.txDebounceTimer = null; }
   }
 
   private startRefreshTimer() {
     if (this.refreshTimer) clearInterval(this.refreshTimer);
+    // Background safety-net poll — real-time updates come from the transaction subscription
     this.refreshTimer = setInterval(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
         this.fetchAccumulator = [];
         this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
       }
-    }, 60_000);
+    }, 30_000);
+  }
+
+  /** Debounced refresh triggered by real-time transaction events (≤300ms latency) */
+  private scheduleTransactionRefresh() {
+    if (this.txDebounceTimer) { clearTimeout(this.txDebounceTimer); }
+    this.txDebounceTimer = setTimeout(() => {
+      this.txDebounceTimer = null;
+      this.forceRefresh();
+    }, 300);
   }
 
   private async connect() {
@@ -1206,6 +1219,8 @@ class DerivJournalManager extends EventEmitter {
       // No authorize message — OTP URL is pre-authenticated
       this.fetchAccumulator = [];
       this.ws!.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
+      // Subscribe to real-time transaction events so we refresh immediately on settlement
+      this.ws!.send(JSON.stringify({ transaction: 1, subscribe: 1 }));
       this.startPing();
     });
 
@@ -1228,6 +1243,14 @@ class DerivJournalManager extends EventEmitter {
             this.lastFetchMs = Date.now();
             logger.info({ count: this.cachedTransactions.length }, "JournalManager: profit table refreshed");
             this.emit("refreshed", this.cachedTransactions);
+          }
+        }
+        // Real-time transaction events — trigger immediate profit_table refresh on sell (contract settled)
+        if (msg.msg_type === "transaction" && msg.transaction) {
+          const actionType: string = msg.transaction.action ?? msg.transaction.action_type ?? "";
+          if (actionType === "sell") {
+            logger.info({ action: actionType, id: msg.transaction.contract_id }, "JournalManager: transaction event — scheduling refresh");
+            this.scheduleTransactionRefresh();
           }
         }
         if (msg.msg_type === "pong" || msg.msg_type === "ping") {
