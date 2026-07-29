@@ -3,7 +3,7 @@ import { db } from "@workspace/db";
 import { tradesTable, accountsTable, settingsTable } from "@workspace/db";
 import { eq, desc, and, sql } from "drizzle-orm";
 import { ExecuteTradeBody, GetTradesQueryParams, GetTradeParams } from "@workspace/api-zod";
-import { tickManager, DERIV_MARKETS, getCachedToken, executeLiveTrade, waitForContractResult, getLiveBalance, fetchDerivProfitTable, journalManager } from "../lib/deriv";
+import { tickManager, DERIV_MARKETS, getCachedToken, executeLiveTrade, waitForContractResult, getLiveBalance, journalManager } from "../lib/deriv";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
 import * as recoveryEngine from "../lib/agents/recovery-engine";
 import { analyzeCompletedTrade } from "../lib/agents/trade-intelligence";
@@ -67,29 +67,29 @@ export function getTodayStart(): Date {
   return getLocalTodayStart();
 }
 
-// ── Helper: get Deriv journal transactions (cache-first, one-shot fallback) ────
-async function getDerivTransactions(token: string): Promise<any[]> {
-  // Always prefer the persistent manager's cache — even if stale — because it
-  // holds the COMPLETE paginated result set (potentially >500 trades).
-  // fetchDerivProfitTable is a single-shot fetch capped at 500 trades; calling it
-  // whenever the freshness window expires was the root cause of the
-  // 1062 ↔ 500 oscillation seen in Analytics/Journal.
-  // Only fall back to the one-shot fetch when the cache is completely empty
-  // (e.g. server just started and the manager hasn't completed its first
-  // paginated sweep yet).
+// ── Helper: get Deriv journal transactions (cache-first, no size cap) ────────
+async function getDerivTransactions(_token: string): Promise<any[]> {
+  // Always use the persistent manager's fully-paginated cache — it holds the
+  // COMPLETE result set with no trade-count limit.
+  //
+  // The old "fallback to fetchDerivProfitTable(500)" when the cache was empty
+  // was the root cause of the 500 ↔ full-count oscillation reported in
+  // Analytics/Journal: that single-shot fetch returned at most 500 trades,
+  // which the UI displayed immediately, only for the number to jump once the
+  // manager finished its full paginated sweep seconds later.
+  //
+  // Fix: if the cache is empty (server just started or reconnecting), kick the
+  // manager so it begins paginating immediately and return empty so callers
+  // render a brief "loading" state. The next poll (5-10 s) will get the real
+  // full set — no more 500-trade intermediate snapshot.
   const cached = journalManager.getCached();
   if (cached.length > 0) {
     return cached;
   }
-  // Cache empty — kick the persistent manager so it starts fetching immediately
-  // (safe no-op if the WS isn't open yet; the manager will fetch on connect).
+  // Cache is empty — trigger background pagination and let the caller decide
+  // how to handle the momentary empty state (loading spinner / empty message).
   journalManager.forceRefresh();
-  // Best-effort one-shot fetch while the background manager warms up.
-  try {
-    return await fetchDerivProfitTable(token, 500);
-  } catch {
-    return [];
-  }
+  return [];
 }
 
 const EMPTY_STATS = {

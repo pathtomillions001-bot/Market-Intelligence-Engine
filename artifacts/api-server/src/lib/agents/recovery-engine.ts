@@ -217,17 +217,40 @@ function computeDynamicStake(
   const maxExposure = Math.min(balance * maxExposurePct, maxTradeStake);
 
   // ── AUTO MODE ────────────────────────────────────────────────────────────────
-  // AI-computed stake: the exact minimum to recover the full accumulated debt
-  // given this barrier's real payout — no multiplier, no progressive cap.
-  // Split vs Instant still governs the recovery *style* choice the user made,
-  // but both use the same minimum stake calculation here so there is no
-  // unnecessary over-exposure.
+  // Per-barrier calibrated step multipliers. Instead of "recover everything in
+  // one shot" (which produced greedy stakes: 2.76×, then 3.76×, then 4.76×…),
+  // we use a smooth geometric sequence keyed to the barrier's real net payout:
   //
-  // Capital-protection guard still applies: for very-low net-payout barriers
-  // (OVER 0, OVER 1, DIGITDIFF — netPayout < 0.15) the math-minimum would be
-  // enormous (26× debt for net 0.04). We cap at maxExposure to protect capital;
-  // recovery will take multiple steps instead of one.
+  //   K = 0.777  ← calibrated so step 1 wins back ~77.7% of the initial base
+  //               stake. Derived from user example: OVER 3/UNDER 6 with live
+  //               net payout ≈ 0.37 → step-1 multiplier = 0.777/0.37 = 2.10.
+  //
+  //   step-1 absolute multiplier = K / netPayout
+  //     e.g. net=0.37 (OVER 3/UNDER 6) → 2.10×; net=0.457 (OVER 4/UNDER 5) → 1.70×
+  //
+  //   step-N absolute multiplier = (K/net) × (1 + K/net)^(N−1)
+  //     The inter-step growth ratio r = 1 + K/net is constant per barrier:
+  //     e.g. OVER 3/UNDER 6: r ≈ 3.10  → step 2 ≈ 2.10×3.10 = 6.51× base
+  //          OVER 4/UNDER 5: r ≈ 2.70  → step 2 ≈ 1.70×2.70 = 4.59× base
+  //
+  // Because each WIN only partially reduces unrecoveredAmount (the recovery
+  // engine subtracts the actual profit earned), the debt clears gradually over
+  // a few successful trades rather than one enormous bet — exactly the
+  // non-greedy behaviour the user asked for.
+  //
+  // Cap: step1Mult is clamped at 15 for near-zero net-payout barriers (e.g.
+  // DIGITDIFF netPayout 0.04) where the formula would otherwise produce
+  // mathematically valid but practically absurd multipliers (>19×).
   if (recoveryAutoMode) {
+    if (baseStake > 0 && netPayout > 0) {
+      const K          = 0.777;
+      const step1Mult  = Math.min(K / netPayout, 15);   // e.g. 2.10 for OVER 3
+      const growthRatio = 1 + step1Mult;                // constant per-step factor
+      const absMult    = step1Mult * Math.pow(growthRatio, Math.max(0, recoveryStep - 1));
+      const stake      = baseStake * absMult;
+      return Math.max(0.35, Math.min(stake, maxExposure, maxTradeStake));
+    }
+    // baseStake unknown (edge case on very first call) — fall back to exact-minimum
     return Math.max(0.35, Math.min(minRecovery, maxExposure, maxTradeStake));
   }
 

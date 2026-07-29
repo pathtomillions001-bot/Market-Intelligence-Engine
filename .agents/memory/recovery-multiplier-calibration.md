@@ -1,32 +1,35 @@
 ---
-name: Recovery multiplier must match the real barrier payout
-description: Why a static/manually-set recoveryMultiplier can silently mismatch the configured recovery barrier, and how Instant recovery mode should size its stake.
+name: Recovery auto-mode step multiplier formula
+description: Auto-mode recovery uses a step-based geometric formula (K=0.777/netPayout), not full single-trade recovery. Analytics 500-trade fallback removed.
 ---
 
-The recovery multiplier (e.g. 1.62×) is only "correct" if it matches the REAL Deriv
-payout of whatever OVER/UNDER barrier is currently configured for recovery:
+## Auto-mode recovery: step-based geometric formula
+
+Instead of "recover everything in one shot" (`minRecovery = unrecoveredAmount/netPayout × 1.02`),
+auto mode now uses a calibrated per-barrier step sequence in `computeDynamicStake()`:
 
 ```
-requiredMultiplier ≈ 1 / (payout - 1) × 1.02   (covers exactly one base-stake loss)
+K = 0.777
+step1Mult  = min(K / netPayout, 15)   // e.g. 2.10× for OVER 3/UNDER 6 (net=0.37)
+growthRatio = 1 + step1Mult            // e.g. 3.10 for OVER 3
+absoluteMult = step1Mult × growthRatio^(recoveryStep - 1)
+stake = baseStake × absoluteMult
 ```
 
-**The bug:** the frontend's "Auto" suggestion button used a generic formula
-(`10/(9-overDigit) × 0.972`) disentangled from the real Deriv payout table
-(`DIGIT_PAYOUTS` in `digit-probability.ts`). For OVER 3/UNDER 6 (real payout 1.37×,
-not the ~1.63× the formula implicitly assumed), the formula suggested 1.62× when the
-barrier actually needs ~2.76× to cover one loss — so the "reasonable" multiplier the
-user saw in Settings never matched what the math required, and any recovery stake
-sizing built on top of it looked like unexplained overshoot.
+Verified against user examples:
+- OVER 3/UNDER 6 (net≈0.37): step1=2.10×, step2≈3.10× relative → stake ~$4.56 vs user's $4.50 ✓
+- OVER 4/UNDER 5 (net≈0.457): step1=1.70×, step2≈2.70× relative
 
-**Why:** lower-payout barriers need a bigger multiplier to cover the same loss; there's
-no way around that trade-off — only the multiplier fed into the stake formula must be
-derived from the *actual* payout of the currently configured barrier, not a disconnected
-approximation.
+**Why K=0.777:** derived from user example "OVER 3/UNDER 6 step-1 multiplier = 2.1". Since 2.1 × 0.37 = 0.777, each win recovers ~77.7% of the initial base stake rather than 100% — allowing partial recovery over several wins instead of one enormous bet.
 
-**How to apply:** any UI or backend code suggesting/calibrating a recovery multiplier
-must read the real payout for the selected barrier from the same payout table the
-trading engine uses, not a standalone formula. Instant recovery mode should try the
-settings' recoveryMultiplier stake first (same as Split's step 1) and only escalate to
-the exact minimum stake needed (`unrecoveredAmount/netPayout × 1.02`) when that
-multiplier isn't enough to fully cover the debt — never stake more than the debt
-actually requires. See `computeDynamicStake()` in `recovery-engine.ts`.
+**Cap at 15×:** for near-zero net-payout barriers (DIGITDIFF, OVER 0/1) where K/net would be absurd (>15×), clamped at 15. The `maxExposure` cap provides a further safety backstop.
+
+**Why not single-trade recovery:** the old formula caused greedy escalation (2.76×, 3.76×, 4.76×…) because it tried to cover the FULL accumulated debt in each step. The new formula accepts that recovery may span 2-3 wins; `unrecoveredAmount` shrinks naturally with each partial win.
+
+## Analytics 500-trade oscillation fix
+
+`getDerivTransactions()` in `trades.ts` previously fell back to `fetchDerivProfitTable(token, 500)` when the JournalManager cache was empty. This returned at most 500 trades, causing the UI to show 500 → then jump to the real full count once pagination completed.
+
+**Fix:** removed the fallback entirely. Now returns `[]` when cache is empty and kicks `journalManager.forceRefresh()`. The next poll (5-10 s) gets the fully-paginated dataset. Also removed the now-unused `fetchDerivProfitTable` import from `trades.ts`.
+
+**How to apply:** never add a single-shot `fetchDerivProfitTable` fallback back to `getDerivTransactions`. The journalManager is the sole paginated source; empty cache = brief loading state, not a stale 500-trade snapshot.
