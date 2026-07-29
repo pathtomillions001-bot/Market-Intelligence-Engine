@@ -1235,12 +1235,12 @@ class DerivJournalManager extends EventEmitter {
         }
         if (msg.error) {
           logger.warn({ code: msg.error.code, message: msg.error.message }, "JournalManager: error");
-          // On error during pagination, commit whatever we have so far (better than nothing)
-          if (this.fetchAccumulator.length > 0) {
-            this.cachedTransactions = this.fetchAccumulator;
-            this.fetchAccumulator = [];
-            this.lastFetchMs = Date.now();
-          }
+          // Discard the partial accumulator — do NOT commit it to cachedTransactions.
+          // Committing partial results (e.g. only page 1 = 500 trades) was the second
+          // root cause of the 1062 ↔ 500 oscillation: an error on page 2+ would
+          // overwrite the complete cache with a truncated set.
+          // Keep the previous complete cache intact; the next refresh cycle will retry.
+          this.fetchAccumulator = [];
         }
       } catch { /* ignore */ }
     });

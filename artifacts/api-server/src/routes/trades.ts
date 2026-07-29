@@ -68,16 +68,24 @@ export function getTodayStart(): Date {
 
 // ── Helper: get Deriv journal transactions (cache-first, one-shot fallback) ────
 async function getDerivTransactions(token: string): Promise<any[]> {
-  // Return cached data if fresh (within 20s — short window so force-refreshed data lands quickly)
-  if (journalManager.isCacheFresh(20_000)) {
-    return journalManager.getCached();
+  // Always prefer the persistent manager's cache — even if stale — because it
+  // holds the COMPLETE paginated result set (potentially >500 trades).
+  // fetchDerivProfitTable is a single-shot fetch capped at 500 trades; calling it
+  // whenever the 20s freshness window expires was the root cause of the
+  // 1062 ↔ 500 oscillation seen in Analytics/Journal.
+  // Only fall back to the one-shot fetch when the cache is completely empty
+  // (e.g. server just started and the manager hasn't completed its first
+  // paginated sweep yet).
+  const cached = journalManager.getCached();
+  if (cached.length > 0) {
+    return cached;
   }
-  // Cache stale or empty — do a one-shot fetch and let the persistent manager update async
+  // Cache truly empty — do a best-effort one-shot fetch while the background
+  // manager completes its full paginated load.
   try {
     return await fetchDerivProfitTable(token, 500);
   } catch {
-    // Use whatever is in cache even if stale
-    return journalManager.getCached();
+    return [];
   }
 }
 
