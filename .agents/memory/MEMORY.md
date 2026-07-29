@@ -16,6 +16,7 @@
 - [Live trade settlement fix](live-trade-settlement-poc-fix.md) — proposal_open_contracts rejected by Deriv for this account/app_id; waitForContractResult now polls portfolio+profit_table instead.
 - [Autonomous loop safety](autonomous-loop-safety.md) — isLoopRunning + open-trade DB guard + lastTradeCompletedAt (12s) + per-symbol cooldown (max 2 trades / 8min) prevent double execution; scheduleNext waits 15s after trade.
 - [Journal manager + no-fallback policy](journal-manager.md) — DerivJournalManager in deriv.ts: persistent WS, ping every 25s, reconnect if no pong 60s, profit_table refresh every 60s; no local DB fallback anywhere in journal/stats/daily-summary routes.
+- [profit_table rate limit](journal-profit-table-rate-limit.md) — Deriv rate-limits profit_table to ~1 req/5s per account; isFetchingPages guard + 5s inter-page delay + 5s startup delay + 10s min interval prevent the cascade.
 - [Continuous trading gates](continuous-trading-gates.md) — engine was freezing after 2 trades; EV gate, timing gate, drifting gate were all hard-blocking; fixed by widening MIN_POSITIVE_EV to -0.05 and making gates advisory except hard risk stops.
 - [Recovery state single source of truth](recovery-state-authority.md) — recordOutcome() is the sole writer of recovery state; never re-derive it from the (stale, cached) Deriv journal or DB — causes revert/flicker races.
 - [Recovery Intelligence v2](recovery-intelligence-v2.md) — evaluates all 8 OVER/UNDER candidates per market; symbol-scoped cache (family|symbol); hard gate skips coordinator when below threshold.

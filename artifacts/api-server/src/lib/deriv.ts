@@ -1121,13 +1121,19 @@ class DerivJournalManager extends EventEmitter {
   private fetchAccumulator: any[] = [];
   /** Debounce timer for transaction-triggered refreshes */
   private txDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Rate-limit guard: timestamp of last profit_table message sent */
+  private lastRefreshSentMs = 0;
+  /** Minimum ms between profit_table requests to avoid Deriv rate limits */
+  private static readonly MIN_REFRESH_INTERVAL_MS = 10_000;
+  /** True while a paginated profit_table fetch is in progress — blocks new chains */
+  private isFetchingPages = false;
 
   setCredentials(bearerToken: string, accountId: string) {
     const changed = this.bearerToken !== bearerToken || this.accountId !== accountId;
     this.bearerToken = bearerToken;
     this.accountId = accountId;
     if (changed) {
-      this.reconnectDelay = 3000;
+      this.reconnectDelay = 10_000;
       this.connect();
       this.startRefreshTimer();
     }
@@ -1158,10 +1164,25 @@ class DerivJournalManager extends EventEmitter {
   }
 
   forceRefresh() {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.fetchAccumulator = [];
-      this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    // Block new chains while a paginated fetch is already in progress.
+    // With 5000+ trades, one refresh = 10+ sequential WS messages; starting
+    // a new chain mid-pagination causes concurrent bursts that hit Deriv's
+    // profit_table rate limit.
+    if (this.isFetchingPages) {
+      logger.debug("JournalManager: forceRefresh skipped (pagination in progress)");
+      return;
     }
+    const now = Date.now();
+    if (now - this.lastRefreshSentMs < DerivJournalManager.MIN_REFRESH_INTERVAL_MS) {
+      // Rate-limit guard: too soon since the last profit_table request.
+      logger.debug({ msSinceLast: now - this.lastRefreshSentMs }, "JournalManager: forceRefresh skipped (rate-limit guard)");
+      return;
+    }
+    this.lastRefreshSentMs = now;
+    this.isFetchingPages = true;
+    this.fetchAccumulator = [];
+    this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
   }
 
   private stopTimers() {
@@ -1173,13 +1194,9 @@ class DerivJournalManager extends EventEmitter {
 
   private startRefreshTimer() {
     if (this.refreshTimer) clearInterval(this.refreshTimer);
-    // Background safety-net poll — real-time updates come from the transaction subscription
-    this.refreshTimer = setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.fetchAccumulator = [];
-        this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
-      }
-    }, 30_000);
+    // Background safety-net poll — real-time updates come from the transaction subscription.
+    // Routes through forceRefresh() so the rate-limit guard is always enforced.
+    this.refreshTimer = setInterval(() => { this.forceRefresh(); }, 30_000);
   }
 
   /** Debounced refresh triggered by real-time transaction events (≤300ms latency) */
@@ -1214,14 +1231,23 @@ class DerivJournalManager extends EventEmitter {
 
     this.ws.on("open", () => {
       this.lastPongMs = Date.now();
-      this.reconnectDelay = 3000;
-      logger.info("JournalManager: connected via OTP WS — fetching profit table");
-      // No authorize message — OTP URL is pre-authenticated
-      this.fetchAccumulator = [];
-      this.ws!.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
-      // Subscribe to real-time transaction events so we refresh immediately on settlement
+      this.reconnectDelay = 10_000;
+      logger.info("JournalManager: connected via OTP WS — will fetch profit table in 5 s");
+      // Subscribe to real-time transaction events immediately (no rate-limit concern)
       this.ws!.send(JSON.stringify({ transaction: 1, subscribe: 1 }));
       this.startPing();
+      // Delay the first profit_table request by 5 s.
+      // Deriv's per-account rate limit persists across reconnects — if the previous
+      // session was rate-limited, firing immediately on the new connection hits the
+      // same limit before it has had time to cool down.
+      setTimeout(() => {
+        if (this.ws?.readyState === WebSocket.OPEN && !this.isFetchingPages) {
+          this.fetchAccumulator = [];
+          this.isFetchingPages = true;
+          this.lastRefreshSentMs = Date.now();
+          this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
+        }
+      }, 5_000);
     });
 
     this.ws.on("message", (data) => {
@@ -1232,14 +1258,26 @@ class DerivJournalManager extends EventEmitter {
           this.fetchAccumulator.push(...batch);
 
           if (batch.length >= JOURNAL_FETCH_LIMIT) {
-            // There may be more pages — fetch the next batch using offset
+            // There may be more pages — wait 5 s between page requests.
+            // Deriv enforces a per-account profit_table rate limit of roughly
+            // 1 request every 3-5 s. Sending pages back-to-back (even with 1.5 s
+            // gaps) triggers "RateLimit" errors that abort the whole chain.
+            // 5 s ensures we stay well below the limit regardless of account history size.
             const offset = this.fetchAccumulator.length;
             logger.info({ received: batch.length, totalSoFar: offset }, "JournalManager: fetching next page");
-            this.ws!.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT, offset }));
+            setTimeout(() => {
+              if (this.ws?.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT, offset }));
+              } else {
+                // WS closed while waiting — release the lock
+                this.isFetchingPages = false;
+              }
+            }, 5_000);
           } else {
-            // All pages received — commit to cache
+            // All pages received — commit to cache and release the in-progress lock
             this.cachedTransactions = this.fetchAccumulator;
             this.fetchAccumulator = [];
+            this.isFetchingPages = false;
             this.lastFetchMs = Date.now();
             logger.info({ count: this.cachedTransactions.length }, "JournalManager: profit table refreshed");
             this.emit("refreshed", this.cachedTransactions);
@@ -1258,12 +1296,17 @@ class DerivJournalManager extends EventEmitter {
         }
         if (msg.error) {
           logger.warn({ code: msg.error.code, message: msg.error.message }, "JournalManager: error");
-          // Discard the partial accumulator — do NOT commit it to cachedTransactions.
-          // Committing partial results (e.g. only page 1 = 500 trades) was the second
-          // root cause of the 1062 ↔ 500 oscillation: an error on page 2+ would
-          // overwrite the complete cache with a truncated set.
-          // Keep the previous complete cache intact; the next refresh cycle will retry.
+          // Discard the partial accumulator — do NOT commit truncated results to cache.
           this.fetchAccumulator = [];
+          this.isFetchingPages = false;
+          if (msg.error.code === "RateLimit") {
+            // Honour the full MIN_REFRESH_INTERVAL before any new request.
+            this.lastRefreshSentMs = Date.now();
+            // Schedule a full retry after 15 s so the background timer doesn't
+            // have to wait a full 30 s cycle before the journal is populated.
+            logger.info("JournalManager: RateLimit — will retry profit_table in 15 s");
+            setTimeout(() => { this.forceRefresh(); }, 15_000);
+          }
         }
       } catch { /* ignore */ }
     });
@@ -1621,7 +1664,10 @@ export async function waitForContractResult(
       // No authorize — OTP URL is pre-authenticated
       const poll = () => { if (!settled) ws.send(JSON.stringify({ portfolio: 1 })); };
       poll();
-      pollInterval = setInterval(poll, 1_000);
+      // 4 s poll — digit contracts settle within 5-15 ticks (~5-15s at 1 Hz),
+      // so 4 s still catches settlement quickly while cutting WS message rate
+      // by 4× vs the old 1 s interval that was triggering Deriv's rate limit.
+      pollInterval = setInterval(poll, 4_000);
     });
 
     ws.on("message", (data) => {

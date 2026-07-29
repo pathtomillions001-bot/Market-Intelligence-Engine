@@ -1122,7 +1122,9 @@ async function runAutonomousLoop() {
         }
         broadcastSSE("trade_completed", { id: openTrade.id, symbol: bestMarket.symbol, won: false,
           profit: "0", contract: effectiveContractType, error: errMsg });
-        journalManager.forceRefresh();
+        // No forceRefresh here — the trade never settled on Deriv so the
+        // profit_table has nothing new to fetch. Calling it was contributing
+        // to the concurrent-pagination rate-limit cascade.
 
         // Do NOT touch sessionLossCount here — the contract outcome
         // is unknown (Deriv may have settled it as won). Adding a false loss count here
