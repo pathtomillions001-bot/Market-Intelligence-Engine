@@ -471,17 +471,18 @@ async function findSafestRecoverySetup(
 
   // Phase 2: nothing passed the strict 60% dual-window consensus — fall back to a
   // full market scan using the exact user-configured recovery types and barriers.
-  // analyzeMarketsForStrategy scores all 17 markets with no threshold gate; it just
-  // returns them sorted by score, so the engine always finds the best available
-  // market rather than looping indefinitely with no trade.
+  // A minimum quality floor of 50/100 is enforced here; trading a setup that scores
+  // below this is worse than waiting — it guarantees another compounding recovery loss.
   const fallback = await analyzeMarketsForStrategy(allowedContractTypes, recoveryBarriers);
-  if (fallback.length > 0) {
-    const best = fallback[0]!;
+  const bestFallback = fallback.find(m => m.score >= 50);
+  if (bestFallback) {
     return {
-      ...best,
-      reason: `[Best available scan] ${best.contractType}${best.barrier !== undefined ? ` ${best.barrier}` : ""} on ${best.displayName}: score ${best.score}/100, win ${(best.winProbability * 100).toFixed(1)}% — no market passed strict dual-window gate, using best scored across all markets`,
+      ...bestFallback,
+      reason: `[Best available scan] ${bestFallback.contractType}${bestFallback.barrier !== undefined ? ` ${bestFallback.barrier}` : ""} on ${bestFallback.displayName}: score ${bestFallback.score}/100, win ${(bestFallback.winProbability * 100).toFixed(1)}% — using best market above quality floor`,
     };
   }
+  // Nothing meets the minimum quality bar — return null so the caller pauses
+  // and waits for markets to evolve rather than trading into near-certain loss.
   return null;
 }
 
@@ -494,27 +495,52 @@ export async function analyzeMarketsForStrategy(
 
   for (const market of DERIV_MARKETS) {
     if (!market.digitEnabled && contractTypes.some(ct => ct.startsWith("DIGIT"))) continue;
-    const digits = tickManager.getDigits(market.symbol, 200);
-    const prices = tickManager.getTicks(market.symbol, 100);
+
+    // ── Dual-window tick data ──────────────────────────────────────────────────
+    // Primary (150-tick): stable, representative signal.
+    // Recent  ( 50-tick): short-term check — catches regime changes the longer
+    //                     window would absorb but which make the bet riskier NOW.
+    const digits150 = tickManager.getDigits(market.symbol, 150);
+    const digits50  = tickManager.getDigits(market.symbol, 50);
+    const prices    = tickManager.getTicks(market.symbol, 100);
+    // Fall back to a combined 200-tick read when we don't have enough for both windows
+    const digitsMain = digits150.length >= 80 ? digits150 : tickManager.getDigits(market.symbol, 200);
 
     for (const ct of contractTypes) {
+      let barrier: number | undefined;
       if (ct === "DIGITOVER") {
-        // Always use the exact OVER barrier the user set — never auto-pick
-        const s = scoreMarket(market.symbol, market.displayName, ct, overBarrier, digits, prices);
-        if (s) scored.push(s);
+        barrier = overBarrier;
       } else if (ct === "DIGITUNDER") {
-        // Always use the exact UNDER barrier the user set — never auto-pick
-        const s = scoreMarket(market.symbol, market.displayName, ct, underBarrier, digits, prices);
-        if (s) scored.push(s);
+        barrier = underBarrier;
       } else if (ct === "DIGITMATCH" || ct === "DIGITDIFF") {
-        const freq = digitFrequency(digits);
-        const b = pickMatchDiffBarrier(freq, ct);
-        const s = scoreMarket(market.symbol, market.displayName, ct, b, digits, prices);
-        if (s) scored.push(s);
-      } else {
-        const s = scoreMarket(market.symbol, market.displayName, ct, undefined, digits, prices);
-        if (s) scored.push(s);
+        // Barrier selection on the more stable long window
+        const freq = digitFrequency(digitsMain);
+        barrier = pickMatchDiffBarrier(freq, ct);
       }
+
+      // Primary score on the main (longer) window
+      const s = scoreMarket(market.symbol, market.displayName, ct, barrier, digitsMain, prices);
+      if (!s) continue;
+
+      // ── Window consistency cross-check ─────────────────────────────────────
+      // When we have enough ticks for both windows, compare the short-term signal
+      // against the long-term baseline.  A big disagreement means the pattern is
+      // noisy or regime-shifting — penalise the score rather than reject entirely
+      // so we always have a ranked result for the fallback path.
+      if (digits50.length >= 40 && digits150.length >= 80) {
+        const s50 = scoreMarket(market.symbol, market.displayName, ct, barrier, digits50, prices);
+        if (s50) {
+          const windowDelta = Math.abs(s.score - s50.score);
+          // Each point of disagreement above 10 shaves 0.6 pts from the score
+          if (windowDelta > 10) {
+            s.score = Math.max(0, s.score - Math.round((windowDelta - 10) * 0.6));
+          }
+          // Conservative blend: weight the short-term (recent) window at 40%
+          s.winProbability = s.winProbability * 0.6 + s50.winProbability * 0.4;
+        }
+      }
+
+      scored.push(s);
     }
   }
 
@@ -715,6 +741,69 @@ function recordRecoveryOutcome(
   };
 }
 
+// ── Minimum score for a normal trade ─────────────────────────────────────────
+// Trades below this threshold are skipped — a low-quality setup is more likely
+// to cause a recovery spiral than produce a win. 50/100 is deliberately set at
+// "meaningful edge" not "theoretical best available".
+const MIN_TRADE_SCORE = 50;
+
+// ── Live-tick pattern confirmation ────────────────────────────────────────────
+/**
+ * Quick sanity check on the CURRENT live digit buffer before placing a recovery
+ * trade. Returns false when the last few live ticks directly contradict the
+ * prediction — a signal that the pattern has not yet aligned and waiting one
+ * tick cycle is safer than executing immediately.
+ *
+ * This is intentionally a lightweight, fast check — NOT a second full analysis.
+ * It only catches the most obvious "the market is doing the exact opposite right
+ * now" scenarios. The intelligent recovery scanner (dual-window) already handles
+ * deeper quality validation for its candidates.
+ */
+function hasPatternConfirmation(
+  symbol: string,
+  contractType: SpeedContractType,
+  barrier: number | undefined,
+): boolean {
+  const recent = tickManager.getDigits(symbol, 5);
+  if (recent.length < 3) return true; // insufficient data — do not block
+
+  const last3 = recent.slice(-3);
+
+  switch (contractType) {
+    case "DIGITOVER": {
+      if (barrier === undefined) return true;
+      // Bad sign: ALL last-3 digits were ≤ barrier (persistent low-digit pattern)
+      return !last3.every(d => d <= barrier!);
+    }
+    case "DIGITUNDER": {
+      if (barrier === undefined) return true;
+      // Bad sign: ALL last-3 digits were ≥ barrier (persistent high-digit pattern)
+      return !last3.every(d => d >= barrier!);
+    }
+    case "DIGITDIFF": {
+      if (barrier === undefined) return true;
+      // Bad sign: target digit appeared in BOTH of the last 2 ticks — currently very hot
+      const last2 = recent.slice(-2);
+      return !last2.every(d => d === barrier);
+    }
+    case "DIGITMATCH": {
+      if (barrier === undefined) return true;
+      // Bad sign: target digit has not appeared at all in the last 5 ticks — too cold
+      return recent.includes(barrier!);
+    }
+    case "DIGITEVEN": {
+      // Bad sign: ALL last-3 digits were odd (strongly odd-biased recent ticks)
+      return !last3.every(d => d % 2 !== 0);
+    }
+    case "DIGITODD": {
+      // Bad sign: ALL last-3 digits were even (strongly even-biased recent ticks)
+      return !last3.every(d => d % 2 === 0);
+    }
+    default:
+      return true;
+  }
+}
+
 // ── Sleep helper ──────────────────────────────────────────────────────────────
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
@@ -876,6 +965,16 @@ async function runLoop(config: SpeedAIConfig) {
           await sleep(3000);
           continue;
         }
+        // Quality floor: skip this cycle if no market meets the minimum trade score.
+        // Trading a low-quality setup (< MIN_TRADE_SCORE) is more likely to cause
+        // a recovery spiral than to win.
+        if (scored[0].score < MIN_TRADE_SCORE) {
+          session.message = `No high-quality setup (best ${scored[0].score}/100) — waiting for edge…`;
+          broadcast();
+          preAnalyzedScored = null;
+          await sleep(2000);
+          continue;
+        }
         best = scored[0];
       } else {
         session.message = "Scanning markets…";
@@ -886,6 +985,13 @@ async function runLoop(config: SpeedAIConfig) {
           session.message = "No markets available — waiting for tick data…";
           broadcast();
           await sleep(3000);
+          continue;
+        }
+        if (scored[0].score < MIN_TRADE_SCORE) {
+          session.message = `No high-quality setup (best ${scored[0].score}/100) — waiting for edge…`;
+          broadcast();
+          preAnalyzedScored = null;
+          await sleep(2000);
           continue;
         }
         best = scored[0];
@@ -900,16 +1006,17 @@ async function runLoop(config: SpeedAIConfig) {
     // the user is always in control of which contract types are used.
     let intelligentRecoveryOverride = false;
 
-    if (inRecovery && session.recovery.consecutiveRecoveryLosses >= 2) {
-      session.message = `⚡ ${session.recovery.consecutiveRecoveryLosses} recovery losses — AI scanning all markets within your selected recovery types…`;
+    if (inRecovery && session.recovery.consecutiveRecoveryLosses >= 1) {
+      session.message = `⚡ Recovery loss detected — deep-scanning all markets for safest setup…`;
       broadcast();
       logger.warn(
         { consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses, symbol: best.symbol },
         "SpeedAI intelligent recovery gate triggered",
       );
 
-      // Stabilisation pause — let the market breathe before fresh analysis
-      await sleep(3000);
+      // Stabilisation pause — give the market time to breathe and let patterns
+      // re-establish before committing to the next recovery trade.
+      await sleep(5000);
       if (!session.running || session.stopRequested) break;
 
       // Run the intelligent scanner — restricted to user's chosen recovery contract types
@@ -935,6 +1042,28 @@ async function runLoop(config: SpeedAIConfig) {
         session.message = `⏸ No high-confidence recovery setup found — waiting for markets to settle…`;
         broadcast();
         await sleep(5000);
+        continue;
+      }
+    }
+
+    // ── Recovery pre-flight: live-tick pattern confirmation ───────────────────
+    // Before placing a recovery trade that hasn't already been validated by the
+    // deep intelligent scanner, do a quick live-digit sanity check. If the last
+    // few ticks directly contradict the prediction (e.g. OVER 5 while the last
+    // 3 digits were all 2-3), wait ~1.2 s and re-analyze — a skipped trade
+    // costs nothing; a mispredicted recovery trade compounds the debt.
+    // Skip this check when the AI override is active (it already passed 50+150
+    // dual-window validation, which is far stricter than this quick check).
+    if (inRecovery && !intelligentRecoveryOverride) {
+      if (!hasPatternConfirmation(best.symbol, best.contractType, best.barrier)) {
+        session.message = `⏳ Pattern check failed on ${best.displayName} — waiting for better entry…`;
+        broadcast();
+        logger.info(
+          { symbol: best.symbol, contractType: best.contractType, barrier: best.barrier },
+          "SpeedAI recovery pre-flight: live ticks contradict setup, skipping one cycle",
+        );
+        preAnalyzedScored = null; // force fresh analysis next iteration
+        await sleep(1200);
         continue;
       }
     }
@@ -1073,12 +1202,13 @@ async function runLoop(config: SpeedAIConfig) {
     const nextInRecovery = session.recovery.inRecovery;
     const nextContractTypes = nextInRecovery ? config.recoveryContractTypes : config.normalContractTypes;
     const nextBarriers = nextInRecovery ? config.recoveryBarriers : config.normalBarriers;
-    const willTriggerGate = nextInRecovery && session.recovery.consecutiveRecoveryLosses >= 2;
+    const willTriggerGate = nextInRecovery && session.recovery.consecutiveRecoveryLosses >= 1;
 
-    // Pause duration: shorter than before because analysis overlaps with it.
-    // The 500 ms gives the Deriv WS a moment before the next proposal, while
-    // the pre-analysis completes in the background.
-    const pauseMs = isLive ? 500 : 300;
+    // Adaptive pause duration:
+    // - Win → 400 ms (fast; no recovery debt to manage)
+    // - Loss → 1800 ms (market breathe time; also lets the next deep-scan complete
+    //   before we need to execute, since willTriggerGate skips pre-analysis anyway)
+    const pauseMs = isLive ? (won ? 400 : 1800) : 200;
 
     if (!willTriggerGate) {
       const preAnalyzePromise = lockedDerivsMarket
