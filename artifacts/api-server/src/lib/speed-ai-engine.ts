@@ -303,7 +303,7 @@ function extractBarriers(barriers: number[]): { overBarrier: number; underBarrie
 
 // ── Recovery minimum score threshold ─────────────────────────────────────────
 // Recovery trades require a higher quality floor than normal trades (MIN_TRADE_SCORE=50).
-const MIN_RECOVERY_SCORE = 60;
+const MIN_RECOVERY_SCORE = 55;
 
 // ── Recovery candidate returned by deepRecoveryGate ───────────────────────────
 interface RecoveryCandidate {
@@ -367,9 +367,9 @@ function momentumAlignment(
  *  • Thresholds scale up automatically after consecutive losses
  *
  * Threshold ladder:
- *   0 consecutive losses → minWinP 0.57, maxSpread 18, minMomentum 0.50
- *   1 loss               → minWinP 0.61, maxSpread 14, minMomentum 0.57
- *   2+ losses            → minWinP 0.65, maxSpread 10, minMomentum 0.63
+ *   0 consecutive losses → minWinP 0.54, maxSpread 22, minMomentum 0.43
+ *   1 loss               → minWinP 0.57, maxSpread 18, minMomentum 0.50
+ *   2+ losses            → minWinP 0.61, maxSpread 14, minMomentum 0.56
  *
  * Returns the highest-ranked candidate, or null if none pass all gates.
  */
@@ -381,16 +381,16 @@ function deepRecoveryGate(
   consecutiveLosses: number,
 ): RecoveryCandidate | null {
   // Adaptive thresholds — tighter after each consecutive recovery loss
-  const minWinP     = consecutiveLosses >= 2 ? 0.65 : consecutiveLosses >= 1 ? 0.61 : 0.57;
-  const maxSpread   = consecutiveLosses >= 2 ? 10   : consecutiveLosses >= 1 ? 14   : 18;
-  const minMomentum = consecutiveLosses >= 2 ? 0.63 : consecutiveLosses >= 1 ? 0.57 : 0.50;
+  const minWinP     = consecutiveLosses >= 2 ? 0.61 : consecutiveLosses >= 1 ? 0.57 : 0.54;
+  const maxSpread   = consecutiveLosses >= 2 ? 14   : consecutiveLosses >= 1 ? 18   : 22;
+  const minMomentum = consecutiveLosses >= 2 ? 0.56 : consecutiveLosses >= 1 ? 0.50 : 0.43;
 
   const digits60  = tickManager.getDigits(symbol, 60);
   const digits100 = tickManager.getDigits(symbol, 100);
   const digits150 = tickManager.getDigits(symbol, 150);
 
   // All three windows need sufficient data (scoreMarket requires ≥50 for DIGIT contracts)
-  if (digits60.length < 50 || digits100.length < 80 || digits150.length < 100) return null;
+  if (digits60.length < 45 || digits100.length < 70 || digits150.length < 90) return null;
 
   const candidates: RecoveryCandidate[] = [];
 
@@ -988,7 +988,7 @@ async function runLoop(config: SpeedAIConfig) {
 
       if (!candidate) {
         // No high-confidence entry — scale wait time with consecutive losses
-        const waitMs = consLosses >= 2 ? 4000 : consLosses >= 1 ? 2500 : 1500;
+        const waitMs = consLosses >= 2 ? 2000 : consLosses >= 1 ? 1200 : 700;
         session.message = `⏳ Awaiting high-confidence recovery entry${consLosses > 0 ? ` (${consLosses} consec. loss${consLosses > 1 ? "es" : ""})` : ""}…`;
         broadcast();
         logger.info(
