@@ -301,6 +301,165 @@ function extractBarriers(barriers: number[]): { overBarrier: number; underBarrie
   return { overBarrier, underBarrier };
 }
 
+// ── Recovery minimum score threshold ─────────────────────────────────────────
+// Recovery trades require a higher quality floor than normal trades (MIN_TRADE_SCORE=50).
+const MIN_RECOVERY_SCORE = 60;
+
+// ── Recovery candidate returned by deepRecoveryGate ───────────────────────────
+interface RecoveryCandidate {
+  contractType: SpeedContractType;
+  barrier:      number | undefined;
+  payout:       number;
+  /** Minimum win probability across all 3 tick windows — the conservative estimate */
+  minWinP:      number;
+  /** Average score across all 3 windows */
+  avgScore:     number;
+  /** Score range (max − min across windows); lower = pattern is stable, not a noise spike */
+  spread:       number;
+  /** Expected value using minWinP — guarantees positive EV even in the worst window */
+  ev:           number;
+  /** Fraction of the last 8 ticks that already satisfy the prediction (0–1) */
+  momentumScore: number;
+  /** Final ranking metric combining the above */
+  compositeScore: number;
+  reason:       string;
+}
+
+/**
+ * Fraction of the last `window` digits that satisfy the prediction.
+ * Measures short-term momentum — the market should be behaving in our favour
+ * RIGHT NOW, not just on a 150-tick statistical average.
+ */
+function momentumAlignment(
+  digits: number[],
+  contractType: SpeedContractType,
+  barrier: number | undefined,
+  window = 8,
+): number {
+  const recent = digits.slice(-window);
+  if (recent.length < 4) return 0.5; // insufficient data — neutral
+  let hits = 0;
+  for (const d of recent) {
+    switch (contractType) {
+      case "DIGITOVER":  if (barrier !== undefined && d >  barrier) hits++; break;
+      case "DIGITUNDER": if (barrier !== undefined && d <  barrier) hits++; break;
+      case "DIGITEVEN":  if (d % 2 === 0)                          hits++; break;
+      case "DIGITODD":   if (d % 2 !== 0)                          hits++; break;
+      case "DIGITMATCH": if (barrier !== undefined && d === barrier) hits++; break;
+      case "DIGITDIFF":  if (barrier !== undefined && d !== barrier) hits++; break;
+    }
+  }
+  return hits / recent.length;
+}
+
+/**
+ * Deep multi-window consensus gate for recovery trades.
+ *
+ * Scores every valid barrier within the user's chosen recovery contract families
+ * across THREE independent tick windows (60t / 100t / 150t). A candidate passes
+ * only when ALL THREE windows agree on the edge AND recent momentum confirms the
+ * pattern is active RIGHT NOW.
+ *
+ * Advantages over the old single-window + 3-tick check:
+ *  • 60t window catches pattern shifts that 150t alone misses
+ *  • "spread" gate filters noise spikes — if windows disagree, we wait
+ *  • Barrier sweep finds the BEST entry within the family (not just configured)
+ *  • Thresholds scale up automatically after consecutive losses
+ *
+ * Threshold ladder:
+ *   0 consecutive losses → minWinP 0.57, maxSpread 18, minMomentum 0.50
+ *   1 loss               → minWinP 0.61, maxSpread 14, minMomentum 0.57
+ *   2+ losses            → minWinP 0.65, maxSpread 10, minMomentum 0.63
+ *
+ * Returns the highest-ranked candidate, or null if none pass all gates.
+ */
+function deepRecoveryGate(
+  symbol:           string,
+  displayName:      string,
+  contractTypes:    SpeedContractType[],
+  configBarriers:   number[],
+  consecutiveLosses: number,
+): RecoveryCandidate | null {
+  // Adaptive thresholds — tighter after each consecutive recovery loss
+  const minWinP     = consecutiveLosses >= 2 ? 0.65 : consecutiveLosses >= 1 ? 0.61 : 0.57;
+  const maxSpread   = consecutiveLosses >= 2 ? 10   : consecutiveLosses >= 1 ? 14   : 18;
+  const minMomentum = consecutiveLosses >= 2 ? 0.63 : consecutiveLosses >= 1 ? 0.57 : 0.50;
+
+  const digits60  = tickManager.getDigits(symbol, 60);
+  const digits100 = tickManager.getDigits(symbol, 100);
+  const digits150 = tickManager.getDigits(symbol, 150);
+
+  // All three windows need sufficient data (scoreMarket requires ≥50 for DIGIT contracts)
+  if (digits60.length < 50 || digits100.length < 80 || digits150.length < 100) return null;
+
+  const candidates: RecoveryCandidate[] = [];
+
+  for (const ct of contractTypes) {
+    // Build the barrier sweep list for this contract type
+    let barriersToTry: Array<number | undefined>;
+
+    if (ct === "DIGITOVER") {
+      // Search ALL valid OVER barriers — gate picks the one with best 3-window consensus
+      barriersToTry = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+    } else if (ct === "DIGITUNDER") {
+      barriersToTry = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    } else if (ct === "DIGITMATCH" || ct === "DIGITDIFF") {
+      // Auto-select hottest / coldest digit from the 150-tick baseline
+      const freq = digitFrequency(digits150);
+      barriersToTry = [pickMatchDiffBarrier(freq, ct)];
+    } else {
+      barriersToTry = [undefined]; // DIGITEVEN / DIGITODD / CALL / PUT — no barrier
+    }
+
+    for (const b of barriersToTry) {
+      // Score each window independently using the same scoreMarket function
+      const s60  = scoreMarket(symbol, displayName, ct, b, digits60,  []);
+      const s100 = scoreMarket(symbol, displayName, ct, b, digits100, []);
+      const s150 = scoreMarket(symbol, displayName, ct, b, digits150, []);
+      if (!s60 || !s100 || !s150) continue;
+
+      const minWP  = Math.min(s60.winProbability, s100.winProbability, s150.winProbability);
+      const avgSc  = (s60.score + s100.score + s150.score) / 3;
+      const spread = Math.max(s60.score, s100.score, s150.score)
+                   - Math.min(s60.score, s100.score, s150.score);
+      const payout = s150.payout;
+      const ev     = minWP * (payout - 1) - (1 - minWP); // EV using conservative (lowest) winP
+
+      // ── Gate battery — every condition must pass ───────────────────────────
+      if (minWP  < minWinP)          continue; // all 3 windows must agree on edge strength
+      if (spread > maxSpread)        continue; // reject unstable patterns / noise spikes
+      if (ev     <= 0)               continue; // must have positive EV even in worst window
+      if (avgSc  < MIN_RECOVERY_SCORE) continue; // quality floor
+
+      // Momentum: what fraction of the last 8 ticks already satisfies the bet
+      const momentum = momentumAlignment(digits150, ct, b, 8);
+      if (momentum < minMomentum) continue; // market must be aligned RIGHT NOW
+
+      // Composite ranking: min win probability weighted most, then stability, then momentum
+      const composite = minWP * 0.50 + (1 - spread / 100) * 0.25 + momentum * 0.25;
+
+      candidates.push({
+        contractType:   ct,
+        barrier:        b,
+        payout,
+        minWinP:        minWP,
+        avgScore:       avgSc,
+        spread,
+        ev,
+        momentumScore:  momentum,
+        compositeScore: composite,
+        reason: `${ct}${b !== undefined ? ` ${b}` : ""} — ${(minWP * 100).toFixed(1)}% min-consensus (60/100/150t), momentum ${(momentum * 100).toFixed(0)}%, spread ${spread.toFixed(0)}, EV${ev >= 0 ? "+" : ""}${(ev * 100).toFixed(1)}%`,
+      });
+    }
+  }
+
+  if (candidates.length === 0) return null;
+
+  // Pick highest composite score
+  candidates.sort((a, b) => b.compositeScore - a.compositeScore);
+  return candidates[0]!;
+}
+
 export async function analyzeMarketsForStrategy(
   contractTypes: SpeedContractType[],
   barriers: number[],
@@ -813,20 +972,64 @@ async function runLoop(config: SpeedAIConfig) {
       }
     }
 
-    // ── Recovery pre-flight: live-tick pattern confirmation ───────────────────
-    // Before placing a recovery trade, do a quick live-digit sanity check. If
-    // the last few ticks directly contradict the prediction (e.g. OVER 5 while
-    // the last 3 digits were all 2-3), wait ~1.2 s and re-analyze — a skipped
-    // trade costs nothing; a mispredicted recovery trade compounds the debt.
+    // ── Recovery: deep multi-window consensus gate ────────────────────────────
+    // Recovery trades go through a strict 3-window consensus check (60t/100t/150t)
+    // + last-8-tick momentum alignment before executing. Normal trades use the
+    // lighter hasPatternConfirmation check (sufficient for non-compounding trades).
     if (inRecovery) {
-      if (!hasPatternConfirmation(best.symbol, best.contractType, best.barrier)) {
-        session.message = `⏳ Pattern check failed on ${best.displayName} — waiting for better entry…`;
+      const consLosses = session.recovery.consecutiveRecoveryLosses;
+      const candidate  = deepRecoveryGate(
+        best.symbol,
+        best.displayName,
+        config.recoveryContractTypes,
+        barriers,
+        consLosses,
+      );
+
+      if (!candidate) {
+        // No high-confidence entry — scale wait time with consecutive losses
+        const waitMs = consLosses >= 2 ? 4000 : consLosses >= 1 ? 2500 : 1500;
+        session.message = `⏳ Awaiting high-confidence recovery entry${consLosses > 0 ? ` (${consLosses} consec. loss${consLosses > 1 ? "es" : ""})` : ""}…`;
         broadcast();
         logger.info(
-          { symbol: best.symbol, contractType: best.contractType, barrier: best.barrier },
-          "SpeedAI recovery pre-flight: live ticks contradict setup, skipping one cycle",
+          { symbol: best.symbol, consLosses },
+          "SpeedAI recovery gate: no 3-window consensus — waiting for alignment",
         );
-        preAnalyzedScored = null; // force fresh analysis next iteration
+        preAnalyzedScored = null;
+        await sleep(waitMs);
+        continue;
+      }
+
+      // Deep gate won — override `best` with the consensus-selected contract + barrier
+      best = {
+        ...best,
+        contractType:   candidate.contractType,
+        barrier:        candidate.barrier,
+        payout:         candidate.payout,
+        winProbability: candidate.minWinP,
+        score:          Math.round(candidate.avgScore),
+        reason:         candidate.reason,
+      };
+
+      logger.info(
+        {
+          symbol:        best.symbol,
+          contractType:  best.contractType,
+          barrier:       best.barrier,
+          minWinP:       candidate.minWinP,
+          spread:        candidate.spread,
+          momentum:      candidate.momentumScore,
+          composite:     candidate.compositeScore,
+          consLosses,
+        },
+        "SpeedAI recovery gate: 3-window consensus passed",
+      );
+    } else {
+      // Normal trade — lightweight directional check is sufficient
+      if (!hasPatternConfirmation(best.symbol, best.contractType, best.barrier)) {
+        session.message = `⏳ Pattern check: waiting for better entry on ${best.displayName}…`;
+        broadcast();
+        preAnalyzedScored = null;
         await sleep(1200);
         continue;
       }
@@ -848,17 +1051,21 @@ async function runLoop(config: SpeedAIConfig) {
     if (isLive) {
       try {
         // ── Barrier validation ────────────────────────────────────────────────
-        // Enforce the user's configured barriers so no accidental drift sneaks through.
-        const { overBarrier: cfgOver, underBarrier: cfgUnder } = extractBarriers(barriers);
-        if (best.contractType === "DIGITOVER" && best.barrier !== cfgOver) {
-          logger.error({ expected: cfgOver, actual: best.barrier, contractType: "DIGITOVER" },
-            "SpeedAI barrier mismatch — forcing configured OVER barrier");
-          best = { ...best, barrier: cfgOver };
-        }
-        if (best.contractType === "DIGITUNDER" && best.barrier !== cfgUnder) {
-          logger.error({ expected: cfgUnder, actual: best.barrier, contractType: "DIGITUNDER" },
-            "SpeedAI barrier mismatch — forcing configured UNDER barrier");
-          best = { ...best, barrier: cfgUnder };
+        // Normal trades: enforce the user's configured barriers.
+        // Recovery trades: deepRecoveryGate already selected the optimal barrier
+        // via 3-window consensus — overriding it would defeat the analysis.
+        if (!inRecovery) {
+          const { overBarrier: cfgOver, underBarrier: cfgUnder } = extractBarriers(barriers);
+          if (best.contractType === "DIGITOVER" && best.barrier !== cfgOver) {
+            logger.error({ expected: cfgOver, actual: best.barrier, contractType: "DIGITOVER" },
+              "SpeedAI barrier mismatch — forcing configured OVER barrier");
+            best = { ...best, barrier: cfgOver };
+          }
+          if (best.contractType === "DIGITUNDER" && best.barrier !== cfgUnder) {
+            logger.error({ expected: cfgUnder, actual: best.barrier, contractType: "DIGITUNDER" },
+              "SpeedAI barrier mismatch — forcing configured UNDER barrier");
+            best = { ...best, barrier: cfgUnder };
+          }
         }
 
         logger.info({
@@ -868,7 +1075,7 @@ async function runLoop(config: SpeedAIConfig) {
           stake: Math.round(stake * 100) / 100,
           inRecovery,
           consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses,
-        }, "SpeedAI executing trade with exact user barriers");
+        }, inRecovery ? "SpeedAI executing deep-gate recovery trade" : "SpeedAI executing normal trade");
 
         const liveResult = await executeLiveTrade(token!, {
           symbol: best.symbol,
