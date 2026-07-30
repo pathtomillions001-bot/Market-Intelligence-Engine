@@ -463,11 +463,25 @@ async function findSafestRecoverySetup(
     }
   }
 
-  // Return best EV from the highest-priority tier that has any candidates.
+  // Phase 1: return best EV from the highest-priority tier that passed ALL strict gates.
   // Tiers are strict: EVEN/ODD is only considered if OVER/UNDER found nothing.
-  if (tier1.length > 0) return rankByEV(tier1)[0]!;
-  if (tier2.length > 0) return rankByEV(tier2)[0]!;
-  if (tier3.length > 0) return rankByEV(tier3)[0]!;
+  if (tier1.length > 0) return { ...rankByEV(tier1)[0]!, reason: `[Strict scan] ${rankByEV(tier1)[0]!.reason}` };
+  if (tier2.length > 0) return { ...rankByEV(tier2)[0]!, reason: `[Strict scan] ${rankByEV(tier2)[0]!.reason}` };
+  if (tier3.length > 0) return { ...rankByEV(tier3)[0]!, reason: `[Strict scan] ${rankByEV(tier3)[0]!.reason}` };
+
+  // Phase 2: nothing passed the strict 60% dual-window consensus — fall back to a
+  // full market scan using the exact user-configured recovery types and barriers.
+  // analyzeMarketsForStrategy scores all 17 markets with no threshold gate; it just
+  // returns them sorted by score, so the engine always finds the best available
+  // market rather than looping indefinitely with no trade.
+  const fallback = await analyzeMarketsForStrategy(allowedContractTypes, recoveryBarriers);
+  if (fallback.length > 0) {
+    const best = fallback[0]!;
+    return {
+      ...best,
+      reason: `[Best available scan] ${best.contractType}${best.barrier !== undefined ? ` ${best.barrier}` : ""} on ${best.displayName}: score ${best.score}/100, win ${(best.winProbability * 100).toFixed(1)}% — no market passed strict dual-window gate, using best scored across all markets`,
+    };
+  }
   return null;
 }
 
