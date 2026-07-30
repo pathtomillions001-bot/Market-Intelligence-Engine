@@ -331,7 +331,10 @@ const SMART_RECOVERY_MIN_WIN_P = 0.60;
  *
  * Within each tier, sorted by EV — maximises debt recovery speed.
  */
-async function findSafestRecoverySetup(recoveryBarriers: number[]): Promise<MarketScore | null> {
+async function findSafestRecoverySetup(
+  recoveryBarriers: number[],
+  allowedContractTypes: SpeedContractType[],
+): Promise<MarketScore | null> {
   const { overBarrier: userOverBarrier, underBarrier: userUnderBarrier } = extractBarriers(recoveryBarriers);
 
   // Only barriers with SAME OR BETTER payout than user's configured:
@@ -339,6 +342,18 @@ async function findSafestRecoverySetup(recoveryBarriers: number[]): Promise<Mark
   // UNDER: lower barrier = higher payout, so allow same or lower
   const OVER_BARRIERS  = ([4, 5, 6, 7, 8] as const).filter(b => b >= userOverBarrier);
   const UNDER_BARRIERS = ([5, 4, 3, 2, 1] as const).filter(b => b <= userUnderBarrier);
+
+  // Respect the user's chosen recovery families — only scan what they enabled
+  const wantOver  = allowedContractTypes.includes("DIGITOVER");
+  const wantUnder = allowedContractTypes.includes("DIGITUNDER");
+  const wantEven  = allowedContractTypes.includes("DIGITEVEN");
+  const wantOdd   = allowedContractTypes.includes("DIGITODD");
+  const wantMatch = allowedContractTypes.includes("DIGITMATCH");
+
+  // This function only analyses digit markets — if the user chose Rise/Fall only,
+  // we cannot do dual-window digit validation so return null and let the regular
+  // recovery path handle it.
+  if (!wantOver && !wantUnder && !wantEven && !wantOdd && !wantMatch) return null;
 
   const rankByEV = (arr: MarketScore[]) =>
     arr.sort((a, b) =>
@@ -360,80 +375,90 @@ async function findSafestRecoverySetup(recoveryBarriers: number[]): Promise<Mark
     if (digits50.length < 40 || digits150.length < 80) continue;
 
     // ── Tier 1: OVER barriers (same or better payout than user's setting) ─────
-    for (const b of OVER_BARRIERS) {
-      const s50  = scoreMarket(market.symbol, market.displayName, "DIGITOVER", b, digits50,  []);
-      const s150 = scoreMarket(market.symbol, market.displayName, "DIGITOVER", b, digits150, []);
-      if (!s50 || !s150) continue;
-      if (s50.winProbability  < SMART_RECOVERY_MIN_WIN_P) continue;
-      if (s150.winProbability < SMART_RECOVERY_MIN_WIN_P) continue;
-      if (Math.abs(s50.score - s150.score) > 15) continue;
-      const winP = Math.min(s50.winProbability, s150.winProbability);
-      const ev   = winP * (s50.payout - 1) - (1 - winP);
-      if (ev <= 0) continue;
-      tier1.push({
-        ...s50,
-        score: Math.round((s50.score + s150.score) / 2),
-        winProbability: winP,
-        reason: `AI recovery OVER ${b} on ${market.displayName}: ${(winP*100).toFixed(1)}% consensus (50+150t), EV${ev>=0?"+":""}${(ev*100).toFixed(1)}%`,
-      });
+    if (wantOver) {
+      for (const b of OVER_BARRIERS) {
+        const s50  = scoreMarket(market.symbol, market.displayName, "DIGITOVER", b, digits50,  []);
+        const s150 = scoreMarket(market.symbol, market.displayName, "DIGITOVER", b, digits150, []);
+        if (!s50 || !s150) continue;
+        if (s50.winProbability  < SMART_RECOVERY_MIN_WIN_P) continue;
+        if (s150.winProbability < SMART_RECOVERY_MIN_WIN_P) continue;
+        if (Math.abs(s50.score - s150.score) > 15) continue;
+        const winP = Math.min(s50.winProbability, s150.winProbability);
+        const ev   = winP * (s50.payout - 1) - (1 - winP);
+        if (ev <= 0) continue;
+        tier1.push({
+          ...s50,
+          score: Math.round((s50.score + s150.score) / 2),
+          winProbability: winP,
+          reason: `AI recovery OVER ${b} on ${market.displayName}: ${(winP*100).toFixed(1)}% consensus (50+150t), EV${ev>=0?"+":""}${(ev*100).toFixed(1)}%`,
+        });
+      }
     }
 
     // ── Tier 1: UNDER barriers (same or better payout than user's setting) ────
-    for (const b of UNDER_BARRIERS) {
-      const s50  = scoreMarket(market.symbol, market.displayName, "DIGITUNDER", b, digits50,  []);
-      const s150 = scoreMarket(market.symbol, market.displayName, "DIGITUNDER", b, digits150, []);
-      if (!s50 || !s150) continue;
-      if (s50.winProbability  < SMART_RECOVERY_MIN_WIN_P) continue;
-      if (s150.winProbability < SMART_RECOVERY_MIN_WIN_P) continue;
-      if (Math.abs(s50.score - s150.score) > 15) continue;
-      const winP = Math.min(s50.winProbability, s150.winProbability);
-      const ev   = winP * (s50.payout - 1) - (1 - winP);
-      if (ev <= 0) continue;
-      tier1.push({
-        ...s50,
-        score: Math.round((s50.score + s150.score) / 2),
-        winProbability: winP,
-        reason: `AI recovery UNDER ${b} on ${market.displayName}: ${(winP*100).toFixed(1)}% consensus (50+150t), EV${ev>=0?"+":""}${(ev*100).toFixed(1)}%`,
-      });
+    if (wantUnder) {
+      for (const b of UNDER_BARRIERS) {
+        const s50  = scoreMarket(market.symbol, market.displayName, "DIGITUNDER", b, digits50,  []);
+        const s150 = scoreMarket(market.symbol, market.displayName, "DIGITUNDER", b, digits150, []);
+        if (!s50 || !s150) continue;
+        if (s50.winProbability  < SMART_RECOVERY_MIN_WIN_P) continue;
+        if (s150.winProbability < SMART_RECOVERY_MIN_WIN_P) continue;
+        if (Math.abs(s50.score - s150.score) > 15) continue;
+        const winP = Math.min(s50.winProbability, s150.winProbability);
+        const ev   = winP * (s50.payout - 1) - (1 - winP);
+        if (ev <= 0) continue;
+        tier1.push({
+          ...s50,
+          score: Math.round((s50.score + s150.score) / 2),
+          winProbability: winP,
+          reason: `AI recovery UNDER ${b} on ${market.displayName}: ${(winP*100).toFixed(1)}% consensus (50+150t), EV${ev>=0?"+":""}${(ev*100).toFixed(1)}%`,
+        });
+      }
     }
 
     // ── Tier 2: EVEN / ODD ────────────────────────────────────────────────────
-    for (const ct of ["DIGITEVEN", "DIGITODD"] as const) {
-      const e50  = scoreMarket(market.symbol, market.displayName, ct, undefined, digits50,  []);
-      const e150 = scoreMarket(market.symbol, market.displayName, ct, undefined, digits150, []);
-      if (!e50 || !e150) continue;
-      if (e50.winProbability  < SMART_RECOVERY_MIN_WIN_P) continue;
-      if (e150.winProbability < SMART_RECOVERY_MIN_WIN_P) continue;
-      if (Math.abs(e50.score - e150.score) > 15) continue;
-      const winP = Math.min(e50.winProbability, e150.winProbability);
-      const ev   = winP * (e50.payout - 1) - (1 - winP);
-      if (ev <= 0) continue;
-      tier2.push({
-        ...e50,
-        score: Math.round((e50.score + e150.score) / 2),
-        winProbability: winP,
-        reason: `AI recovery ${ct} on ${market.displayName}: ${(winP*100).toFixed(1)}% consensus (50+150t), EV${ev>=0?"+":""}${(ev*100).toFixed(1)}%`,
-      });
+    if (wantEven || wantOdd) {
+      for (const ct of ["DIGITEVEN", "DIGITODD"] as const) {
+        if (ct === "DIGITEVEN" && !wantEven) continue;
+        if (ct === "DIGITODD"  && !wantOdd)  continue;
+        const e50  = scoreMarket(market.symbol, market.displayName, ct, undefined, digits50,  []);
+        const e150 = scoreMarket(market.symbol, market.displayName, ct, undefined, digits150, []);
+        if (!e50 || !e150) continue;
+        if (e50.winProbability  < SMART_RECOVERY_MIN_WIN_P) continue;
+        if (e150.winProbability < SMART_RECOVERY_MIN_WIN_P) continue;
+        if (Math.abs(e50.score - e150.score) > 15) continue;
+        const winP = Math.min(e50.winProbability, e150.winProbability);
+        const ev   = winP * (e50.payout - 1) - (1 - winP);
+        if (ev <= 0) continue;
+        tier2.push({
+          ...e50,
+          score: Math.round((e50.score + e150.score) / 2),
+          winProbability: winP,
+          reason: `AI recovery ${ct} on ${market.displayName}: ${(winP*100).toFixed(1)}% consensus (50+150t), EV${ev>=0?"+":""}${(ev*100).toFixed(1)}%`,
+        });
+      }
     }
 
     // ── Tier 3: DIGITMATCH with AI-chosen hottest digit ───────────────────────
-    const freq150 = digitFrequency(digits150);
-    const hotDigit = pickMatchDiffBarrier(freq150, "DIGITMATCH");
-    const m50  = scoreMarket(market.symbol, market.displayName, "DIGITMATCH", hotDigit, digits50,  []);
-    const m150 = scoreMarket(market.symbol, market.displayName, "DIGITMATCH", hotDigit, digits150, []);
-    if (m50 && m150 &&
-        m50.winProbability  >= SMART_RECOVERY_MIN_WIN_P &&
-        m150.winProbability >= SMART_RECOVERY_MIN_WIN_P &&
-        Math.abs(m50.score - m150.score) <= 15) {
-      const winP = Math.min(m50.winProbability, m150.winProbability);
-      const ev   = winP * (m50.payout - 1) - (1 - winP);
-      if (ev > 0) {
-        tier3.push({
-          ...m50,
-          score: Math.round((m50.score + m150.score) / 2),
-          winProbability: winP,
-          reason: `AI recovery MATCH digit ${hotDigit} on ${market.displayName}: ${(winP*100).toFixed(1)}% consensus (50+150t), EV${ev>=0?"+":""}${(ev*100).toFixed(1)}%`,
-        });
+    if (wantMatch) {
+      const freq150 = digitFrequency(digits150);
+      const hotDigit = pickMatchDiffBarrier(freq150, "DIGITMATCH");
+      const m50  = scoreMarket(market.symbol, market.displayName, "DIGITMATCH", hotDigit, digits50,  []);
+      const m150 = scoreMarket(market.symbol, market.displayName, "DIGITMATCH", hotDigit, digits150, []);
+      if (m50 && m150 &&
+          m50.winProbability  >= SMART_RECOVERY_MIN_WIN_P &&
+          m150.winProbability >= SMART_RECOVERY_MIN_WIN_P &&
+          Math.abs(m50.score - m150.score) <= 15) {
+        const winP = Math.min(m50.winProbability, m150.winProbability);
+        const ev   = winP * (m50.payout - 1) - (1 - winP);
+        if (ev > 0) {
+          tier3.push({
+            ...m50,
+            score: Math.round((m50.score + m150.score) / 2),
+            winProbability: winP,
+            reason: `AI recovery MATCH digit ${hotDigit} on ${market.displayName}: ${(winP*100).toFixed(1)}% consensus (50+150t), EV${ev>=0?"+":""}${(ev*100).toFixed(1)}%`,
+          });
+        }
       }
     }
   }
@@ -857,13 +882,12 @@ async function runLoop(config: SpeedAIConfig) {
     // After 2 consecutive losses while in recovery the AI takes full control:
     // it runs findSafestRecoverySetup(), which scans EVERY contract type ×
     // barrier × market with dual-window (50t + 150t) consensus validation.
-    // The setup it selects may differ completely from the user-configured
-    // recovery contract types — that is intentional. If the configured setup
-    // keeps losing, the AI finds whatever is actually working right now.
+    // The AI scans ONLY within the user's chosen recovery contract families —
+    // the user is always in control of which contract types are used.
     let intelligentRecoveryOverride = false;
 
     if (inRecovery && session.recovery.consecutiveRecoveryLosses >= 2) {
-      session.message = `⚡ ${session.recovery.consecutiveRecoveryLosses} recovery losses — AI scanning all markets for better ${barriers.length > 0 ? `OVER/UNDER opportunity` : `setup`}…`;
+      session.message = `⚡ ${session.recovery.consecutiveRecoveryLosses} recovery losses — AI scanning all markets within your selected recovery types…`;
       broadcast();
       logger.warn(
         { consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses, symbol: best.symbol },
@@ -874,8 +898,8 @@ async function runLoop(config: SpeedAIConfig) {
       await sleep(3000);
       if (!session.running || session.stopRequested) break;
 
-      // Run the full-universe intelligent scanner with user's recovery barriers
-      const smartSetup = await findSafestRecoverySetup(barriers);
+      // Run the intelligent scanner — restricted to user's chosen recovery contract types
+      const smartSetup = await findSafestRecoverySetup(barriers, config.recoveryContractTypes);
 
       if (smartSetup) {
         best = smartSetup;

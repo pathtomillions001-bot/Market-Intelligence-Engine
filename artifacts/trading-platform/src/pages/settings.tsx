@@ -395,7 +395,7 @@ export default function Settings() {
               {/* Recovery Method — available in both modes */}
               <SettingRow
                 label="Recovery Method"
-                description="Split: stake is capped at Multiplier × base stake per trade — recovery spreads across multiple wins. Instant: uses the minimum stake needed to recover the full accumulated loss in the next single winning trade."
+                description={`Split: stake cap grows by 1× each step (Step 1 = ${form.recoveryMultiplier.toFixed(2)}×, Step 2 = ${(form.recoveryMultiplier+1).toFixed(2)}×…) — recovery spreads across multiple wins at a controlled, escalating rate. Instant: first tries Multiplier× base stake; if that covers the accumulated debt it uses it — otherwise it stakes the exact minimum to clear all debt in a single winning trade.`}
               >
                 <Select value={form.recoveryMethod} onValueChange={(v) => set("recoveryMethod", v)}>
                   <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
@@ -462,17 +462,25 @@ export default function Settings() {
                       })()}
                     </div>
                   </>
-                ) : (
+                ) : form.recoveryMethod === "split" ? (
                   <>
-                    <div className="text-xs font-medium text-amber-400 mb-1">Manual mode escalation (×base stake per step)</div>
-                    <div className="text-[10px] text-muted-foreground mb-2">Each step covers the previous step's stake. Win at any step = full coverage.</div>
+                    <div className="text-xs font-medium text-amber-400 mb-1">Manual · Split — stake cap per step (×base stake)</div>
+                    <div className="text-[10px] text-muted-foreground mb-2">Cap grows by 1× each step; actual stake is the minimum of this cap and the exact debt-recovery amount.</div>
                     <div className="flex gap-2 flex-wrap">
                       {Array.from({ length: form.maxRecoverySteps }, (_, i) => i).map((i) => (
                         <div key={i} className="text-center">
                           <div className="text-[10px] text-muted-foreground">Step {i + 1}</div>
-                          <div className="text-xs font-mono font-bold text-amber-400">×{(form.recoveryMultiplier + i).toFixed(2)}</div>
+                          <div className="text-xs font-mono font-bold text-amber-400">≤×{(form.recoveryMultiplier + i).toFixed(2)}</div>
                         </div>
                       ))}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-xs font-medium text-amber-400 mb-1">Manual · Instant — single-win targeting</div>
+                    <div className="text-[10px] text-muted-foreground mb-2 space-y-1">
+                      <p>Each trade first tries <span className="font-mono text-amber-300">×{form.recoveryMultiplier.toFixed(2)} base stake</span>. If that covers the full accumulated debt at the recovery barrier payout → uses it. If not → jumps to the exact minimum stake to clear all debt in one win.</p>
+                      <p className="text-muted-foreground/60">No step escalation — every trade is an attempt to close all debt immediately.</p>
                     </div>
                   </>
                 )}

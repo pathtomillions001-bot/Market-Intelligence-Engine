@@ -20,7 +20,8 @@ interface SpeedConfig {
   normalFamily: ContractFamily;
   normalOverBarrier: number;
   normalUnderBarrier: number;
-  recoveryFamily: ContractFamily;
+  recoveryFamilies: ContractFamily[];   // multi-select: one or more recovery families
+  recoveryAutoMode: boolean;            // true = AI computes exact stake; false = manual multiplier
   recoveryOverBarrier: number;
   recoveryUnderBarrier: number;
   stake: number;
@@ -213,6 +214,49 @@ function FamilySelector({ label, value, onChange, families }: {
   );
 }
 
+// Multi-select variant: allows toggling multiple recovery families on/off
+function MultiFamilySelector({ label, value, onChange, families }: {
+  label: string;
+  value: ContractFamily[];
+  onChange: (v: ContractFamily[]) => void;
+  families: { id: ContractFamily; label: string; icon: React.ReactNode; desc: string }[];
+}) {
+  const toggle = (id: ContractFamily) => {
+    if (value.includes(id)) {
+      // Don't allow deselecting the last one
+      if (value.length === 1) return;
+      onChange(value.filter(f => f !== id));
+    } else {
+      onChange([...value, id]);
+    }
+  };
+  return (
+    <div className="space-y-2">
+      <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">{label}</p>
+      <div className="grid grid-cols-2 gap-1.5">
+        {families.map(f => {
+          const active = value.includes(f.id);
+          return (
+            <button
+              key={f.id}
+              onClick={() => toggle(f.id)}
+              className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-left text-xs border transition-all ${
+                active
+                  ? "bg-cyan-500/15 border-cyan-500/50 text-cyan-300"
+                  : "bg-white/5 border-white/10 text-muted-foreground hover:border-white/20"
+              }`}
+            >
+              <span className={active ? "text-cyan-400" : "text-muted-foreground"}>{f.icon}</span>
+              <span className="font-medium truncate">{f.label}</span>
+            </button>
+          );
+        })}
+      </div>
+      <p className="text-[9px] text-muted-foreground/50">Select one or more. AI scans only within your chosen types.</p>
+    </div>
+  );
+}
+
 function BarrierRow({ label, overBarrier, underBarrier, onOverBarrier, onUnderBarrier }: {
   label: string; overBarrier: number; underBarrier: number;
   onOverBarrier: (v: number) => void; onUnderBarrier: (v: number) => void;
@@ -269,7 +313,8 @@ export function SpeedAIFab() {
     normalFamily: "overUnder",
     normalOverBarrier: 1,
     normalUnderBarrier: 8,
-    recoveryFamily: "overUnder",
+    recoveryFamilies: ["overUnder"],
+    recoveryAutoMode: true,
     recoveryOverBarrier: 4,
     recoveryUnderBarrier: 5,
     stake: 1,
@@ -298,6 +343,7 @@ export function SpeedAIFab() {
       normalUnderBarrier:   s.normalUnderDigit   ?? prev.normalUnderBarrier,
       recoveryOverBarrier:  s.recoveryOverDigit  ?? prev.recoveryOverBarrier,
       recoveryUnderBarrier: s.recoveryUnderDigit ?? prev.recoveryUnderBarrier,
+      recoveryAutoMode:     s.recoveryAutoMode   ?? prev.recoveryAutoMode,
       recoveryMultiplier:   s.recoveryMultiplier ?? prev.recoveryMultiplier,
       recoveryMethod:       (s.recoveryMethod    ?? prev.recoveryMethod) as RecoveryMethod,
       maxRecoverySteps:     s.maxRecoverySteps   ?? prev.maxRecoverySteps,
@@ -406,17 +452,34 @@ export function SpeedAIFab() {
 
   // ── Build request body from current config ──────────────────────────────
   function buildBody(lockedSymbol?: string) {
-    const normalContracts  = familyToContracts(config.normalFamily,   config.normalOverBarrier,   config.normalUnderBarrier);
-    const recoveryContracts = familyToContracts(config.recoveryFamily, config.recoveryOverBarrier, config.recoveryUnderBarrier);
+    const normalContracts = familyToContracts(config.normalFamily, config.normalOverBarrier, config.normalUnderBarrier);
+
+    // Merge all selected recovery families into unified type + barrier arrays
+    const recoveryTypes: string[] = [];
+    const recoveryBarrierSet: number[] = [];
+    for (const family of config.recoveryFamilies) {
+      const c = familyToContracts(family, config.recoveryOverBarrier, config.recoveryUnderBarrier);
+      for (const t of c.types)    if (!recoveryTypes.includes(t))       recoveryTypes.push(t);
+      for (const b of c.barriers) if (!recoveryBarrierSet.includes(b)) recoveryBarrierSet.push(b);
+    }
+    // Ensure at least overUnder if somehow empty
+    if (recoveryTypes.length === 0) {
+      recoveryTypes.push("DIGITOVER", "DIGITUNDER");
+      recoveryBarrierSet.push(config.recoveryOverBarrier, config.recoveryUnderBarrier);
+    }
+
+    // In auto mode, pin the multiplier to the payout-calibrated suggestion
+    const effectiveMultiplier = config.recoveryAutoMode ? suggestedMult : config.recoveryMultiplier;
+
     return {
       normalContractTypes:   normalContracts.types,
       normalBarriers:        normalContracts.barriers,
-      recoveryContractTypes: recoveryContracts.types,
-      recoveryBarriers:      recoveryContracts.barriers,
+      recoveryContractTypes: recoveryTypes,
+      recoveryBarriers:      recoveryBarrierSet,
       stake:                 config.stake,
       stopLoss:              config.stopLoss,
       takeProfit:            config.takeProfit,
-      recoveryMultiplier:    config.recoveryMultiplier,
+      recoveryMultiplier:    effectiveMultiplier,
       recoveryMethod:        config.recoveryMethod,
       maxRecoverySteps:      config.maxRecoverySteps,
       ...(lockedSymbol ? { lockedSymbol } : {}),
@@ -497,9 +560,11 @@ export function SpeedAIFab() {
   const winRate = status && status.tradeCount > 0
     ? Math.round((status.winCount / status.tradeCount) * 100) : 0;
 
-  const suggestedMult = config.normalFamily === "overUnder"
+  // Calibrate suggested multiplier to the recovery Over barrier payout.
+  // Only meaningful when overUnder is among the selected recovery families.
+  const suggestedMult = config.recoveryFamilies.includes("overUnder")
     ? autoMultiplier(config.recoveryOverBarrier, "over")
-    : config.recoveryMultiplier;
+    : 2.0;
 
   return (
     <>
@@ -547,10 +612,10 @@ export function SpeedAIFab() {
                     families={NORMAL_FAMILIES}
                   />
 
-                  <FamilySelector
-                    label="Recovery trade type"
-                    value={config.recoveryFamily}
-                    onChange={v => set("recoveryFamily", v)}
+                  <MultiFamilySelector
+                    label="Recovery trade types"
+                    value={config.recoveryFamilies}
+                    onChange={v => set("recoveryFamilies", v)}
                     families={RECOVERY_FAMILIES}
                   />
 
@@ -587,9 +652,43 @@ export function SpeedAIFab() {
                   {/* Recovery settings */}
                   <div className="space-y-2">
                     <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Recovery Settings</p>
-                    <div className="space-y-2 bg-white/3 rounded-xl p-3 border border-white/5">
+                    <div className="space-y-3 bg-white/3 rounded-xl p-3 border border-white/5">
+
+                      {/* Auto / Manual toggle */}
+                      <div className="flex rounded-lg overflow-hidden border border-white/10 w-full">
+                        <button
+                          onClick={() => set("recoveryAutoMode", true)}
+                          className={`flex-1 flex flex-col items-center gap-0.5 px-2 py-2 text-xs font-medium transition-colors ${config.recoveryAutoMode ? "bg-cyan-500/20 text-cyan-300 border-r border-cyan-500/30" : "bg-white/5 text-muted-foreground hover:text-white border-r border-white/10"}`}
+                        >
+                          <span className="font-semibold text-[10px]">Auto</span>
+                          <span className={`text-[8px] leading-tight ${config.recoveryAutoMode ? "text-cyan-400/70" : "text-muted-foreground/60"}`}>AI computes exact stake</span>
+                        </button>
+                        <button
+                          onClick={() => set("recoveryAutoMode", false)}
+                          className={`flex-1 flex flex-col items-center gap-0.5 px-2 py-2 text-xs font-medium transition-colors ${!config.recoveryAutoMode ? "bg-cyan-500/20 text-cyan-300" : "bg-white/5 text-muted-foreground hover:text-white"}`}
+                        >
+                          <span className="font-semibold text-[10px]">Manual</span>
+                          <span className={`text-[8px] leading-tight ${!config.recoveryAutoMode ? "text-cyan-400/70" : "text-muted-foreground/60"}`}>Set your multiplier</span>
+                        </button>
+                      </div>
+
+                      {/* Auto mode info */}
+                      {config.recoveryAutoMode && (
+                        <div className="text-[9px] text-muted-foreground/70 px-0.5">
+                          AI stakes the exact minimum to cover accumulated debt in one win. Multiplier auto-set to <span className="text-cyan-400 font-mono">{suggestedMult}×</span> (calibrated to OVER {config.recoveryOverBarrier} payout).
+                        </div>
+                      )}
+
+                      {/* Method */}
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-xs text-muted-foreground flex-1">Method</span>
+                        <div className="flex-1">
+                          <span className="text-xs text-muted-foreground">Method</span>
+                          {config.recoveryMethod === "split" ? (
+                            <p className="text-[8px] text-muted-foreground/50 mt-0.5">Cap grows by 1× each step — spreads recovery across wins</p>
+                          ) : (
+                            <p className="text-[8px] text-muted-foreground/50 mt-0.5">Tries multiplier stake; escalates to full debt clearance if needed</p>
+                          )}
+                        </div>
                         <Select value={config.recoveryMethod} onValueChange={v => set("recoveryMethod", v as RecoveryMethod)}>
                           <SelectTrigger className="h-7 w-24 text-xs bg-black/30 border-white/10">
                             <SelectValue />
@@ -600,26 +699,30 @@ export function SpeedAIFab() {
                           </SelectContent>
                         </Select>
                       </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs text-muted-foreground flex-1">Multiplier</span>
-                        <div className="flex items-center gap-1">
-                          <Input
-                            type="number" value={config.recoveryMultiplier} min={1.01} max={20} step={0.01}
-                            onChange={e => set("recoveryMultiplier", Number(e.target.value))}
-                            disabled={config.recoveryMethod === "instant"}
-                            className="w-20 h-7 text-right font-mono text-xs bg-black/30 border-white/10"
-                          />
-                          <span className="text-[10px] text-muted-foreground">×</span>
-                          {config.recoveryMethod === "split" && Math.abs(suggestedMult - config.recoveryMultiplier) > 0.01 && (
-                            <button
-                              onClick={() => set("recoveryMultiplier", suggestedMult)}
-                              className="text-[9px] px-1.5 py-1 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/20 whitespace-nowrap font-medium"
-                            >
-                              Auto {suggestedMult}×
-                            </button>
-                          )}
+
+                      {/* Multiplier — manual mode only */}
+                      {!config.recoveryAutoMode && (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs text-muted-foreground flex-1">Multiplier</span>
+                          <div className="flex items-center gap-1">
+                            <Input
+                              type="number" value={config.recoveryMultiplier} min={1.01} max={20} step={0.01}
+                              onChange={e => set("recoveryMultiplier", Number(e.target.value))}
+                              className="w-20 h-7 text-right font-mono text-xs bg-black/30 border-white/10"
+                            />
+                            <span className="text-[10px] text-muted-foreground">×</span>
+                            {Math.abs(suggestedMult - config.recoveryMultiplier) > 0.01 && config.recoveryFamilies.includes("overUnder") && (
+                              <button
+                                onClick={() => set("recoveryMultiplier", suggestedMult)}
+                                className="text-[9px] px-1.5 py-1 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/20 whitespace-nowrap font-medium"
+                              >
+                                Auto {suggestedMult}×
+                              </button>
+                            )}
+                          </div>
                         </div>
-                      </div>
+                      )}
+
                       <NumInput label="Max steps" value={config.maxRecoverySteps} onChange={v => set("maxRecoverySteps", v)} min={1} max={10} />
                     </div>
                   </div>
