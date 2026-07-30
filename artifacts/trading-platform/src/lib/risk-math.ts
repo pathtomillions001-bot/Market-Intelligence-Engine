@@ -1,0 +1,216 @@
+// ── Risk Calculator Math ──────────────────────────────────────────────────────
+// Pure functions — no React, no side effects.
+// Sources: digit-probability.ts (payout tables), ev-calculator.ts (EV formulas)
+
+export type ContractType =
+  | "CALL" | "PUT"
+  | "DIGITOVER" | "DIGITUNDER"
+  | "DIGITEVEN" | "DIGITODD"
+  | "DIGITMATCH" | "DIGITDIFF";
+
+// Barrier-specific payouts — from api-server/lib/agents/digit-probability.ts
+export const OVER_PAYOUTS: Record<number, number> = {
+  0: 1.04, 1: 1.08, 2: 1.19, 3: 1.37, 4: 1.63,
+  5: 1.96, 6: 2.45, 7: 3.27, 8: 4.90,
+};
+export const UNDER_PAYOUTS: Record<number, number> = {
+  9: 1.04, 8: 1.08, 7: 1.19, 6: 1.37, 5: 1.63,
+  4: 1.96, 3: 2.45, 2: 3.27, 1: 4.90,
+};
+
+export function getPayout(type: ContractType, barrier?: number): number {
+  switch (type) {
+    case "CALL": case "PUT":            return 1.91;
+    case "DIGITEVEN": case "DIGITODD":  return 1.95;
+    case "DIGITMATCH":                  return 9.00;
+    case "DIGITDIFF":                   return 1.04;
+    case "DIGITOVER":   return OVER_PAYOUTS[barrier ?? 5]  ?? 1.96;
+    case "DIGITUNDER":  return UNDER_PAYOUTS[barrier ?? 4] ?? 1.96;
+    default:                            return 1.91;
+  }
+}
+
+// Theoretical win probability assuming uniform digit distribution [0–9]
+export function getWinProb(type: ContractType, barrier?: number): number {
+  switch (type) {
+    case "CALL": case "PUT":            return 0.50;
+    case "DIGITEVEN": case "DIGITODD":  return 0.50;
+    case "DIGITMATCH":                  return 0.10;
+    case "DIGITDIFF":                   return 0.90;
+    case "DIGITOVER":  return (9 - (barrier ?? 5)) / 10;   // P(digit > barrier)
+    case "DIGITUNDER": return (barrier ?? 4) / 10;          // P(digit < barrier)
+    default:                            return 0.50;
+  }
+}
+
+// ── Instant Recovery Ladder ───────────────────────────────────────────────────
+// Each recovery stake = totalDebt / (recoveryPayout - 1)
+// so that a single win recoups all losses and earns +baseStake profit.
+export function buildInstantLadder(
+  base: number,
+  recoveryPayout: number,
+  maxLosses: number,
+): number[] {
+  const edge = recoveryPayout - 1;
+  if (edge <= 0) return Array(maxLosses).fill(base);
+  const ladder: number[] = [base];
+  for (let i = 1; i < maxLosses; i++) {
+    const debt = ladder.reduce((a, b) => a + b, 0);
+    ladder.push(Math.max(debt / edge, 0.35)); // Deriv minimum stake $0.35
+  }
+  return ladder;
+}
+
+// ── Split Recovery Ladder ─────────────────────────────────────────────────────
+// Progressive cap: step N = base × (multiplier + N - 1)
+export function buildSplitLadder(
+  base: number,
+  multiplier: number,
+  maxLosses: number,
+): number[] {
+  return Array.from({ length: maxLosses }, (_, i) =>
+    parseFloat((base * (multiplier + i)).toFixed(2)),
+  );
+}
+
+// ── Streak Probability (exact DP) ─────────────────────────────────────────────
+// P(at least one run of `streak` consecutive losses in `trades` Bernoulli trials)
+// Time: O(trades × streak) — safe for trades ≤ 200, streak ≤ 15
+export function streakProb(winP: number, streak: number, trades: number): number {
+  if (streak <= 0 || trades <= 0) return 0;
+  if (winP >= 1) return 0;
+  if (winP <= 0) return 1;
+
+  const lossP = 1 - winP;
+  // dp[k] = prob of being at k consecutive losses WITHOUT having hit `streak`
+  let dp = new Float64Array(streak);
+  dp[0] = 1; // start
+
+  for (let t = 0; t < trades; t++) {
+    const next = new Float64Array(streak);
+    for (let k = 0; k < streak; k++) {
+      if (dp[k] === 0) continue;
+      // win → reset to 0 consecutive losses
+      next[0] += dp[k] * winP;
+      // lose → increment streak counter (if still < streak)
+      if (k + 1 < streak) next[k + 1] += dp[k] * lossP;
+      // else → bad streak occurred; probability escapes the DP (not added back)
+    }
+    dp = next;
+  }
+
+  const pNoStreak = dp.reduce((a, b) => a + b, 0);
+  return Math.min(1, Math.max(0, 1 - pNoStreak));
+}
+
+// ── Main Calculation ──────────────────────────────────────────────────────────
+export interface RiskResult {
+  ladder: number[];
+  totalLadderCost: number;
+  recommendedSL: number;
+  recommendedTP: number;
+  riskScore: number;            // 0-100; higher = safer
+  riskLabel: "SAFE" | "MODERATE" | "RISKY" | "EXTREME";
+  riskColor: string;
+  streakProbSession: number;    // P(bad streak in tradesPerSession)
+  streakProb50: number;         // P(bad streak in 50 trades)
+  balanceCoverage: number;      // how many full ladders balance can fund
+  evPerTrade: number;
+  breakevenWinRate: number;
+  netAfterRecovery: number;     // P&L after one complete win-recovery cycle
+  warnings: string[];
+}
+
+export function calcRisk(p: {
+  baseStake: number;
+  balance: number;
+  primaryPayout: number;
+  primaryWinProb: number;
+  recoveryPayout: number;
+  maxLosses: number;
+  recoveryMethod: "instant" | "split";
+  recoveryMultiplier: number;
+  tradesPerSession: number;
+}): RiskResult {
+  const {
+    baseStake, balance,
+    primaryPayout, primaryWinProb,
+    recoveryPayout, maxLosses,
+    recoveryMethod, recoveryMultiplier,
+    tradesPerSession,
+  } = p;
+
+  const ladder =
+    recoveryMethod === "instant"
+      ? buildInstantLadder(baseStake, recoveryPayout, maxLosses)
+      : buildSplitLadder(baseStake, recoveryMultiplier, maxLosses);
+
+  const totalLadderCost = ladder.reduce((a, b) => a + b, 0);
+
+  // ─ SL: cost of one full losing streak + 10 % buffer ─
+  const recommendedSL = parseFloat((totalLadderCost * 1.1).toFixed(2));
+
+  // ─ TP: enough base-stake wins to feel meaningful ─
+  // After surviving maxLosses consecutive losses (worst case), user needs
+  // maxLosses × 2 consecutive base wins to feel the day was worthwhile.
+  const profitPerBaseWin = baseStake * (primaryPayout - 1);
+  const recommendedTP = parseFloat((profitPerBaseWin * maxLosses * 2).toFixed(2));
+
+  // ─ Streak probabilities ─
+  const streakProbSession = streakProb(primaryWinProb, maxLosses, tradesPerSession);
+  const sp50             = streakProb(primaryWinProb, maxLosses, 50);
+
+  // ─ Balance coverage ─
+  const balanceCoverage = totalLadderCost > 0 ? balance / totalLadderCost : Infinity;
+
+  // ─ EV & breakeven ─
+  const evPerTrade     = primaryWinProb * (primaryPayout - 1) - (1 - primaryWinProb);
+  const breakevenWinRate = 1 / primaryPayout;
+
+  // ─ Net profit after one complete recovery cycle ─
+  // Instant: by design, winning the Nth+1 trade covers all losses → net = +baseStake
+  // Split: each recovery trade targets base × multiplier profit after covering loss
+  const netAfterRecovery =
+    recoveryMethod === "instant"
+      ? baseStake
+      : baseStake * (recoveryMultiplier - 1);
+
+  // ─ Risk Score (0–100) ─
+  // Three weighted components:
+  // 1. Balance coverage   (0–40 pts): 5+ ladders = full marks, <1 = 0
+  // 2. Streak avoidance   (0–40 pts): 0% probability = full marks
+  // 3. Ladder/balance     (0–20 pts): ladder < 10% of balance = full marks
+  const coverageScore = Math.min(40, (Math.min(balanceCoverage, 5) / 5) * 40);
+  const streakScore   = Math.max(0, (1 - streakProbSession) * 40);
+  const ratioScore    = Math.max(0, 20 - (totalLadderCost / balance) * 40);
+  const riskScore     = Math.round(Math.min(100, coverageScore + streakScore + ratioScore));
+
+  let riskLabel: RiskResult["riskLabel"];
+  let riskColor: string;
+  if (riskScore >= 70)      { riskLabel = "SAFE";     riskColor = "#10b981"; }
+  else if (riskScore >= 45) { riskLabel = "MODERATE"; riskColor = "#f59e0b"; }
+  else if (riskScore >= 25) { riskLabel = "RISKY";    riskColor = "#f97316"; }
+  else                      { riskLabel = "EXTREME";  riskColor = "#ef4444"; }
+
+  // ─ Warnings ─
+  const warnings: string[] = [];
+  if (balanceCoverage < 2)
+    warnings.push("Balance covers fewer than 2 full recovery cycles — one bad run could wipe you out.");
+  if (streakProbSession > 0.5)
+    warnings.push(`${(streakProbSession * 100).toFixed(0)}% chance of hitting your loss limit in a single session.`);
+  if (totalLadderCost > balance * 0.4)
+    warnings.push("One full recovery cycle would consume over 40% of your balance.");
+  if (ladder[ladder.length - 1] > baseStake * 30)
+    warnings.push("Your final recovery stake is 30× your base — consider reducing max losses.");
+  if (evPerTrade < -0.15)
+    warnings.push("High house edge on this contract — long-term profitability requires strict discipline.");
+
+  return {
+    ladder, totalLadderCost,
+    recommendedSL, recommendedTP,
+    riskScore, riskLabel, riskColor,
+    streakProbSession, streakProb50: sp50,
+    balanceCoverage, evPerTrade, breakevenWinRate, netAfterRecovery,
+    warnings,
+  };
+}
