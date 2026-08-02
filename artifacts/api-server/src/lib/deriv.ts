@@ -1119,13 +1119,17 @@ class DerivJournalManager extends EventEmitter {
   private lastPongMs = Date.now();
   /** Accumulates transactions across paginated fetches */
   private fetchAccumulator: any[] = [];
-  /** Debounce timer for transaction-triggered refreshes */
+  /** Debounce timer for full background refreshes */
   private txDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Rate-limit guard: timestamp of last profit_table message sent */
+  /** Rate-limit guard: timestamp of last FULL profit_table chain sent */
   private lastRefreshSentMs = 0;
-  /** Minimum ms between profit_table requests to avoid Deriv rate limits */
+  /** Rate-limit guard: timestamp of last QUICK (limit:10) profit_table sent */
+  private lastQuickRefreshSentMs = 0;
+  /** Minimum ms between full profit_table pagination chains */
   private static readonly MIN_REFRESH_INTERVAL_MS = 10_000;
-  /** True while a paginated profit_table fetch is in progress — blocks new chains */
+  /** Minimum ms between quick (limit:10) profit_table requests — 3 s for near-live updates */
+  private static readonly MIN_QUICK_REFRESH_MS = 3_000;
+  /** True while a paginated profit_table fetch is in progress — blocks new full chains */
   private isFetchingPages = false;
 
   setCredentials(bearerToken: string, accountId: string) {
@@ -1161,6 +1165,31 @@ class DerivJournalManager extends EventEmitter {
 
   isCacheFresh(maxAgeMs = 120_000): boolean {
     return this.lastFetchMs > 0 && (Date.now() - this.lastFetchMs) < maxAgeMs;
+  }
+
+  /**
+   * Quick refresh: fetches only the last 10 trades and MERGES them into the
+   * existing cache. Used after real-time transaction `sell` events so the
+   * journal reflects the settled contract within ~1-2 seconds, without
+   * waiting for a full paginated profit_table chain.
+   *
+   * Rate-limited to once every 3 s to avoid Deriv per-account limits.
+   * Does NOT block or interact with the full pagination lock.
+   */
+  forceQuickRefresh() {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    const now = Date.now();
+    if (now - this.lastQuickRefreshSentMs < DerivJournalManager.MIN_QUICK_REFRESH_MS) {
+      logger.debug({ msSinceLast: now - this.lastQuickRefreshSentMs }, "JournalManager: quickRefresh skipped (rate-limit)");
+      return;
+    }
+    this.lastQuickRefreshSentMs = now;
+    // passthrough echoed back in the response so we can distinguish quick vs full
+    this.ws.send(JSON.stringify({
+      profit_table: 1, description: 1, sort: "DESC", limit: 10,
+      passthrough: { quick: true },
+    }));
+    logger.debug("JournalManager: quick refresh sent (limit 10)");
   }
 
   forceRefresh() {
@@ -1199,13 +1228,13 @@ class DerivJournalManager extends EventEmitter {
     this.refreshTimer = setInterval(() => { this.forceRefresh(); }, 30_000);
   }
 
-  /** Debounced refresh triggered by real-time transaction events (≤300ms latency) */
+  /** Debounced FULL refresh — runs after quick refresh to ensure complete accuracy */
   private scheduleTransactionRefresh() {
     if (this.txDebounceTimer) { clearTimeout(this.txDebounceTimer); }
     this.txDebounceTimer = setTimeout(() => {
       this.txDebounceTimer = null;
       this.forceRefresh();
-    }, 300);
+    }, 5_000); // 5 s after the quick refresh — gives Deriv time to fully settle
   }
 
   private async connect() {
@@ -1254,7 +1283,30 @@ class DerivJournalManager extends EventEmitter {
       try {
         const msg = JSON.parse(data.toString());
         if (msg.msg_type === "profit_table" && msg.profit_table) {
+          const isQuick: boolean = msg.passthrough?.quick === true;
           const batch: any[] = msg.profit_table.transactions ?? [];
+
+          if (isQuick) {
+            // Quick refresh response (limit: 10) — MERGE into existing cache so the
+            // journal shows the settled trade within ~1-2 s without replacing the
+            // full history (which would require a complete re-pagination).
+            if (batch.length > 0) {
+              const batchIds = new Set(batch.map((t: any) => t.transaction_id));
+              // Keep all cached trades that are not in the quick batch (avoid duplicates),
+              // then prepend the fresh batch at the front (most recent first).
+              const merged = [
+                ...batch,
+                ...this.cachedTransactions.filter((t: any) => !batchIds.has(t.transaction_id)),
+              ];
+              this.cachedTransactions = merged;
+              this.lastFetchMs = Date.now();
+              logger.info({ newInBatch: batch.length, total: merged.length }, "JournalManager: quick refresh merged — live trades updated");
+              this.emit("refreshed", this.cachedTransactions);
+            }
+            return; // Do not run pagination logic for quick refreshes
+          }
+
+          // Full paginated refresh
           this.fetchAccumulator.push(...batch);
 
           if (batch.length >= JOURNAL_FETCH_LIMIT) {
@@ -1279,15 +1331,18 @@ class DerivJournalManager extends EventEmitter {
             this.fetchAccumulator = [];
             this.isFetchingPages = false;
             this.lastFetchMs = Date.now();
-            logger.info({ count: this.cachedTransactions.length }, "JournalManager: profit table refreshed");
+            logger.info({ count: this.cachedTransactions.length }, "JournalManager: full profit table refreshed");
             this.emit("refreshed", this.cachedTransactions);
           }
         }
-        // Real-time transaction events — trigger immediate profit_table refresh on sell (contract settled)
+        // Real-time transaction events — immediate quick refresh on sell (contract settled)
         if (msg.msg_type === "transaction" && msg.transaction) {
           const actionType: string = msg.transaction.action ?? msg.transaction.action_type ?? "";
           if (actionType === "sell") {
-            logger.info({ action: actionType, id: msg.transaction.contract_id }, "JournalManager: transaction event — scheduling refresh");
+            logger.info({ action: actionType, id: msg.transaction.contract_id }, "JournalManager: sell event — quick refresh + scheduled full refresh");
+            // 1. Immediate quick fetch (limit: 10) for near-live update within ~1-2 s
+            this.forceQuickRefresh();
+            // 2. Full refresh scheduled at 5 s to ensure complete accuracy
             this.scheduleTransactionRefresh();
           }
         }

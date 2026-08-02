@@ -3,6 +3,8 @@ import { db } from "@workspace/db";
 import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@workspace/db";
 import { sql, desc, eq } from "drizzle-orm";
 import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, journalManager } from "../lib/deriv";
+import { runRecoveryConsensus, getBestConsensus } from "../lib/agents/recovery-consensus";
+import { DIGIT_PAYOUTS } from "../lib/agents/digit-probability";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
@@ -179,6 +181,20 @@ let scheduledFamilyHint: string | null = null;
 const recentTradesBySymbol = new Map<string, Date[]>();
 const MAX_TRADES_SAME_SYMBOL = 2;
 const SAME_SYMBOL_COOLDOWN_MS = 8 * 60 * 1000; // 8 minutes
+
+// Stale open-trade threshold — shared between normal path and recovery fast path
+const STALE_OPEN_MS = 2 * 60 * 1000; // 2 minutes
+
+// ── Recovery payout lookup ─────────────────────────────────────────────────────
+function getRecoveryPayout(contractType: string, barrier: number | null): number {
+  if (contractType === "DIGITOVER" || contractType === "DIGITUNDER") {
+    return (DIGIT_PAYOUTS[contractType] as Record<number, number>)?.[barrier ?? 5] ?? 1.96;
+  }
+  if (contractType === "DIGITMATCH") return 9.0;
+  if (contractType === "DIGITDIFF")  return 1.04;
+  // DIGITEVEN, DIGITODD, CALL, PUT — standard ~1.95×
+  return 1.95;
+}
 
 // ── Last completed trade timestamp ───────────────────────────────────────────
 // Prevents the engine from immediately firing a second scan while a trade is
@@ -546,6 +562,288 @@ async function runAutonomousLoop() {
       return true;
     });
 
+    // ── Contract family type definitions (hoisted so recovery fast path can use them) ──
+    const dirTypes = preferredContractTypes.filter(t => ["CALL", "PUT"].includes(t));
+    const ouTypes  = preferredContractTypes.filter(t => ["DIGITOVER", "DIGITUNDER"].includes(t));
+    const eoTypes  = preferredContractTypes.filter(t => ["DIGITEVEN", "DIGITODD"].includes(t));
+    const mdTypes  = preferredContractTypes.filter(t => ["DIGITMATCH", "DIGITDIFF"].includes(t));
+
+    // ── Recovery Fast Path ────────────────────────────────────────────────────────────
+    // When in recovery mode, skip the full 8-agent tournament entirely. Instead, run a
+    // fast 3-window consensus check (50 / 100 / 150 ticks) on ALL eligible markets in
+    // parallel. Execute the recovery trade the instant ALL THREE windows agree — this
+    // eliminates the 30+ min delays caused by quality floors, regime gates, and multi-
+    // family tournament scoring in the normal path.
+    //
+    // Contract types: only the user's enabled recovery types (no switching).
+    // Markets: the same contractCompatibleMarkets as the normal path (no switching).
+    // Barriers: user's recoveryOverDigit / recoveryUnderDigit (no overrides).
+    if (recoveryEngine.isInRecovery()) {
+      // ── Open-trade guard ──────────────────────────────────────────────────────────
+      const recovOpenTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
+      if (recovOpenTrades.length > 0) {
+        const nowMs = Date.now();
+        const stale = recovOpenTrades.filter(t => nowMs - new Date(t.createdAt).getTime() > STALE_OPEN_MS);
+        if (stale.length > 0) {
+          await Promise.all(stale.map(t =>
+            db.update(tradesTable).set({
+              status: "error", profit: "0", payout: "0", closedAt: new Date(),
+              agentReasoning: `${t.agentReasoning ?? ""} [AUTO-RECOVERED: stale open trade]`,
+            }).where(eq(tradesTable.id, t.id)).catch(() => {}),
+          ));
+        }
+        const fresh = recovOpenTrades.filter(t => nowMs - new Date(t.createdAt).getTime() <= STALE_OPEN_MS);
+        if (fresh.length > 0) { scheduleNext(false); return; }
+      }
+
+      // ── Journal-settle delay ──────────────────────────────────────────────────────
+      if (lastTradeCompletedAt && (Date.now() - lastTradeCompletedAt.getTime()) < 12_000) {
+        scheduleNext(false, 3000);
+        return;
+      }
+
+      // ── Per-symbol cooldown check on all markets ──────────────────────────────────
+      // (cooledDownSymbols already populated above from recentTradesBySymbol)
+
+      // ── Build recovery contract type list ─────────────────────────────────────────
+      // MATCH/DIFF strategy: DIGITMATCH in early recovery (high payout recovers debt fast),
+      // DIGITDIFF after 3 consecutive MATCH losses (near-certain partial recovery).
+      const consecutiveMatchLosses = recoveryEngine.getState().consecutiveMatchLosses;
+      const recoveryTypes: string[] = [...ouTypes, ...eoTypes, ...dirTypes];
+      if (mdTypes.length > 0) {
+        if (mdTypes.includes("DIGITMATCH") && consecutiveMatchLosses < 3) {
+          recoveryTypes.push("DIGITMATCH");
+        } else if (mdTypes.includes("DIGITDIFF")) {
+          recoveryTypes.push("DIGITDIFF");
+        } else {
+          recoveryTypes.push(...mdTypes);
+        }
+      }
+
+      if (recoveryTypes.length === 0) {
+        logger.warn("Recovery: no recovery contract types configured — falling back to normal scan");
+        // Fall through to normal tournament
+      } else {
+        // ── 3-window consensus scan across all eligible markets ───────────────────
+        broadcastSSE("scan_started", { groups: ["Recovery"], ts: Date.now() });
+
+        const consensusInputs = await Promise.all(
+          contractCompatibleMarkets.map(async (m) => {
+            const marketTypes = recoveryTypes.filter(ct => !ct.startsWith("DIGIT") || m.digitEnabled);
+            if (marketTypes.length === 0) return { symbol: m.symbol, market: m, results: [] };
+            const digits = m.digitEnabled ? tickManager.getDigits(m.symbol, 150) : [];
+            const prices = tickManager.getTicks(m.symbol, 150);
+            const results = runRecoveryConsensus(
+              digits, prices, marketTypes,
+              tradingSettings.recoveryOverDigit, tradingSettings.recoveryUnderDigit,
+            );
+            return { symbol: m.symbol, market: m, results };
+          }),
+        );
+
+        const winner = getBestConsensus(consensusInputs);
+
+        if (!winner) {
+          logger.info({ marketsScanned: contractCompatibleMarkets.length, types: recoveryTypes },
+            "Recovery: 3-window consensus not yet reached — rescanning in 3s");
+          broadcastSSE("scan_complete", {
+            symbol: null, quality: 0, confidence: 0, agentScores: lastAgentScores,
+            marketsScanned: contractCompatibleMarkets.length, shouldTrade: false,
+            rejectReason: "recovery_no_consensus", sessionLossCount,
+            consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
+          });
+          scheduleNext(false, 3000);
+          return;
+        }
+
+        const { symbol: recovSymbol, market: recovMarket, result: cons } = winner;
+
+        // Per-symbol cooldown safety net (symbols already filtered in contractCompatibleMarkets,
+        // but guard against the rare mid-scan race where the cooldown was just reached)
+        const recovSymHist = recentTradesBySymbol.get(recovSymbol) ?? [];
+        if (recovSymHist.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS).length >= MAX_TRADES_SAME_SYMBOL) {
+          logger.info({ symbol: recovSymbol }, "Recovery: symbol just hit cooldown — rescanning");
+          scheduleNext(false, 500);
+          return;
+        }
+
+        const recovContractType = cons.contractType;
+        const recovBarrier      = cons.barrier;
+        const recovPayoutMult   = getRecoveryPayout(recovContractType, recovBarrier);
+        const recovWinP         = cons.avgWinProbability;
+        const recovDirection    = recovContractType === "CALL" ? "up"
+          : recovContractType === "PUT" ? "down" : "hold";
+
+        // Recovery stake — uses the engine's accumulated debt + this contract's payout
+        const riskBaseAmount = tradingSettings.riskAmountType === "percentage"
+          ? balance * tradingSettings.riskAmountValue / 100
+          : tradingSettings.riskAmountValue;
+        const recovStakeRaw = recoveryEngine.getDynamicRecoveryStake(
+          Math.max(0.35, Math.min(riskBaseAmount, tradingSettings.maxTradeStake)),
+          tradingSettings.maxTradeStake, balance, recovPayoutMult, recovWinP,
+          tradingSettings.riskProfile, tradingSettings.recoveryMultiplier,
+          tradingSettings.recoveryMethod, tradingSettings.maxRecoverySteps,
+          tradingSettings.recoveryAutoMode,
+        );
+        const recovStake = Math.max(0.35, Math.min(Math.round(recovStakeRaw * 100) / 100, tradingSettings.maxTradeStake));
+
+        const rawDur = tradingSettings.tradeDurationSec ?? 5;
+        const recovDuration = (recovContractType === "DIGITEVEN" || recovContractType === "DIGITODD")
+          ? Math.max(5, rawDur)
+          : (recovContractType === "DIGITMATCH" || recovContractType === "DIGITDIFF")
+            ? Math.max(1, Math.min(5, rawDur))
+            : rawDur;
+
+        const recovBarrierToStore = recovContractType.includes("DIGIT") ? (recovBarrier ?? null) : null;
+
+        logger.info({
+          symbol: recovSymbol, contractType: recovContractType, barrier: recovBarrier,
+          stake: recovStake, winP: (recovWinP * 100).toFixed(1) + "%",
+          payout: recovPayoutMult, reason: cons.reason,
+        }, "Recovery: 3-window consensus reached — executing recovery trade");
+
+        broadcastSSE("scan_complete", {
+          symbol: recovSymbol,
+          quality: Math.min(99, Math.round(cons.avgStrength * 200 + 60)),
+          confidence: Math.round(recovWinP * 100),
+          agentScores: lastAgentScores,
+          marketsScanned: contractCompatibleMarkets.length,
+          shouldTrade: true, rejectReason: null, sessionLossCount,
+          consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
+        });
+
+        currentMarket = recovSymbol;
+
+        // ── Execute recovery trade (paper or live) ────────────────────────────────
+        const estimatedRecovPayout = recovStake * recovPayoutMult;
+        let rWon: boolean, rProfit: number, rEntryPrice: number, rExitPrice: number, rActualPayout: number;
+
+        if (paperTradeMode || !token) {
+          rWon = Math.random() < recovWinP;
+          rProfit = rWon ? estimatedRecovPayout - recovStake : -recovStake;
+          rActualPayout = rWon ? estimatedRecovPayout : 0;
+          rEntryPrice = rExitPrice = tickManager.getLatestPrice(recovSymbol) ?? 100;
+
+          recordTradeOutcome(recovSymbol, recovContractType, recovBarrier ?? null, rWon, rProfit, recovStake);
+          recoveryEngine.recordOutcome(rWon, rProfit, recovStake, settings?.maxRecoverySteps ?? 3, recovContractType);
+          if (rWon) clearLossPattern(recovSymbol); else recordLossForPattern(recovSymbol, recovContractType, "");
+
+          await db.insert(tradesTable).values({
+            symbol: recovSymbol, displayName: recovMarket.displayName,
+            contractType: recovContractType, barrier: recovBarrierToStore,
+            stake: String(recovStake), direction: recovDirection,
+            status: rWon ? "won" : "lost",
+            payout: String(rActualPayout), profit: String(rProfit),
+            entryPrice: String(rEntryPrice), exitPrice: String(rExitPrice),
+            aiConfidence: String(Math.round(recovWinP * 100)), aiRiskScore: "65",
+            isAutonomous: true,
+            agentReasoning: `[PAPER RECOVERY] 3-window consensus: ${cons.reason}`,
+            duration: recovDuration, durationUnit: "t", closedAt: new Date(),
+          });
+        } else {
+          const [openTrade] = await db.insert(tradesTable).values({
+            symbol: recovSymbol, displayName: recovMarket.displayName,
+            contractType: recovContractType, barrier: recovBarrierToStore,
+            stake: String(recovStake), direction: recovDirection, status: "open",
+            aiConfidence: String(Math.round(recovWinP * 100)), aiRiskScore: "65",
+            isAutonomous: true,
+            agentReasoning: `[RECOVERY] 3-window consensus: ${cons.reason}`,
+            duration: recovDuration, durationUnit: "t",
+          }).returning();
+
+          broadcastSSE("trade_started", {
+            id: openTrade.id, symbol: recovSymbol, contract: recovContractType,
+            barrier: recovBarrierToStore, stake: recovStake, duration: recovDuration,
+            confidence: Math.round(recovWinP * 100),
+          });
+
+          try {
+            const liveRes = await executeLiveTrade(token, {
+              symbol: recovSymbol, contractType: recovContractType,
+              stake: Math.round(recovStake * 100) / 100,
+              duration: recovDuration, durationUnit: "t",
+              currency: account?.currency ?? "USD",
+              barrier: recovContractType.includes("DIGIT") ? recovBarrier : undefined,
+            });
+            rEntryPrice = liveRes.buyPrice;
+            const contractRes = await waitForContractResult(token, liveRes.contractId, (recovDuration + 30) * 1000);
+            rWon = contractRes.won;
+            rProfit = contractRes.profit;
+            rActualPayout = rWon ? recovStake + rProfit : 0;
+            rEntryPrice = contractRes.entrySpot || liveRes.buyPrice;
+            rExitPrice  = contractRes.exitSpot  || rEntryPrice;
+            await syncLiveBalance(token);
+          } catch (liveErr) {
+            const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
+            logger.warn({ errMsg, symbol: recovSymbol }, "Recovery live trade failed — marking as error");
+            try {
+              await db.update(tradesTable).set({
+                status: "error", profit: "0", payout: "0", closedAt: new Date(),
+                agentReasoning: `[RECOVERY] ${cons.reason} [FAILED: ${errMsg}]`,
+              }).where(eq(tradesTable.id, openTrade.id));
+            } catch { /* ignore */ }
+            broadcastSSE("trade_completed", {
+              id: openTrade.id, symbol: recovSymbol, won: false, profit: "0",
+              contract: recovContractType, error: errMsg,
+            });
+            lastTradeCompletedAt = new Date();
+            const slErr = recentTradesBySymbol.get(recovSymbol) ?? [];
+            slErr.push(new Date());
+            recentTradesBySymbol.set(recovSymbol, slErr.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS));
+            scheduleNext(true);
+            return;
+          }
+
+          recordTradeOutcome(recovSymbol, recovContractType, recovBarrier ?? null, rWon, rProfit, recovStake);
+          recoveryEngine.recordOutcome(rWon, rProfit, recovStake, settings?.maxRecoverySteps ?? 3, recovContractType);
+          if (rWon) clearLossPattern(recovSymbol); else recordLossForPattern(recovSymbol, recovContractType, "");
+
+          await db.update(tradesTable).set({
+            status: rWon ? "won" : "lost",
+            payout: String(rActualPayout), profit: String(rProfit),
+            entryPrice: String(rEntryPrice), exitPrice: String(rExitPrice),
+            closedAt: new Date(),
+          }).where(eq(tradesTable.id, openTrade.id));
+        }
+
+        // ── Post-recovery bookkeeping ──────────────────────────────────────────────
+        const rNow = new Date();
+        const rSymLog = recentTradesBySymbol.get(recovSymbol) ?? [];
+        rSymLog.push(rNow);
+        recentTradesBySymbol.set(recovSymbol, rSymLog.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS));
+        lastTradeCompletedAt = rNow;
+        sessionLossCount = recoveryEngine.getState().streakLossCount;
+        tradesExecutedToday++;
+        lastTradeTime = rNow;
+
+        broadcastSSE("trade_completed", {
+          symbol: recovSymbol, won: rWon!, profit: rProfit!.toFixed(2),
+          contract: recovContractType, barrier: recovBarrierToStore, stake: recovStake,
+          live: !!token && !paperTradeMode, paper: paperTradeMode,
+        });
+        if (!paperTradeMode && token) journalManager.forceRefresh();
+
+        logger.info({
+          symbol: recovSymbol, won: rWon!, profit: rProfit!.toFixed(2),
+          stake: recovStake, contract: recovContractType,
+        }, "Recovery trade executed");
+
+        if (!rWon! && engineRunning) {
+          const freshS = await db.select().from(settingsTable).limit(1);
+          const hardLimit   = freshS[0]?.consecutiveLossLimit ?? 3;
+          const cooldownMin = freshS[0]?.cooldownMinutes ?? 30;
+          if (sessionLossCount >= hardLimit) {
+            stopEngine(`${sessionLossCount} consecutive losses — limit ${hardLimit} reached, cooling down ${cooldownMin}m`, cooldownMin);
+            return;
+          }
+        }
+
+        scheduleNext(true);
+        return;
+        // ── End of recovery fast path ──────────────────────────────────────────────
+      }
+    }
+
     const getGroupIndex = (sym: string): number => {
       if (sym.startsWith("1HZ")) return 0; // Volatility 1s (5 markets)
       if (sym.startsWith("R_"))  return 1; // Volatility     (5 markets)
@@ -563,15 +861,9 @@ async function runAutonomousLoop() {
 
     type ScanResult = { market: typeof availableMarkets[0]; output: Awaited<ReturnType<typeof runCoordinator>>; ctx: ScanContext; family: string };
 
-    // ── Contract family definitions ───────────────────────────────────────────
-    // Each market is evaluated by up to 4 families simultaneously.
-    // Only families with enabled contract types are run per market.
-    const dirTypes  = preferredContractTypes.filter(t => ["CALL", "PUT"].includes(t));
-    const ouTypes   = preferredContractTypes.filter(t => ["DIGITOVER", "DIGITUNDER"].includes(t));
-    const eoTypes   = preferredContractTypes.filter(t => ["DIGITEVEN", "DIGITODD"].includes(t));
-    // Matches & Differs: DIGITDIFF in normal mode (high ~96% win rate, 1.04× payout),
-    // DIGITMATCH in recovery mode (9× payout — a tiny stake recovers the full DIFF loss).
-    const mdTypes   = preferredContractTypes.filter(t => ["DIGITMATCH", "DIGITDIFF"].includes(t));
+    // ── Contract family definitions (already defined above for recovery fast path) ──
+    // dirTypes, ouTypes, eoTypes, mdTypes are defined before the recovery fast path
+    // so both the recovery path and the normal tournament path can use them.
 
     // ── Phase 1: All 4 groups scan in PARALLEL, but each group scans
     //    ONLY ONE market per iteration — the one at its cursor position.
@@ -795,7 +1087,7 @@ async function runAutonomousLoop() {
     // executeLiveTrade OR waitForContractResult threw after the DB insert but
     // before the status update — leaving a ghost trade that blocked the engine
     // indefinitely (the engine keeps finding the ghost every 3s and backing off).
-    const STALE_OPEN_MS = 2 * 60 * 1000; // 2 minutes — enough for any tick contract + settlement
+    // STALE_OPEN_MS is defined at module scope above
     const openTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
     if (openTrades.length > 0) {
       const now = Date.now();

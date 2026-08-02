@@ -102,14 +102,11 @@ export default function Trades() {
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ["derivJournal"],
     queryFn: fetchDerivJournal,
-    // 5 s background poll — fast enough for auto-recovery when SSE misses.
-    // refetchIntervalInBackground: false means the timer PAUSES whenever the
-    // browser tab loses focus or the user navigates to another page, which
-    // eliminates the navigation lag and FAB freeze caused by constant JSON
-    // parsing while the journal isn't even visible.
-    refetchInterval: 5000,
+    // 3 s background poll matches the server-side quick-refresh interval so
+    // the frontend always picks up the latest data within one poll cycle.
+    refetchInterval: 3000,
     refetchIntervalInBackground: false,
-    staleTime: 3000,
+    staleTime: 2000,
     // Only re-render when the actual data or loading flag changes.
     notifyOnChangeProps: ["data", "isLoading", "isFetching"],
   });
@@ -127,16 +124,20 @@ export default function Trades() {
           pendingRef.current = [trade, ...pendingRef.current.filter((t) => t.id !== trade.id)];
           setPendingTrades([...pendingRef.current]);
         }
-        // Debounced invalidation — pulls confirmed data from journalManager
-        // once Deriv's profit_table reflects the settled contract.
+        // Immediate invalidation — the server quick-refresh already merged the trade
         scheduleInvalidate();
       } catch { /* ignore */ }
     });
 
-    // journal_refreshed fires AFTER the full profit_table is re-fetched from
-    // Deriv — this is the authoritative "new trades are live" signal.
+    // journal_refreshed fires after BOTH the quick refresh (limit:10, ~1-2 s)
+    // AND the full profit_table re-fetch — invalidate immediately so the
+    // frontend picks up the merged data without waiting the full debounce.
     es.addEventListener("journal_refreshed", () => {
-      scheduleInvalidate();
+      // Immediate (50 ms) invalidation on authoritative refresh signal
+      if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
+      invalidateTimerRef.current = setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
+      }, 50);
     });
 
     return () => {
