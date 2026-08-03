@@ -1137,7 +1137,17 @@ class DerivJournalManager extends EventEmitter {
     this.bearerToken = bearerToken;
     this.accountId = accountId;
     if (changed) {
-      this.reconnectDelay = 10_000;
+      // Clear stale cache from the previous account immediately so the journal
+      // doesn't briefly show the wrong account's trades after switching.
+      this.cachedTransactions = [];
+      this.fetchAccumulator = [];
+      this.isFetchingPages = false;
+      this.lastFetchMs = 0;
+      this.lastRefreshSentMs = 0;
+      this.lastQuickRefreshSentMs = 0;
+      // Emit empty immediately so the frontend journal shows "loading" state
+      this.emit("refreshed", []);
+      this.reconnectDelay = 3_000;
       this.connect();
       this.startRefreshTimer();
     }

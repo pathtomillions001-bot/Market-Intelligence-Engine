@@ -28,4 +28,8 @@ Added `isActive boolean NOT NULL DEFAULT false` column to `lib/db/src/schema/acc
 ## getLiveBalance fix
 Updated `artifacts/api-server/src/lib/deriv.ts` `getLiveBalance()` to match balance by `cachedAccountId` first, instead of always preferring the real account. This ensures balance shown after a switch reflects the newly active account.
 
-**Why:** Deriv OAuth returns multiple sub-accounts (typically 1 real + 1 demo) in the same login. Storing only one meant the user was locked to whichever account the server picked at login time, with no way to switch without disconnecting and re-connecting.
+**Why:** Deriv returns multiple sub-accounts (1 real + 1 demo) for both OAuth Bearer tokens AND PAT/manual tokens — `GET /trading/v1/options/accounts` returns all of them regardless of token type. The original `/connect` route only stored the preferred (real) account. The fix: call `getDerivAccounts()` and upsert ALL accounts, same as OAuth.
+
+**Account switch mechanics:** The same bearer token authenticates all sub-accounts. Switching only requires changing the `accountId` passed to `POST /trading/v1/options/accounts/{accountId}/otp`. The JournalManager reconnects automatically via `setCredentials(token, newAccountId)` which calls `connect()` → fresh OTP URL → new WS for the new account. Journal cache is cleared immediately on switch so stale data doesn't flash.
+
+**JournalManager reconnect delay:** Changed from 10s to 3s on credential change for snappy switching.

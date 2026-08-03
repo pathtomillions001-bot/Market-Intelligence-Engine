@@ -240,6 +240,14 @@ router.post("/oauth/callback", async (req, res): Promise<void> => {
 });
 
 // ── Legacy PAT / Bearer token connect ────────────────────────────────────────
+/**
+ * POST /api/auth/connect
+ *
+ * Accepts a Deriv Bearer/PAT token. Calls GET /trading/v1/options/accounts to
+ * discover ALL sub-accounts (real + demo) associated with this token and stores
+ * every one as a separate DB row — identical to the OAuth path — so the account
+ * switcher works immediately after connecting with a token.
+ */
 router.post("/connect", async (req, res): Promise<void> => {
   const parseResult = ConnectDerivAccountBody.safeParse(req.body);
   if (!parseResult.success) { res.status(400).json({ error: "Invalid request body" }); return; }
@@ -247,52 +255,90 @@ router.post("/connect", async (req, res): Promise<void> => {
   if (!token) { res.status(400).json({ error: "Token cannot be empty" }); return; }
 
   try {
-    const accountInfo = await authorizeWithDeriv(token);
-    const accountId = accountInfo.loginid;
+    // Fetch ALL sub-accounts for this token (same endpoint as OAuth path)
+    const derivAccounts = await getDerivAccounts(token);
+    if (derivAccounts.length === 0) {
+      // Fallback: try the older authorize path in case the token is a PAT
+      // that doesn't work with the REST accounts endpoint
+      const accountInfo = await authorizeWithDeriv(token);
+      const accountId = accountInfo.loginid;
+      await db.update(accountsTable).set({ isActive: false });
+      setDerivCredentials(token, accountId);
 
-    // When connecting via token, mark all existing rows inactive first
-    await db.update(accountsTable).set({ isActive: false });
-
-    setDerivCredentials(token, accountId);
-
-    const existing = await db.select().from(accountsTable).where(eq(accountsTable.loginId, accountId));
-    let account;
-    if (existing.length > 0) {
-      const [updated] = await db
-        .update(accountsTable)
-        .set({
-          bearerToken: token,
-          derivAccountId: accountId,
-          balance: String(accountInfo.balance),
-          currency: accountInfo.currency,
-          isVirtual: accountInfo.is_virtual === 1,
-          isActive: true,
-          updatedAt: new Date(),
-        })
-        .where(eq(accountsTable.loginId, accountId))
-        .returning();
-      account = updated;
-    } else {
-      const [created] = await db
-        .insert(accountsTable)
-        .values({
-          loginId: accountId,
-          token: null,
-          bearerToken: token,
-          derivAccountId: accountId,
-          currency: accountInfo.currency,
-          balance: String(accountInfo.balance),
-          isVirtual: accountInfo.is_virtual === 1,
-          isActive: true,
-          email: accountInfo.email ?? null,
-          fullName: accountInfo.fullname ?? null,
-          country: accountInfo.country ?? null,
-        })
-        .returning();
-      account = created;
+      const existing = await db.select().from(accountsTable).where(eq(accountsTable.loginId, accountId));
+      let account;
+      if (existing.length > 0) {
+        const [updated] = await db.update(accountsTable).set({
+          bearerToken: token, derivAccountId: accountId,
+          balance: String(accountInfo.balance), currency: accountInfo.currency,
+          isVirtual: accountInfo.is_virtual === 1, isActive: true, updatedAt: new Date(),
+        }).where(eq(accountsTable.loginId, accountId)).returning();
+        account = updated;
+      } else {
+        const [created] = await db.insert(accountsTable).values({
+          loginId: accountId, token: null, bearerToken: token,
+          derivAccountId: accountId, currency: accountInfo.currency,
+          balance: String(accountInfo.balance), isVirtual: accountInfo.is_virtual === 1,
+          isActive: true, email: accountInfo.email ?? null,
+          fullName: accountInfo.fullname ?? null, country: accountInfo.country ?? null,
+        }).returning();
+        account = created;
+      }
+      res.json(formatAccount(account, accountInfo.balance));
+      return;
     }
 
-    res.json(formatAccount(account, accountInfo.balance));
+    // Prefer active real account; fall back to first
+    const preferred = derivAccounts.find((a) => a.account_type === "real" && a.status === "active")
+      ?? derivAccounts[0];
+
+    // Mark all existing rows inactive before re-upsert
+    await db.update(accountsTable).set({ isActive: false });
+
+    // ── Upsert ALL sub-accounts, marking only the preferred one as active ──
+    let preferredDbAccount: any = null;
+    for (const derivAcc of derivAccounts) {
+      const isActive = derivAcc.account_id === preferred.account_id;
+      const existing = await db.select().from(accountsTable)
+        .where(eq(accountsTable.loginId, derivAcc.account_id));
+
+      let dbRow;
+      if (existing.length > 0) {
+        const [updated] = await db.update(accountsTable).set({
+          bearerToken: token, token: null,
+          derivAccountId: derivAcc.account_id,
+          currency: derivAcc.currency,
+          balance: String(derivAcc.balance),
+          isVirtual: derivAcc.account_type === "demo",
+          isActive,
+          updatedAt: new Date(),
+        }).where(eq(accountsTable.loginId, derivAcc.account_id)).returning();
+        dbRow = updated;
+      } else {
+        const [created] = await db.insert(accountsTable).values({
+          loginId: derivAcc.account_id,
+          token: null,
+          bearerToken: token,
+          derivAccountId: derivAcc.account_id,
+          currency: derivAcc.currency,
+          balance: String(derivAcc.balance),
+          isVirtual: derivAcc.account_type === "demo",
+          isActive,
+        }).returning();
+        dbRow = created;
+      }
+      if (isActive) preferredDbAccount = dbRow;
+    }
+
+    // Activate module-level cache with the preferred account
+    setDerivCredentials(token, preferred.account_id);
+
+    logger.info({
+      accounts: derivAccounts.map(a => ({ id: a.account_id, type: a.account_type })),
+      active: preferred.account_id,
+    }, "Token connect: stored all sub-accounts");
+
+    res.json(formatAccount(preferredDbAccount, preferred.balance));
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Authorization failed";
     logger.error({ err }, "Deriv connect failed");
