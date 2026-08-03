@@ -6,6 +6,7 @@ import { Switch } from "./ui/switch";
 import { Label } from "./ui/label";
 import { motion, AnimatePresence } from "framer-motion";
 import { SpeedAIFab } from "./speed-ai-fab";
+import { AccountSwitcher } from "./account-switcher";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -47,8 +48,11 @@ function NavContent({ location, onNavigate }: { location: string; onNavigate?: (
         })}
       </nav>
 
-      {engineStatus && (
-        <div className="p-3 border-t border-border">
+      <div className="p-3 border-t border-border space-y-2">
+        {/* Account switcher — shown when 2+ accounts are linked */}
+        <AccountSwitcher />
+
+        {engineStatus && (
           <div className={`p-3 rounded-lg border ${engineStatus.mode === "autonomous" ? "bg-primary/5 border-primary/30" : "bg-secondary border-border"}`}>
             <div className="flex items-center justify-between mb-2">
               <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Engine Mode</Label>
@@ -62,8 +66,8 @@ function NavContent({ location, onNavigate }: { location: string; onNavigate?: (
               />
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

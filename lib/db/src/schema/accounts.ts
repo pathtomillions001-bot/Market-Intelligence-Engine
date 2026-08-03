@@ -8,6 +8,7 @@ export const accountsTable = pgTable("accounts", {
   // Legacy PAT token (kept for bulk-purchase fallback; null after OAuth login)
   token: text("token"),
   // OAuth2 Bearer access token (used for REST + OTP endpoint)
+  // All sub-accounts from one OAuth login share the same bearer/refresh token
   bearerToken: text("bearer_token"),
   // OAuth2 refresh token (used to renew the Bearer token)
   refreshToken: text("refresh_token"),
@@ -16,6 +17,9 @@ export const accountsTable = pgTable("accounts", {
   currency: text("currency").notNull().default("USD"),
   balance: numeric("balance", { precision: 20, scale: 2 }).notNull().default("0"),
   isVirtual: boolean("is_virtual").notNull().default(false),
+  // True for the account currently selected for live trading.
+  // Exactly one row should have isActive=true at any time.
+  isActive: boolean("is_active").notNull().default(false),
   email: text("email"),
   fullName: text("full_name"),
   country: text("country"),

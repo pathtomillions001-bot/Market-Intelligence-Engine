@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { accountsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, ne } from "drizzle-orm";
 import {
   authorizeWithDeriv,
   setDerivCredentials,
@@ -21,10 +21,8 @@ import { logger } from "../lib/logger";
 const router = Router();
 
 // ── PKCE state store (in-memory, keyed by state param) ──────────────────────
-// In production you'd use Redis or a DB; for single-server use this is fine.
 const pendingPkce = new Map<string, { codeVerifier: string; redirectUri: string; expiresAt: number }>();
 
-// Clean up expired PKCE entries every 10 minutes
 setInterval(() => {
   const now = Date.now();
   for (const [k, v] of pendingPkce) {
@@ -35,7 +33,11 @@ setInterval(() => {
 // ── Load persisted credentials on startup ────────────────────────────────────
 export async function loadPersistedToken() {
   try {
-    const accounts = await db.select().from(accountsTable).limit(1);
+    // Prefer the account marked active; fall back to first row
+    let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
+    if (accounts.length === 0) {
+      accounts = await db.select().from(accountsTable).limit(1);
+    }
     if (accounts.length > 0) {
       const account = accounts[0];
       const bearer = account.bearerToken;
@@ -45,13 +47,11 @@ export async function loadPersistedToken() {
         setDerivCredentials(bearer, derivAccountId);
         logger.info({ loginId: account.loginId }, "Loaded persisted Bearer token + accountId from DB");
       } else if (bearer) {
-        // Bearer but no accountId yet — use loginId as accountId fallback
         setDerivCredentials(bearer, account.loginId);
         logger.info({ loginId: account.loginId }, "Loaded persisted Bearer token from DB (using loginId as accountId)");
       } else if (account.token) {
-        // Legacy PAT — set token without accountId (market data still works)
         setDerivToken(account.token);
-        logger.info({ loginId: account.loginId }, "Loaded persisted PAT token from DB (no accountId — live trading unavailable until OAuth)");
+        logger.info({ loginId: account.loginId }, "Loaded persisted PAT token from DB");
       }
     }
   } catch (err) {
@@ -59,16 +59,34 @@ export async function loadPersistedToken() {
   }
 }
 
-// ── OAuth2 + PKCE helpers ─────────────────────────────────────────────────────
+// ── Shared account formatter ──────────────────────────────────────────────────
+function formatAccount(account: {
+  id: number;
+  loginId: string;
+  currency: string;
+  balance: string;
+  isVirtual: boolean;
+  isActive: boolean;
+  email: string | null;
+  fullName: string | null;
+  country: string | null;
+  connectedAt: Date;
+}, balance?: number) {
+  return {
+    id: account.id,
+    loginId: account.loginId,
+    currency: account.currency,
+    balance: balance ?? Number(account.balance),
+    isVirtual: account.isVirtual,
+    isActive: account.isActive,
+    email: account.email,
+    fullName: account.fullName,
+    country: account.country,
+    connectedAt: account.connectedAt.toISOString(),
+  };
+}
 
-/**
- * GET /api/auth/oauth/initiate
- *
- * The frontend sends the PKCE code_verifier + code_challenge it generated,
- * plus the redirect_uri where Deriv should send the auth code.
- * We store the verifier server-side (keyed by state) so it can't be tampered
- * with on the client, and return the full authorization URL to redirect to.
- */
+// ── OAuth2 + PKCE initiate ────────────────────────────────────────────────────
 router.get("/oauth/initiate", (req, res): void => {
   const { code_challenge, code_challenge_method, redirect_uri, state } = req.query as Record<string, string>;
   const code_verifier = req.query["code_verifier"] as string | undefined;
@@ -77,13 +95,11 @@ router.get("/oauth/initiate", (req, res): void => {
     res.status(400).json({ error: "Missing required OAuth params: code_challenge, redirect_uri, state" });
     return;
   }
-
   if (!APP_ID) {
-    res.status(503).json({ error: "DERIV_APP_ID is not configured on the server. Set it to your alphanumeric Deriv app ID." });
+    res.status(503).json({ error: "DERIV_APP_ID is not configured on the server." });
     return;
   }
 
-  // Store PKCE verifier server-side (expires in 10 minutes)
   if (code_verifier) {
     pendingPkce.set(state, {
       codeVerifier: code_verifier,
@@ -102,31 +118,17 @@ router.get("/oauth/initiate", (req, res): void => {
     code_challenge_method: code_challenge_method ?? "S256",
   });
 
-  const authUrl = `${DERIV_AUTH_BASE}/oauth2/auth?${params.toString()}`;
-  res.json({ url: authUrl });
+  res.json({ url: `${DERIV_AUTH_BASE}/oauth2/auth?${params.toString()}` });
 });
 
-/**
- * POST /api/auth/oauth/callback
- *
- * Called by the frontend after Deriv redirects back with `?code=...&state=...`.
- * Exchanges the code for Bearer + refresh tokens, fetches account list, and
- * stores everything in the DB.
- */
+// ── OAuth2 + PKCE callback ────────────────────────────────────────────────────
 router.post("/oauth/callback", async (req, res): Promise<void> => {
   const { code, state, redirect_uri, code_verifier: bodyVerifier } = req.body as {
-    code?: string;
-    state?: string;
-    redirect_uri?: string;
-    code_verifier?: string;
+    code?: string; state?: string; redirect_uri?: string; code_verifier?: string;
   };
 
-  if (!code) {
-    res.status(400).json({ error: "Missing authorization code" });
-    return;
-  }
+  if (!code) { res.status(400).json({ error: "Missing authorization code" }); return; }
 
-  // Resolve code_verifier: prefer server-side stored (keyed by state), fall back to body
   let codeVerifier: string | undefined;
   let redirectUri: string | undefined;
 
@@ -140,85 +142,96 @@ router.post("/oauth/callback", async (req, res): Promise<void> => {
   codeVerifier ??= bodyVerifier;
   redirectUri ??= redirect_uri;
 
-  if (!codeVerifier) {
-    res.status(400).json({ error: "PKCE code_verifier not found — did the OAuth flow start correctly?" });
-    return;
-  }
-  if (!redirectUri) {
-    res.status(400).json({ error: "redirect_uri is required" });
-    return;
-  }
+  if (!codeVerifier) { res.status(400).json({ error: "PKCE code_verifier not found" }); return; }
+  if (!redirectUri) { res.status(400).json({ error: "redirect_uri is required" }); return; }
 
   try {
-    // Exchange auth code for Bearer + refresh tokens
     const tokens = await exchangeOAuthCode(code, redirectUri, codeVerifier);
     const bearerToken = tokens.accessToken;
     const refreshToken = tokens.refreshToken;
 
-    // Fetch account list with the Bearer token
-    const accounts = await getDerivAccounts(bearerToken);
-    if (accounts.length === 0) {
+    // Fetch ALL sub-accounts for this OAuth login
+    const derivAccounts = await getDerivAccounts(bearerToken);
+    if (derivAccounts.length === 0) {
       res.status(400).json({ error: "No trading accounts found for this Deriv account" });
       return;
     }
 
-    // Prefer real account; fall back to first available
-    const preferred = accounts.find((a) => a.account_type === "real" && a.status === "active") ?? accounts[0];
-    const accountId = preferred.account_id;
-    const currency = preferred.currency;
-    const balance = preferred.balance;
-    const isVirtual = preferred.account_type === "demo";
+    // Pick the preferred (active real) account to mark as active
+    const preferred = derivAccounts.find((a) => a.account_type === "real" && a.status === "active") ?? derivAccounts[0];
 
-    // Store credentials in module-level cache
-    setDerivCredentials(bearerToken, accountId);
+    // Fetch user profile from the preferred account for email/name/country
+    let email: string | null = null;
+    let fullName: string | null = null;
+    let country: string | null = null;
+    try {
+      const profileRes = await fetch(`https://oauth.deriv.com/oauth2/user`, {
+        headers: { Authorization: `Bearer ${bearerToken}` },
+      });
+      if (profileRes.ok) {
+        const profile = await profileRes.json() as any;
+        email = profile.email ?? null;
+        fullName = profile.name ?? null;
+        country = profile.country ?? null;
+      }
+    } catch { /* profile fetch is best-effort */ }
 
-    // Upsert in DB
-    const existing = await db.select().from(accountsTable).where(eq(accountsTable.loginId, accountId));
-    let dbAccount;
-    if (existing.length > 0) {
-      const [updated] = await db
-        .update(accountsTable)
-        .set({
-          bearerToken,
-          refreshToken,
-          derivAccountId: accountId,
-          // token column left as-is (may be null or old PAT)
-          currency,
-          balance: String(balance),
-          isVirtual,
-          updatedAt: new Date(),
-        })
-        .where(eq(accountsTable.loginId, accountId))
-        .returning();
-      dbAccount = updated;
-    } else {
-      const [created] = await db
-        .insert(accountsTable)
-        .values({
-          loginId: accountId,
-          token: null,
-          bearerToken,
-          refreshToken,
-          derivAccountId: accountId,
-          currency,
-          balance: String(balance),
-          isVirtual,
-        })
-        .returning();
-      dbAccount = created;
+    // ── Upsert ALL sub-accounts, marking only the preferred one as active ──
+    let preferredDbAccount: any = null;
+    for (const derivAcc of derivAccounts) {
+      const isActive = derivAcc.account_id === preferred.account_id;
+      const existing = await db.select().from(accountsTable).where(eq(accountsTable.loginId, derivAcc.account_id));
+
+      let dbRow;
+      if (existing.length > 0) {
+        const [updated] = await db
+          .update(accountsTable)
+          .set({
+            bearerToken, refreshToken,
+            derivAccountId: derivAcc.account_id,
+            currency: derivAcc.currency,
+            balance: String(derivAcc.balance),
+            isVirtual: derivAcc.account_type === "demo",
+            isActive,
+            email: isActive ? email : existing[0].email,
+            fullName: isActive ? fullName : existing[0].fullName,
+            country: isActive ? country : existing[0].country,
+            updatedAt: new Date(),
+          })
+          .where(eq(accountsTable.loginId, derivAcc.account_id))
+          .returning();
+        dbRow = updated;
+      } else {
+        const [created] = await db
+          .insert(accountsTable)
+          .values({
+            loginId: derivAcc.account_id,
+            token: null,
+            bearerToken, refreshToken,
+            derivAccountId: derivAcc.account_id,
+            currency: derivAcc.currency,
+            balance: String(derivAcc.balance),
+            isVirtual: derivAcc.account_type === "demo",
+            isActive,
+            email: isActive ? email : null,
+            fullName: isActive ? fullName : null,
+            country: isActive ? country : null,
+          })
+          .returning();
+        dbRow = created;
+      }
+      if (isActive) preferredDbAccount = dbRow;
     }
 
-    res.json({
-      id: dbAccount.id,
-      loginId: dbAccount.loginId,
-      currency: dbAccount.currency,
-      balance: Number(dbAccount.balance),
-      isVirtual: dbAccount.isVirtual,
-      email: dbAccount.email,
-      fullName: dbAccount.fullName,
-      country: dbAccount.country,
-      connectedAt: dbAccount.connectedAt.toISOString(),
-    });
+    // Activate module-level cache with the preferred account
+    setDerivCredentials(bearerToken, preferred.account_id);
+
+    logger.info({
+      accounts: derivAccounts.map(a => ({ id: a.account_id, type: a.account_type })),
+      active: preferred.account_id,
+    }, "OAuth login: stored all sub-accounts");
+
+    res.json(formatAccount(preferredDbAccount, preferred.balance));
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "OAuth callback failed";
     logger.error({ err }, "OAuth callback error");
@@ -226,31 +239,19 @@ router.post("/oauth/callback", async (req, res): Promise<void> => {
   }
 });
 
-// ── Legacy PAT token connect ──────────────────────────────────────────────────
-/**
- * POST /api/auth/connect
- *
- * Accepts a Deriv Bearer token (from OAuth) or a legacy PAT.
- * Tries to use it as a Bearer token to call GET /accounts.
- * If that succeeds, stores full credentials. If not, stores the PAT for
- * future upgrade and marks the account as limited.
- */
+// ── Legacy PAT / Bearer token connect ────────────────────────────────────────
 router.post("/connect", async (req, res): Promise<void> => {
   const parseResult = ConnectDerivAccountBody.safeParse(req.body);
-  if (!parseResult.success) {
-    res.status(400).json({ error: "Invalid request body" });
-    return;
-  }
+  if (!parseResult.success) { res.status(400).json({ error: "Invalid request body" }); return; }
   const token = parseResult.data.token.trim();
-  if (!token) {
-    res.status(400).json({ error: "Token cannot be empty" });
-    return;
-  }
+  if (!token) { res.status(400).json({ error: "Token cannot be empty" }); return; }
 
   try {
-    // Try to use the token as a Bearer token for the new REST API
     const accountInfo = await authorizeWithDeriv(token);
     const accountId = accountInfo.loginid;
+
+    // When connecting via token, mark all existing rows inactive first
+    await db.update(accountsTable).set({ isActive: false });
 
     setDerivCredentials(token, accountId);
 
@@ -265,6 +266,7 @@ router.post("/connect", async (req, res): Promise<void> => {
           balance: String(accountInfo.balance),
           currency: accountInfo.currency,
           isVirtual: accountInfo.is_virtual === 1,
+          isActive: true,
           updatedAt: new Date(),
         })
         .where(eq(accountsTable.loginId, accountId))
@@ -281,6 +283,7 @@ router.post("/connect", async (req, res): Promise<void> => {
           currency: accountInfo.currency,
           balance: String(accountInfo.balance),
           isVirtual: accountInfo.is_virtual === 1,
+          isActive: true,
           email: accountInfo.email ?? null,
           fullName: accountInfo.fullname ?? null,
           country: accountInfo.country ?? null,
@@ -289,17 +292,7 @@ router.post("/connect", async (req, res): Promise<void> => {
       account = created;
     }
 
-    res.json({
-      id: account.id,
-      loginId: account.loginId,
-      currency: account.currency,
-      balance: Number(account.balance),
-      isVirtual: account.isVirtual,
-      email: account.email,
-      fullName: account.fullName,
-      country: account.country,
-      connectedAt: account.connectedAt.toISOString(),
-    });
+    res.json(formatAccount(account, accountInfo.balance));
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Authorization failed";
     logger.error({ err }, "Deriv connect failed");
@@ -307,43 +300,22 @@ router.post("/connect", async (req, res): Promise<void> => {
   }
 });
 
-function formatAccount(account: {
-  id: number;
-  loginId: string;
-  currency: string;
-  balance: string;
-  isVirtual: boolean;
-  email: string | null;
-  fullName: string | null;
-  country: string | null;
-  connectedAt: Date;
-}, balance?: number) {
-  return {
-    id: account.id,
-    loginId: account.loginId,
-    currency: account.currency,
-    balance: balance ?? Number(account.balance),
-    isVirtual: account.isVirtual,
-    email: account.email,
-    fullName: account.fullName,
-    country: account.country,
-    connectedAt: account.connectedAt.toISOString(),
-  };
-}
-
+// ── GET /api/auth/account — active account ───────────────────────────────────
 router.get("/account", async (req, res): Promise<void> => {
-  let accounts = await db.select().from(accountsTable).limit(1);
+  // Load the active account; fall back to first row for backward compat
+  let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
+  if (accounts.length === 0) {
+    accounts = await db.select().from(accountsTable).limit(1);
+  }
 
   if (accounts.length === 0) {
     const cachedToken = getCachedToken();
     const cachedAccountId = getCachedAccountId();
-    if (!cachedToken) {
-      res.status(404).json({ error: "No account connected" });
-      return;
-    }
+    if (!cachedToken) { res.status(404).json({ error: "No account connected" }); return; }
     try {
       logger.info("Restoring account from cached credentials");
       const info = await authorizeWithDeriv(cachedToken);
+      await db.update(accountsTable).set({ isActive: false });
       const [restored] = await db.insert(accountsTable).values({
         loginId: info.loginid,
         token: null,
@@ -352,6 +324,7 @@ router.get("/account", async (req, res): Promise<void> => {
         currency: info.currency,
         balance: String(info.balance),
         isVirtual: info.is_virtual === 1,
+        isActive: true,
         email: info.email ?? null,
         fullName: info.fullname ?? null,
         country: info.country ?? null,
@@ -367,26 +340,100 @@ router.get("/account", async (req, res): Promise<void> => {
   const account = accounts[0];
   const bearerToken = account.bearerToken ?? account.token;
 
-  // Sync live balance (uses 60s cache — no extra WS per poll)
   if (bearerToken) {
     try {
-      const liveBalance = await getLiveBalance(bearerToken);
-      if (liveBalance !== null && Math.abs(liveBalance - Number(account.balance)) > 0.01) {
-        await db
-          .update(accountsTable)
-          .set({ balance: String(liveBalance), updatedAt: new Date() })
+      const derivAccounts = await getDerivAccounts(bearerToken);
+      const match = derivAccounts.find(a => a.account_id === account.derivAccountId) ?? null;
+      if (match && Math.abs(match.balance - Number(account.balance)) > 0.01) {
+        await db.update(accountsTable)
+          .set({ balance: String(match.balance), updatedAt: new Date() })
           .where(eq(accountsTable.id, account.id));
-        res.json(formatAccount(account, liveBalance));
+        res.json(formatAccount(account, match.balance));
         return;
       }
-    } catch {
-      // fall through to cached balance
-    }
+    } catch { /* fall through to cached balance */ }
   }
 
   res.json(formatAccount(account));
 });
 
+// ── GET /api/auth/accounts — all linked accounts ─────────────────────────────
+router.get("/accounts", async (_req, res): Promise<void> => {
+  const accounts = await db.select().from(accountsTable);
+  if (accounts.length === 0) {
+    res.json([]);
+    return;
+  }
+
+  // Refresh live balances for all accounts using the shared bearer token
+  const bearerToken = accounts[0].bearerToken ?? accounts[0].token;
+  let liveBalanceMap = new Map<string, number>();
+  if (bearerToken) {
+    try {
+      const derivAccounts = await getDerivAccounts(bearerToken);
+      for (const da of derivAccounts) {
+        liveBalanceMap.set(da.account_id, da.balance);
+      }
+    } catch { /* fall back to cached */ }
+  }
+
+  const result = accounts.map(acc => {
+    const live = liveBalanceMap.get(acc.derivAccountId ?? acc.loginId);
+    return formatAccount(acc, live);
+  });
+
+  res.json(result);
+});
+
+// ── POST /api/auth/switch-account ─────────────────────────────────────────────
+router.post("/switch-account", async (req, res): Promise<void> => {
+  const { loginId } = req.body as { loginId?: string };
+  if (!loginId) { res.status(400).json({ error: "loginId is required" }); return; }
+
+  const target = await db.select().from(accountsTable).where(eq(accountsTable.loginId, loginId)).limit(1);
+  if (target.length === 0) {
+    res.status(404).json({ error: `Account ${loginId} not found — connect first` });
+    return;
+  }
+
+  const targetAccount = target[0];
+  const bearerToken = targetAccount.bearerToken ?? targetAccount.token;
+  if (!bearerToken) {
+    res.status(400).json({ error: "No bearer token for this account" });
+    return;
+  }
+
+  // Mark all inactive, then mark target active
+  await db.update(accountsTable).set({ isActive: false }).where(ne(accountsTable.loginId, loginId));
+  const [activated] = await db
+    .update(accountsTable)
+    .set({ isActive: true, updatedAt: new Date() })
+    .where(eq(accountsTable.loginId, loginId))
+    .returning();
+
+  // Update module-level cache — this reconnects the trading WS to the new account
+  setDerivCredentials(bearerToken, activated.derivAccountId ?? loginId);
+
+  logger.info({ loginId, derivAccountId: activated.derivAccountId, isVirtual: activated.isVirtual },
+    "Account switched");
+
+  // Return fresh balance for the activated account
+  let balance = Number(activated.balance);
+  try {
+    const derivAccounts = await getDerivAccounts(bearerToken);
+    const match = derivAccounts.find(a => a.account_id === (activated.derivAccountId ?? loginId));
+    if (match) {
+      balance = match.balance;
+      await db.update(accountsTable)
+        .set({ balance: String(balance), updatedAt: new Date() })
+        .where(eq(accountsTable.id, activated.id));
+    }
+  } catch { /* use cached */ }
+
+  res.json(formatAccount(activated, balance));
+});
+
+// ── POST /api/auth/disconnect ─────────────────────────────────────────────────
 router.post("/disconnect", async (_req, res): Promise<void> => {
   clearDerivToken();
   await db.delete(accountsTable);

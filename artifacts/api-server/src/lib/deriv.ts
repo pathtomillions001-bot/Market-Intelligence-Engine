@@ -1443,8 +1443,12 @@ export async function getLiveBalance(bearerToken: string): Promise<number | null
   try {
     const accounts = await getDerivAccounts(bearerToken);
     if (accounts.length === 0) return null;
+    // Prefer the currently active account; fall back to real then first
+    const match = cachedAccountId
+      ? accounts.find(a => a.account_id === cachedAccountId)
+      : null;
     const real = accounts.find((a) => a.account_type === "real" && a.status === "active");
-    const account = real ?? accounts[0];
+    const account = match ?? real ?? accounts[0];
     cachedBalance = account.balance;
     cachedBalanceAt = Date.now();
     return account.balance;

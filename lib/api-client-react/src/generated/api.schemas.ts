@@ -30,6 +30,8 @@ export interface DerivAccount {
   currency: string;
   balance: number;
   isVirtual: boolean;
+  /** True when this is the currently selected account for live trading */
+  isActive?: boolean;
   /** @nullable */
   email?: string | null;
   /** @nullable */
@@ -37,6 +39,10 @@ export interface DerivAccount {
   /** @nullable */
   country?: string | null;
   connectedAt?: string;
+}
+
+export interface SwitchAccountInput {
+  loginId: string;
 }
 
 export type RankedMarketCategory = typeof RankedMarketCategory[keyof typeof RankedMarketCategory];

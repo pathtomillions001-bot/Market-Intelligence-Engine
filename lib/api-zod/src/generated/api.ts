@@ -48,11 +48,26 @@ export const GetAccountResponse = zod.object({
   "currency": zod.string(),
   "balance": zod.number(),
   "isVirtual": zod.boolean(),
+  "isActive": zod.boolean().optional(),
   "email": zod.string().nullish(),
   "fullName": zod.string().nullish(),
   "country": zod.string().nullish(),
   "connectedAt": zod.string().optional()
 })
+
+/**
+ * @summary List all linked Deriv accounts
+ */
+export const GetAccountsResponse = zod.array(GetAccountResponse)
+
+/**
+ * @summary Switch the active trading account
+ */
+export const SwitchAccountBody = zod.object({
+  "loginId": zod.string().min(1)
+})
+
+export const SwitchAccountResponse = GetAccountResponse
 
 
 /**

@@ -1,4 +1,4 @@
-import { useConnectDerivAccount, useGetAccount, useDisconnectAccount } from "@workspace/api-client-react";
+import { useConnectDerivAccount, useGetAccount, useDisconnectAccount, useGetAccounts, useSwitchAccount } from "@workspace/api-client-react";
 import { ApiError } from "@workspace/api-client-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,7 @@ import { motion } from "framer-motion";
 import { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import { Link, useLocation } from "wouter";
-import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound } from "lucide-react";
+import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound, CheckCircle2, Zap, FlaskConical, RefreshCw } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
 // ── PKCE utilities ────────────────────────────────────────────────────────────
@@ -228,6 +228,34 @@ export default function Connect() {
     );
   }
 
+  // ── Account switcher (shown when connected) ──────────────────────────────
+  const { data: allAccounts } = useGetAccounts({
+    query: {
+      enabled: !!account,
+      refetchInterval: 15_000,
+      retry: false,
+    },
+  } as any);
+
+  const switchAccount = useSwitchAccount();
+
+  const handleSwitch = (loginId: string) => {
+    if (loginId === account?.loginId) return;
+    switchAccount.mutate({ data: { loginId } }, {
+      onSuccess: (switched) => {
+        toast.success(`Switched to ${switched.isVirtual ? "Demo" : "Real"} — ${switched.loginId}`);
+        queryClient.invalidateQueries();
+      },
+      onError: (err: unknown) => {
+        const msg = err instanceof ApiError
+          ? (typeof err.data === "object" && err.data && "error" in (err.data as object)
+            ? String((err.data as any).error) : err.message)
+          : "Failed to switch account";
+        toast.error(msg);
+      },
+    });
+  };
+
   if (account) {
     return (
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 md:p-8 max-w-2xl mx-auto space-y-6">
@@ -236,56 +264,132 @@ export default function Connect() {
           <p className="text-muted-foreground mt-1 text-sm">Your Deriv account is linked and trading is live.</p>
         </div>
 
+        {/* ── Active account card ── */}
         <Card className="bg-card border-green-500/30">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-green-500">
-              <CheckCircle className="w-5 h-5" /> Connected to Deriv
+              <CheckCircle className="w-5 h-5" /> Active Account
             </CardTitle>
-            <CardDescription>Trades are executing in real-time on your Deriv account.</CardDescription>
+            <CardDescription>The AI engine is executing trades on this account.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid grid-cols-2 gap-3 bg-secondary/30 p-4 rounded-lg">
               <div>
                 <Label className="text-muted-foreground text-xs uppercase">Account ID</Label>
-                <div className="font-mono text-base md:text-lg mt-1">{account.loginId}</div>
+                <div className="font-mono text-base md:text-lg mt-1 flex items-center gap-2">
+                  {account.loginId}
+                  <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${account.isVirtual ? "bg-amber-500/20 text-amber-400" : "bg-green-500/20 text-green-400"}`}>
+                    {account.isVirtual ? "Demo" : "Real"}
+                  </span>
+                </div>
               </div>
               <div>
                 <Label className="text-muted-foreground text-xs uppercase">Balance</Label>
                 <div className="font-mono text-base md:text-lg mt-1 text-green-400">{account.currency} {Number(account.balance).toFixed(2)}</div>
               </div>
               {account.email && (
-                <div>
+                <div className="col-span-2">
                   <Label className="text-muted-foreground text-xs uppercase">Email</Label>
                   <div className="text-sm mt-1 text-muted-foreground">{account.email}</div>
                 </div>
               )}
-              <div>
-                <Label className="text-muted-foreground text-xs uppercase">Account Type</Label>
-                <div className="text-sm mt-1">{account.isVirtual ? "Demo Account" : "Real Account"}</div>
-              </div>
             </div>
 
             <div className="p-3 bg-green-500/5 border border-green-500/20 rounded-lg flex items-center gap-3">
               <Wifi className="w-4 h-4 text-green-500 flex-shrink-0" />
-              <div className="text-sm text-green-400">Live trading active — all trades reflect on your Deriv account in real-time.</div>
-            </div>
-
-            <div className="flex flex-col sm:flex-row gap-3 pt-2">
-              <Link href="/" className="flex-1">
-                <Button className="w-full">Go to Dashboard</Button>
-              </Link>
-              <Button
-                variant="outline"
-                className="flex-1 border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50"
-                onClick={handleDisconnect}
-                disabled={disconnect.isPending}
-              >
-                <Unlink className="w-4 h-4 mr-2" />
-                {disconnect.isPending ? "Unlinking..." : "Unlink Account"}
-              </Button>
+              <div className="text-sm text-green-400">Live trading active — all trades execute on your Deriv account in real-time.</div>
             </div>
           </CardContent>
         </Card>
+
+        {/* ── Account switcher (only if 2+ accounts) ── */}
+        {allAccounts && allAccounts.length > 1 && (
+          <Card className="bg-card">
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2">
+                <RefreshCw className="w-4 h-4 text-primary" /> Switch Account
+              </CardTitle>
+              <CardDescription>
+                All your Deriv accounts are linked. Tap one to switch — the AI engine reconnects instantly.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {allAccounts.map((acc: any) => {
+                const isActive = acc.loginId === account.loginId;
+                return (
+                  <button
+                    key={acc.loginId}
+                    onClick={() => handleSwitch(acc.loginId)}
+                    disabled={switchAccount.isPending}
+                    className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left ${
+                      isActive
+                        ? "border-primary/40 bg-primary/5 cursor-default"
+                        : "border-border hover:border-primary/30 hover:bg-secondary/60 cursor-pointer"
+                    }`}
+                  >
+                    {/* Icon */}
+                    <div className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${
+                      acc.isVirtual
+                        ? "bg-amber-500/15 border border-amber-500/30"
+                        : "bg-green-500/15 border border-green-500/30"
+                    }`}>
+                      {acc.isVirtual
+                        ? <FlaskConical className="w-4 h-4 text-amber-400" />
+                        : <Zap className="w-4 h-4 text-green-400" />
+                      }
+                    </div>
+
+                    {/* Account details */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono font-semibold text-sm">{acc.loginId}</span>
+                        <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                          acc.isVirtual
+                            ? "bg-amber-500/20 text-amber-400"
+                            : "bg-green-500/20 text-green-400"
+                        }`}>
+                          {acc.isVirtual ? "Demo" : "Real"}
+                        </span>
+                        {isActive && (
+                          <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-primary/20 text-primary">
+                            Active
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-sm text-muted-foreground font-mono mt-0.5">
+                        {acc.currency} {Number(acc.balance).toFixed(2)}
+                      </div>
+                    </div>
+
+                    {/* Right side */}
+                    {isActive
+                      ? <CheckCircle2 className="w-5 h-5 text-primary flex-shrink-0" />
+                      : switchAccount.isPending
+                        ? <RefreshCw className="w-4 h-4 text-muted-foreground animate-spin flex-shrink-0" />
+                        : <div className="text-xs text-muted-foreground font-medium flex-shrink-0">Switch →</div>
+                    }
+                  </button>
+                );
+              })}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* ── Actions ── */}
+        <div className="flex flex-col sm:flex-row gap-3">
+          <Link href="/" className="flex-1">
+            <Button className="w-full">Go to Dashboard</Button>
+          </Link>
+          <Button
+            variant="outline"
+            className="flex-1 border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50"
+            onClick={handleDisconnect}
+            disabled={disconnect.isPending}
+          >
+            <Unlink className="w-4 h-4 mr-2" />
+            {disconnect.isPending ? "Unlinking..." : "Unlink All Accounts"}
+          </Button>
+        </div>
 
         <Card className="bg-card">
           <CardHeader>
