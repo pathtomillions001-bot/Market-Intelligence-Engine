@@ -101,8 +101,9 @@ const EMPTY_STATS = {
 // ── Stats ──────────────────────────────────────────────────────────────────────
 
 router.get("/stats", async (_req, res): Promise<void> => {
-  const accounts = await db.select().from(accountsTable).limit(1);
-  const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
+  let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
+  if (accounts.length === 0) accounts = await db.select().from(accountsTable).limit(1);
+  const token = getCachedToken() ?? (accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null);
 
   if (!token) {
     res.json(EMPTY_STATS);
@@ -137,8 +138,9 @@ router.get("/daily-summary", async (_req, res): Promise<void> => {
   const today = getTodayStart();
 
   const settings = await db.select().from(settingsTable).limit(1);
-  const accounts = await db.select().from(accountsTable).limit(1);
-  const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
+  let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
+  if (accounts.length === 0) accounts = await db.select().from(accountsTable).limit(1);
+  const token = getCachedToken() ?? (accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null);
 
   const dailyTarget = settings.length > 0 ? Number(settings[0].dailyTarget) : 50;
   const dailyLossLimit = settings.length > 0 ? Number(settings[0].dailyLossLimit) : 30;
@@ -237,7 +239,11 @@ router.post("/", async (req, res): Promise<void> => {
   // barrier is in Zod schema — use it directly
   const requestBarrier = parseResult.data.barrier ?? undefined;
 
-  const accounts = await db.select().from(accountsTable).limit(1);
+  // Always prefer the active account (respects real vs demo switch)
+  let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
+  if (accounts.length === 0) {
+    accounts = await db.select().from(accountsTable).limit(1);
+  }
   const settings = await db.select().from(settingsTable).limit(1);
   const balance = accounts.length > 0 ? Number(accounts[0].balance) : DEMO_BALANCE;
   const maxRisk = settings.length > 0 ? Number(settings[0].maxRiskPerTrade) : 2;
@@ -255,7 +261,7 @@ router.post("/", async (req, res): Promise<void> => {
   const market = DERIV_MARKETS.find((m) => m.symbol === symbol);
   const displayName = market?.displayName ?? symbol;
 
-  const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
+  const token = getCachedToken() ?? (accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null);
   const currency = accounts.length > 0 ? accounts[0].currency : "USD";
   const isLiveTrade = !paperTradeMode && !!token;
 
@@ -400,11 +406,11 @@ router.post("/", async (req, res): Promise<void> => {
       closedAt: new Date(),
     }).where(eq(tradesTable.id, openTrade.id)).returning();
 
-    // Sync live balance
+    // Sync live balance — update only the active account
     try {
       const newBalance = await getLiveBalance(token!);
       if (newBalance !== null && accounts.length > 0) {
-        await db.update(accountsTable).set({ balance: String(newBalance), updatedAt: new Date() });
+        await db.update(accountsTable).set({ balance: String(newBalance), updatedAt: new Date() }).where(eq(accountsTable.id, accounts[0].id));
       }
     } catch { /* ignore */ }
 
@@ -638,8 +644,9 @@ function normalizeDerivContractType(ct: string): string {
 
 // ── Deriv profit_table journal (sole source of truth — no local fallback) ───────
 router.get("/deriv-journal", async (_req, res): Promise<void> => {
-  const accounts = await db.select().from(accountsTable).limit(1);
-  const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
+  let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
+  if (accounts.length === 0) accounts = await db.select().from(accountsTable).limit(1);
+  const token = getCachedToken() ?? (accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null);
 
   const emptyStats = computeJournalStats([]);
   const emptyResponse = { source: "none" as const, trades: [], todayTrades: emptyStats.todayTradesList, stats: emptyStats };

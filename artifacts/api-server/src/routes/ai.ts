@@ -233,7 +233,11 @@ const AGENT_SCORE_KEYS = [
 // ── Settings builders ─────────────────────────────────────────────────────────
 
 async function getAccountAndSettings() {
-  const accounts = await db.select().from(accountsTable).limit(1);
+  // Always prefer the account the user has set as active (real vs demo switch)
+  let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
+  if (accounts.length === 0) {
+    accounts = await db.select().from(accountsTable).limit(1);
+  }
   const settings = await db.select().from(settingsTable).limit(1);
   return {
     balance: accounts.length > 0 ? Number(accounts[0].balance) : 10000,
@@ -424,7 +428,14 @@ function stopEngine(reason: string, cooldownMinutes?: number) {
 async function syncLiveBalance(token: string) {
   try {
     const balance = await getLiveBalance(token);
-    if (balance !== null) await db.update(accountsTable).set({ balance: String(balance), updatedAt: new Date() });
+    if (balance !== null) {
+      // Update only the active account — never stomp all rows
+      let activeAccounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
+      if (activeAccounts.length === 0) activeAccounts = await db.select().from(accountsTable).limit(1);
+      if (activeAccounts.length > 0) {
+        await db.update(accountsTable).set({ balance: String(balance), updatedAt: new Date() }).where(eq(accountsTable.id, activeAccounts[0].id));
+      }
+    }
   } catch { /* ignore */ }
 }
 
@@ -441,7 +452,8 @@ async function runAutonomousLoop() {
 
   try {
     const { balance, settings, account } = await getAccountAndSettings();
-    const token = getCachedToken() ?? account?.token ?? null;
+    // Prefer module-level cache; fall back to DB bearer token then legacy PAT
+    const token = getCachedToken() ?? account?.bearerToken ?? account?.token ?? null;
 
     const rawPreferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
     // Normalize: accept both CALL/PUT and RISE/FALL, unify to CALL/PUT
