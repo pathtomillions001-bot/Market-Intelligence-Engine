@@ -126,7 +126,6 @@ function maxStakeForLadderCost(
   recoveryMultiplier: number,
   maxLosses: number,
 ): number {
-  if (!Number.isFinite(targetCost) || targetCost <= 0) return 0.35;
   let lo = 0.35, hi = Math.max(targetCost * 2, 1);
   for (let i = 0; i < 64; i++) {
     const mid = (lo + hi) / 2;
@@ -141,13 +140,6 @@ function maxStakeForLadderCost(
   return Math.max(0.35, lo);
 }
 
-export interface SuggestedStakeResult {
-  stake: number;
-  limitedBy: "SL" | "TP";
-  maxFromSL: number;
-  stakeFromTP: number;
-}
-
 export function calcSuggestedStake(
   balance: number,
   targetSLFraction: number,       // e.g. 0.30
@@ -158,41 +150,29 @@ export function calcSuggestedStake(
   primaryPayout: number,          // e.g. 1.04 for DIGITDIFF
   primaryWinProb: number,         // e.g. 0.90 for DIGITDIFF
   targetTPFraction: number,       // e.g. 0.10
-): SuggestedStakeResult {
-  if (balance <= 0) return { stake: 0.35, limitedBy: "SL", maxFromSL: 0.35, stakeFromTP: 0.35 };
+): number {
+  if (balance <= 0) return 0.35;
 
   // ── Constraint 1: SL-based maximum ────────────────────────────────────────
-  // Use 25 % of SL budget so there is headroom for ~4 bad sessions in sequence.
-  // This is the hard ceiling — never stake more than this regardless of TP goal.
-  const slCostTarget = (targetSLFraction * balance * 0.25) / 1.1;
+  // Use 60 % of SL budget so there is headroom for multiple recovery failures.
+  const slCostTarget = (targetSLFraction * balance * 0.6) / 1.1;
   const maxFromSL = maxStakeForLadderCost(
     slCostTarget, recoveryMethod, recoveryPayout, recoveryMultiplier, maxLosses,
   );
 
   // ── Constraint 2: TP-driven stake ─────────────────────────────────────────
-  // Ideal stake: just enough to reach the daily TP in one realistic session.
-  // Session = max(20, maxLosses × 3) trades; expected wins at primaryWinProb.
-  const sessionTrades = Math.max(20, maxLosses * 3);
-  const expectedWins  = sessionTrades * primaryWinProb;
-  const profitPerUnit = Math.max(primaryPayout - 1, 0.001);
-  const stakeFromTP   = (balance * targetTPFraction) / (expectedWins * profitPerUnit);
+  // How large does the stake need to be to reach the TP in a practical session?
+  // Session = max(30, maxLosses × 4) trades; expected wins at primaryWinProb.
+  const sessionTrades  = Math.max(30, maxLosses * 4);
+  const expectedWins   = sessionTrades * primaryWinProb;
+  const profitPerUnit  = Math.max(primaryPayout - 1, 0.001); // avoid ÷0
+  const stakeFromTP    = (balance * targetTPFraction) / (expectedWins * profitPerUnit);
 
-  // Guard against Infinity / NaN from edge cases (e.g. cleared balance field)
-  const safeMaxSL = Number.isFinite(maxFromSL) ? maxFromSL : 0.35;
-  const safeTP    = Number.isFinite(stakeFromTP) && stakeFromTP > 0 ? stakeFromTP : safeMaxSL;
+  // ── Constraint 3: Balance cap (1 % per trade) ──────────────────────────────
+  const maxFromBalance = balance * 0.01;
 
-  // Ideal = safeTP; hard ceiling = safeMaxSL.
-  // If the TP target requires a larger stake than the SL allows, cap at safeMaxSL.
-  const raw       = Math.min(safeMaxSL, Math.max(safeTP, 0.35));
-  const stake     = Math.max(0.35, parseFloat(raw.toFixed(2)));
-  const limitedBy = safeTP >= safeMaxSL ? "SL" : "TP";
-
-  return {
-    stake,
-    limitedBy,
-    maxFromSL:    parseFloat(safeMaxSL.toFixed(2)),
-    stakeFromTP:  parseFloat(Math.min(safeTP, balance * 100).toFixed(2)),
-  };
+  const result = Math.min(maxFromSL, stakeFromTP, maxFromBalance);
+  return Math.max(0.35, parseFloat(result.toFixed(2)));
 }
 
 // ── Main Calculation ──────────────────────────────────────────────────────────
