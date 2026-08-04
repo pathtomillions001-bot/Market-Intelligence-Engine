@@ -336,10 +336,19 @@ export default function RiskCalculator() {
   const targetTP = parseFloat(((tpPct / 100) * balance).toFixed(2));
   const targetSL = parseFloat(((slPct / 100) * balance).toFixed(2));
 
-  // Suggested stake based on SL target
+  // Suggested stake: tightest of SL constraint, TP-driven size, and 1% balance cap
   const suggestedStake = useMemo(() => calcSuggestedStake(
-    balance, slPct / 100, recoveryMethod, recoveryPayout, recoveryMultiplier, maxLosses,
-  ), [balance, slPct, recoveryMethod, recoveryPayout, recoveryMultiplier, maxLosses]);
+    balance,
+    slPct / 100,
+    recoveryMethod,
+    recoveryPayout,
+    recoveryMultiplier,
+    maxLosses,
+    primaryPayout,
+    primaryWinProb,
+    tpPct / 100,
+  ), [balance, slPct, recoveryMethod, recoveryPayout, recoveryMultiplier, maxLosses,
+      primaryPayout, primaryWinProb, tpPct]);
 
   // Full risk calculation
   const result = useMemo(() => calcRisk({

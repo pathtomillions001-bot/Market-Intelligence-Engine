@@ -103,20 +103,30 @@ export function streakProb(winP: number, streak: number, trades: number): number
   return Math.min(1, Math.max(0, 1 - pNoStreak));
 }
 
-// ── Suggested Stake (works backwards from a target SL fraction) ───────────────
-// Finds the largest baseStake where the full recovery ladder × 1.1 stays within
-// targetSLFraction × balance.  Binary search — O(60) ladder builds.
-export function calcSuggestedStake(
-  balance: number,
-  targetSLFraction: number,   // e.g. 0.30
+// ── Suggested Stake ───────────────────────────────────────────────────────────
+// Three constraints are computed independently and the tightest wins:
+//
+// 1. SL constraint   — full recovery ladder × 1.1 uses ≤ 60 % of the SL budget.
+//    Using 60 % (not 100 %) leaves room for multiple failed recovery attempts
+//    and back-to-back bad sessions.
+//
+// 2. TP constraint   — stake is large enough to reach the daily TP target in a
+//    realistic session of (max(30, maxLosses × 4)) trades.
+//
+// 3. Balance cap     — max 1 % of balance per base trade.  Industry-standard
+//    conservative ceiling for binary / digit contracts.
+//
+// All three are combined with Math.min; floor is Deriv's $0.35 minimum.
+
+// Internal: binary-search for the largest base stake whose ladder sums to ≤ targetCost.
+function maxStakeForLadderCost(
+  targetCost: number,
   recoveryMethod: "instant" | "split",
   recoveryPayout: number,
   recoveryMultiplier: number,
   maxLosses: number,
 ): number {
-  if (balance <= 0) return 0.35;
-  const targetLadderCost = (targetSLFraction * balance) / 1.1;
-  let lo = 0.35, hi = balance;
+  let lo = 0.35, hi = Math.max(targetCost * 2, 1);
   for (let i = 0; i < 64; i++) {
     const mid = (lo + hi) / 2;
     const ladder =
@@ -124,10 +134,45 @@ export function calcSuggestedStake(
         ? buildInstantLadder(mid, recoveryPayout, maxLosses)
         : buildSplitLadder(mid, recoveryMultiplier, maxLosses);
     const cost = ladder.reduce((a, b) => a + b, 0);
-    if (cost <= targetLadderCost) lo = mid;
+    if (cost <= targetCost) lo = mid;
     else hi = mid;
   }
-  return Math.max(0.35, parseFloat(lo.toFixed(2)));
+  return Math.max(0.35, lo);
+}
+
+export function calcSuggestedStake(
+  balance: number,
+  targetSLFraction: number,       // e.g. 0.30
+  recoveryMethod: "instant" | "split",
+  recoveryPayout: number,
+  recoveryMultiplier: number,
+  maxLosses: number,
+  primaryPayout: number,          // e.g. 1.04 for DIGITDIFF
+  primaryWinProb: number,         // e.g. 0.90 for DIGITDIFF
+  targetTPFraction: number,       // e.g. 0.10
+): number {
+  if (balance <= 0) return 0.35;
+
+  // ── Constraint 1: SL-based maximum ────────────────────────────────────────
+  // Use 60 % of SL budget so there is headroom for multiple recovery failures.
+  const slCostTarget = (targetSLFraction * balance * 0.6) / 1.1;
+  const maxFromSL = maxStakeForLadderCost(
+    slCostTarget, recoveryMethod, recoveryPayout, recoveryMultiplier, maxLosses,
+  );
+
+  // ── Constraint 2: TP-driven stake ─────────────────────────────────────────
+  // How large does the stake need to be to reach the TP in a practical session?
+  // Session = max(30, maxLosses × 4) trades; expected wins at primaryWinProb.
+  const sessionTrades  = Math.max(30, maxLosses * 4);
+  const expectedWins   = sessionTrades * primaryWinProb;
+  const profitPerUnit  = Math.max(primaryPayout - 1, 0.001); // avoid ÷0
+  const stakeFromTP    = (balance * targetTPFraction) / (expectedWins * profitPerUnit);
+
+  // ── Constraint 3: Balance cap (1 % per trade) ──────────────────────────────
+  const maxFromBalance = balance * 0.01;
+
+  const result = Math.min(maxFromSL, stakeFromTP, maxFromBalance);
+  return Math.max(0.35, parseFloat(result.toFixed(2)));
 }
 
 // ── Main Calculation ──────────────────────────────────────────────────────────
