@@ -336,8 +336,8 @@ export default function RiskCalculator() {
   const targetTP = parseFloat(((tpPct / 100) * balance).toFixed(2));
   const targetSL = parseFloat(((slPct / 100) * balance).toFixed(2));
 
-  // Suggested stake: tightest of SL constraint, TP-driven size, and 1% balance cap
-  const suggestedStake = useMemo(() => calcSuggestedStake(
+  // Suggested stake: min of SL ceiling and TP-driven target
+  const stakeResult = useMemo(() => calcSuggestedStake(
     balance,
     slPct / 100,
     recoveryMethod,
@@ -349,6 +349,7 @@ export default function RiskCalculator() {
     tpPct / 100,
   ), [balance, slPct, recoveryMethod, recoveryPayout, recoveryMultiplier, maxLosses,
       primaryPayout, primaryWinProb, tpPct]);
+  const suggestedStake = stakeResult.stake;
 
   // Full risk calculation
   const result = useMemo(() => calcRisk({
@@ -578,12 +579,26 @@ export default function RiskCalculator() {
 
                     {/* Stake hero */}
                     <div className="bg-primary/8 border border-primary/25 rounded-xl p-3">
-                      <div className="text-[10px] uppercase tracking-wider text-primary/70 mb-0.5">Stake per trade</div>
+                      <div className="flex items-center justify-between mb-0.5">
+                        <div className="text-[10px] uppercase tracking-wider text-primary/70">Stake per trade</div>
+                        <div className={`text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded ${
+                          stakeResult.limitedBy === "SL"
+                            ? "bg-red-500/15 text-red-400 border border-red-500/25"
+                            : "bg-green-500/15 text-green-400 border border-green-500/25"
+                        }`}>
+                          {stakeResult.limitedBy === "SL" ? "SL-limited" : "TP-sized"}
+                        </div>
+                      </div>
                       <div className="flex items-end gap-2">
                         <span className="text-3xl font-bold tabular-nums text-primary">{usd(suggestedStake)}</span>
                         <span className="text-xs text-muted-foreground mb-1">
                           {fmt((suggestedStake / balance) * 100, 2)}% of balance
                         </span>
+                      </div>
+                      <div className="text-[10px] text-muted-foreground mt-1.5 flex items-center gap-2">
+                        <span>SL ceiling: {usd(stakeResult.maxFromSL)}</span>
+                        <span className="text-border">·</span>
+                        <span>TP target: {usd(stakeResult.stakeFromTP)}</span>
                       </div>
                       {stakeAtMin && (
                         <div className="text-[10px] text-yellow-400 mt-1 flex items-center gap-1">
