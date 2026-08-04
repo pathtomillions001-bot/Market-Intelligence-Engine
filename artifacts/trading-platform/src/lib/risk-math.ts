@@ -103,6 +103,33 @@ export function streakProb(winP: number, streak: number, trades: number): number
   return Math.min(1, Math.max(0, 1 - pNoStreak));
 }
 
+// ── Suggested Stake (works backwards from a target SL fraction) ───────────────
+// Finds the largest baseStake where the full recovery ladder × 1.1 stays within
+// targetSLFraction × balance.  Binary search — O(60) ladder builds.
+export function calcSuggestedStake(
+  balance: number,
+  targetSLFraction: number,   // e.g. 0.30
+  recoveryMethod: "instant" | "split",
+  recoveryPayout: number,
+  recoveryMultiplier: number,
+  maxLosses: number,
+): number {
+  if (balance <= 0) return 0.35;
+  const targetLadderCost = (targetSLFraction * balance) / 1.1;
+  let lo = 0.35, hi = balance;
+  for (let i = 0; i < 64; i++) {
+    const mid = (lo + hi) / 2;
+    const ladder =
+      recoveryMethod === "instant"
+        ? buildInstantLadder(mid, recoveryPayout, maxLosses)
+        : buildSplitLadder(mid, recoveryMultiplier, maxLosses);
+    const cost = ladder.reduce((a, b) => a + b, 0);
+    if (cost <= targetLadderCost) lo = mid;
+    else hi = mid;
+  }
+  return Math.max(0.35, parseFloat(lo.toFixed(2)));
+}
+
 // ── Main Calculation ──────────────────────────────────────────────────────────
 export interface RiskResult {
   ladder: number[];

@@ -15,6 +15,7 @@ import Analytics from "./pages/analytics";
 import Connect from "./pages/connect";
 import Settings from "./pages/settings";
 import Intelligence from "./pages/intelligence";
+import RiskCalculator from "./pages/risk-calculator";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30000 } },
@@ -139,6 +140,7 @@ function Router() {
         <Route path="/intelligence" component={Intelligence} />
         <Route path="/settings" component={Settings} />
         <Route path="/connect" component={Connect} />
+        <Route path="/risk-calculator" component={RiskCalculator} />
         <Route component={NotFound} />
       </Switch>
     </Layout>
