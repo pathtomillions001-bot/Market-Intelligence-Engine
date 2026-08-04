@@ -1,5 +1,5 @@
 /**
- * SpeedAI Engine — 1-tick ultra-fast trading engine
+ * SpeedAI Engine — 1-tick ultra-fast trading engine  (PrecisionAI v2)
  *
  * Analyzes all markets in real-time to find the best setup for each selected
  * contract type, then executes 1-tick trades in a continuous loop until the
@@ -7,6 +7,21 @@
  *
  * Recovery state is ISOLATED from the global recovery engine so SpeedAI
  * sessions do not interfere with the main autonomous engine.
+ *
+ * PrecisionAI v2 changes (vs v1):
+ *  • Five-signal contract-specific scoring: empirical win rate (50t) + short-term
+ *    momentum (15t) + Markov chain + entry timing (last 3-5 ticks) + pattern
+ *    stability (30t vs 15t agreement). Replaces the single-formula scoreMarket.
+ *  • isGreenLight(): contract-type-specific optimal entry moment — OVER waits for
+ *    a low digit (reversal setup), EVEN waits for an odd digit, MATCH waits for
+ *    hot digit to be recent but not just hit, etc.
+ *  • fastRecoveryGate(): hard 3-attempt / ~2-second time cap. Single 60-tick
+ *    window instead of three windows (60/100/150) that could block 15+ minutes.
+ *    Always falls back to best available — never blocks indefinitely.
+ *  • Adaptive fallback: if no candidate clears the threshold after max attempts,
+ *    drops threshold to 45 and executes the best scoring setup anyway.
+ *  • Post-loss pause 800 ms (was 1800 ms) — speed gap covered by gate quality.
+ *  • Normal-trade green-light retry: max 2 × 400 ms (was 1 × 1200 ms).
  */
 
 import {
@@ -19,12 +34,19 @@ import {
 } from "./deriv";
 import { broadcastSSE } from "./sse";
 import { db, accountsTable, settingsTable } from "@workspace/db";
+import { eq } from "drizzle-orm";
 import { logger } from "./logger";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/** Minimum score (0–100) for a market to be considered "suitable" to trade */
+/** Minimum score (0–100) for a market to be considered "suitable" during initial scan */
 const SUITABLE_SCORE_THRESHOLD = 54;
+
+/** Minimum score for a normal trade to execute */
+const MIN_TRADE_SCORE = 50;
+
+/** Minimum score for recovery — slightly tighter but still always achievable */
+const MIN_RECOVERY_SCORE = 52;
 
 const DIGIT_PAYOUTS_OVER: Record<number, number> = {
   0: 1.04, 1: 1.08, 2: 1.19, 3: 1.37, 4: 1.63,
@@ -145,8 +167,11 @@ let session: {
   stopRequested: false,
 };
 
-// ── Market analysis ───────────────────────────────────────────────────────────
+// ── PrecisionAI v2 — market analysis ─────────────────────────────────────────
 
+/**
+ * Digit frequency histogram (0–9) over a tick buffer.
+ */
 function digitFrequency(digits: number[]): number[] {
   const counts = Array(10).fill(0);
   for (const d of digits) if (d >= 0 && d <= 9) counts[d]++;
@@ -154,6 +179,10 @@ function digitFrequency(digits: number[]): number[] {
   return counts.map(c => c / n);
 }
 
+/**
+ * Laplace-smoothed Markov next-digit probabilities.
+ * Returns P(nextDigit = 0..9 | the last digit seen).
+ */
 function markovNextProb(digits: number[]): number[] {
   if (digits.length < 2) return Array(10).fill(0.1);
   const last = digits[digits.length - 1];
@@ -164,185 +193,27 @@ function markovNextProb(digits: number[]): number[] {
   }
   const row = mat[last ?? 5];
   const total = row.reduce((a, b) => a + b, 0);
-  return row.map(v => (v + 1) / (total + 10)); // Laplace smoothing
+  return row.map(v => (v + 1) / (total + 10));
 }
 
 /**
- * Score a single market for a given contract type + barrier.
- * Returns a score 0–100 and estimated win probability.
+ * Fraction of the last `window` digits/prices that satisfy the bet condition.
+ * Used as a short-term momentum signal.
  */
-function scoreMarket(
-  symbol: string,
-  displayName: string,
-  contractType: SpeedContractType,
-  barrier: number | undefined,
-  digits: number[],
-  prices: number[],
-): MarketScore | null {
-  if (digits.length < 50 && (contractType.startsWith("DIGIT"))) return null;
-  if (prices.length < 30 && (contractType === "CALL" || contractType === "PUT")) return null;
-
-  const freq = digitFrequency(digits);
-  const markov = markovNextProb(digits);
-
-  if (contractType === "DIGITOVER" && barrier !== undefined) {
-    // Win if last digit > barrier
-    const theoretical = (9 - barrier) / 10;
-    const empirical = freq.slice(barrier + 1).reduce((a, b) => a + b, 0);
-    const markovWin = markov.slice(barrier + 1).reduce((a, b) => a + b, 0);
-    const winP = empirical * 0.5 + markovWin * 0.5;
-    const edge = (winP - theoretical) * 100;
-    const score = Math.min(100, Math.max(0, 50 + edge * 3 + (winP - 0.4) * 40));
-    const payout = DIGIT_PAYOUTS_OVER[barrier] ?? 1.63;
-    const ev = winP * (payout - 1) - (1 - winP);
-    const reason = `${(winP * 100).toFixed(1)}% empirical win rate, EV ${ev > 0 ? "+" : ""}${(ev * 100).toFixed(1)}%`;
-    return { symbol, displayName, contractType, barrier, score, winProbability: winP, payout, reason };
-  }
-
-  if (contractType === "DIGITUNDER" && barrier !== undefined) {
-    const theoretical = barrier / 10;
-    const empirical = freq.slice(0, barrier).reduce((a, b) => a + b, 0);
-    const markovWin = markov.slice(0, barrier).reduce((a, b) => a + b, 0);
-    const winP = empirical * 0.5 + markovWin * 0.5;
-    const edge = (winP - theoretical) * 100;
-    const score = Math.min(100, Math.max(0, 50 + edge * 3 + (winP - 0.4) * 40));
-    const payout = DIGIT_PAYOUTS_UNDER[barrier] ?? 1.63;
-    const ev = winP * (payout - 1) - (1 - winP);
-    const reason = `${(winP * 100).toFixed(1)}% empirical win rate, EV ${ev > 0 ? "+" : ""}${(ev * 100).toFixed(1)}%`;
-    return { symbol, displayName, contractType, barrier, score, winProbability: winP, payout, reason };
-  }
-
-  if (contractType === "DIGITEVEN") {
-    const evenP = [0, 2, 4, 6, 8].reduce((s, d) => s + (freq[d] ?? 0), 0);
-    const markovEvenP = [0, 2, 4, 6, 8].reduce((s, d) => s + (markov[d] ?? 0), 0);
-    const winP = evenP * 0.6 + markovEvenP * 0.4;
-    const edge = (winP - 0.5) * 100;
-    const score = Math.min(100, Math.max(0, 50 + edge * 4));
-    return { symbol, displayName, contractType, score, winProbability: winP, payout: 1.96, reason: `Even ${(winP * 100).toFixed(1)}% recent freq` };
-  }
-
-  if (contractType === "DIGITODD") {
-    const oddP = [1, 3, 5, 7, 9].reduce((s, d) => s + (freq[d] ?? 0), 0);
-    const markovOddP = [1, 3, 5, 7, 9].reduce((s, d) => s + (markov[d] ?? 0), 0);
-    const winP = oddP * 0.6 + markovOddP * 0.4;
-    const edge = (winP - 0.5) * 100;
-    const score = Math.min(100, Math.max(0, 50 + edge * 4));
-    return { symbol, displayName, contractType, score, winProbability: winP, payout: 1.96, reason: `Odd ${(winP * 100).toFixed(1)}% recent freq` };
-  }
-
-  if (contractType === "DIGITMATCH" && barrier !== undefined) {
-    const matchP = freq[barrier] ?? 0.1;
-    const markovMatchP = markov[barrier] ?? 0.1;
-    const winP = matchP * 0.6 + markovMatchP * 0.4;
-    const edge = (winP - 0.1) * 100;
-    const score = Math.min(100, Math.max(0, 50 + edge * 3));
-    return { symbol, displayName, contractType, barrier, score, winProbability: winP, payout: 9.0, reason: `Digit ${barrier} freq ${(winP * 100).toFixed(1)}%` };
-  }
-
-  if (contractType === "DIGITDIFF" && barrier !== undefined) {
-    const matchP = freq[barrier] ?? 0.1;
-    const markovMatchP = markov[barrier] ?? 0.1;
-    const diffWinP = 1 - (matchP * 0.6 + markovMatchP * 0.4);
-    const edge = (diffWinP - 0.9) * 100;
-    const score = Math.min(100, Math.max(0, 50 + edge * 4));
-    return { symbol, displayName, contractType, barrier, score, winProbability: diffWinP, payout: 1.04, reason: `Digit ${barrier} absent ${(diffWinP * 100).toFixed(1)}%` };
-  }
-
-  if (contractType === "CALL") {
-    // Count rising ticks
-    let upCount = 0;
-    for (let i = 1; i < prices.length; i++) {
-      if (prices[i] > prices[i - 1]) upCount++;
-    }
-    const winP = upCount / (prices.length - 1 || 1);
-    const edge = (winP - 0.5) * 100;
-    const score = Math.min(100, Math.max(0, 50 + edge * 4));
-    return { symbol, displayName, contractType, score, winProbability: winP, payout: 1.91, reason: `Rise ${(winP * 100).toFixed(1)}% of recent ticks` };
-  }
-
-  if (contractType === "PUT") {
-    let downCount = 0;
-    for (let i = 1; i < prices.length; i++) {
-      if (prices[i] < prices[i - 1]) downCount++;
-    }
-    const winP = downCount / (prices.length - 1 || 1);
-    const edge = (winP - 0.5) * 100;
-    const score = Math.min(100, Math.max(0, 50 + edge * 4));
-    return { symbol, displayName, contractType, score, winProbability: winP, payout: 1.91, reason: `Fall ${(winP * 100).toFixed(1)}% of recent ticks` };
-  }
-
-  return null;
-}
-
-/**
- * Pick the best barrier for DIGITMATCH (hottest digit) or DIGITDIFF (coldest digit).
- */
-function pickMatchDiffBarrier(freq: number[], contractType: "DIGITMATCH" | "DIGITDIFF"): number {
-  if (contractType === "DIGITMATCH") {
-    return freq.indexOf(Math.max(...freq));
-  } else {
-    return freq.indexOf(Math.min(...freq));
-  }
-}
-
-/**
- * Extract OVER and UNDER barriers from the barriers array.
- * Convention (set by familyToContracts in the frontend):
- *   barriers[0] = OVER barrier, barriers[1] = UNDER barrier.
- *
- * IMPORTANT: each barrier has its OWN independent default.
- * We never reuse barriers[0] (the OVER value) as the UNDER fallback — that was a
- * prior bug that caused DIGITUNDER trades to use the OVER digit barrier when only
- * one element was supplied, silently trading the wrong digit.
- */
-function extractBarriers(barriers: number[]): { overBarrier: number; underBarrier: number } {
-  const overBarrier  = barriers.length > 0 ? barriers[0] : 1;  // default OVER 1  (~90% win)
-  const underBarrier = barriers.length > 1 ? barriers[1] : 8;  // default UNDER 8 (~80% win) — NEVER fall back to barriers[0]
-  return { overBarrier, underBarrier };
-}
-
-// ── Recovery minimum score threshold ─────────────────────────────────────────
-// Recovery trades require a higher quality floor than normal trades (MIN_TRADE_SCORE=50).
-const MIN_RECOVERY_SCORE = 55;
-
-// ── Recovery candidate returned by deepRecoveryGate ───────────────────────────
-interface RecoveryCandidate {
-  contractType: SpeedContractType;
-  barrier:      number | undefined;
-  payout:       number;
-  /** Minimum win probability across all 3 tick windows — the conservative estimate */
-  minWinP:      number;
-  /** Average score across all 3 windows */
-  avgScore:     number;
-  /** Score range (max − min across windows); lower = pattern is stable, not a noise spike */
-  spread:       number;
-  /** Expected value using minWinP — guarantees positive EV even in the worst window */
-  ev:           number;
-  /** Fraction of the last 8 ticks that already satisfy the prediction (0–1) */
-  momentumScore: number;
-  /** Final ranking metric combining the above */
-  compositeScore: number;
-  reason:       string;
-}
-
-/**
- * Fraction of the last `window` digits that satisfy the prediction.
- * Measures short-term momentum — the market should be behaving in our favour
- * RIGHT NOW, not just on a 150-tick statistical average.
- */
-function momentumAlignment(
+function momentumRate(
   digits: number[],
   contractType: SpeedContractType,
   barrier: number | undefined,
-  window = 8,
+  window = 15,
 ): number {
+  if (contractType === "CALL" || contractType === "PUT") return 0.5; // handled separately
   const recent = digits.slice(-window);
-  if (recent.length < 4) return 0.5; // insufficient data — neutral
+  if (recent.length < 5) return 0.5;
   let hits = 0;
   for (const d of recent) {
     switch (contractType) {
-      case "DIGITOVER":  if (barrier !== undefined && d >  barrier) hits++; break;
-      case "DIGITUNDER": if (barrier !== undefined && d <  barrier) hits++; break;
+      case "DIGITOVER":  if (barrier !== undefined && d > barrier)  hits++; break;
+      case "DIGITUNDER": if (barrier !== undefined && d < barrier)  hits++; break;
       case "DIGITEVEN":  if (d % 2 === 0)                          hits++; break;
       case "DIGITODD":   if (d % 2 !== 0)                          hits++; break;
       case "DIGITMATCH": if (barrier !== undefined && d === barrier) hits++; break;
@@ -353,113 +224,392 @@ function momentumAlignment(
 }
 
 /**
- * Deep multi-window consensus gate for recovery trades.
- *
- * Scores every valid barrier within the user's chosen recovery contract families
- * across THREE independent tick windows (60t / 100t / 150t). A candidate passes
- * only when ALL THREE windows agree on the edge AND recent momentum confirms the
- * pattern is active RIGHT NOW.
- *
- * Advantages over the old single-window + 3-tick check:
- *  • 60t window catches pattern shifts that 150t alone misses
- *  • "spread" gate filters noise spikes — if windows disagree, we wait
- *  • Barrier sweep finds the BEST entry within the family (not just configured)
- *  • Thresholds scale up automatically after consecutive losses
- *
- * Threshold ladder:
- *   0 consecutive losses → minWinP 0.54, maxSpread 22, minMomentum 0.43
- *   1 loss               → minWinP 0.57, maxSpread 18, minMomentum 0.50
- *   2+ losses            → minWinP 0.61, maxSpread 14, minMomentum 0.56
- *
- * Returns the highest-ranked candidate, or null if none pass all gates.
+ * Entry timing score (0–100):
+ *  — DIGIT contracts: counts how many of the LAST 3 ticks were AGAINST the bet.
+ *    Higher "against" count = better reversal setup = higher timing score.
+ *    Rational: after 3 consecutive adverse ticks the market is statistically
+ *    more likely to correct, giving an optimal entry moment.
+ *  — CALL/PUT: measures directional alignment of recent price ticks.
  */
-function deepRecoveryGate(
-  symbol:           string,
-  displayName:      string,
-  contractTypes:    SpeedContractType[],
-  configBarriers:   number[],
+function entryTimingScore(
+  digits: number[],
+  prices: number[],
+  contractType: SpeedContractType,
+  barrier: number | undefined,
+): number {
+  if (contractType === "CALL" || contractType === "PUT") {
+    const recent = prices.slice(-8);
+    if (recent.length < 3) return 50;
+    let aligned = 0;
+    for (let i = 1; i < recent.length; i++) {
+      const up = recent[i] > recent[i - 1];
+      if ((contractType === "CALL" && up) || (contractType === "PUT" && !up)) aligned++;
+    }
+    return Math.round((aligned / (recent.length - 1)) * 100);
+  }
+
+  const last3 = digits.slice(-3);
+  if (last3.length < 2) return 50;
+
+  let against = 0;
+  for (const d of last3) {
+    switch (contractType) {
+      case "DIGITOVER":  if (barrier !== undefined && d <= barrier) against++; break;
+      case "DIGITUNDER": if (barrier !== undefined && d >= barrier) against++; break;
+      case "DIGITEVEN":  if (d % 2 !== 0) against++; break;
+      case "DIGITODD":   if (d % 2 === 0) against++; break;
+      case "DIGITMATCH": if (barrier !== undefined && d !== barrier) against++; break;
+      case "DIGITDIFF":  if (barrier !== undefined && d === barrier) against++; break;
+    }
+  }
+  // 0 against = poor timing (20), 1 = neutral (50), 2 = good (80), 3 = optimal (100)
+  return ([20, 50, 80, 100][against]) ?? 50;
+}
+
+/**
+ * Theoretical win rate for a contract type + barrier.
+ * Used to normalize edge relative to the baseline (not just in absolute terms).
+ */
+function theoreticalWinRate(contractType: SpeedContractType, barrier: number | undefined): number {
+  switch (contractType) {
+    case "DIGITOVER":  return barrier !== undefined ? (9 - barrier) / 10 : 0.5;
+    case "DIGITUNDER": return barrier !== undefined ? barrier / 10 : 0.5;
+    case "DIGITEVEN":
+    case "DIGITODD":
+    case "CALL":
+    case "PUT":        return 0.5;
+    case "DIGITMATCH": return 0.1;
+    case "DIGITDIFF":  return 0.9;
+    default:           return 0.5;
+  }
+}
+
+/**
+ * Auto-select barrier for DIGITMATCH: digit with the highest Markov probability
+ * of appearing NEXT (given current last digit), blended with recent frequency.
+ * This is the most accurate "hot digit" prediction available.
+ */
+function pickBestMatchBarrier(digits: number[]): number {
+  const markov  = markovNextProb(digits);
+  const freq30  = digitFrequency(digits.slice(-30));
+  const hotScore = markov.map((m, i) => m * 0.60 + (freq30[i] ?? 0) * 0.40);
+  return hotScore.indexOf(Math.max(...hotScore));
+}
+
+/**
+ * Auto-select barrier for DIGITDIFF: digit with the lowest combined Markov
+ * probability + recent frequency — the "coldest" digit, least likely to appear.
+ */
+function pickBestDiffBarrier(digits: number[]): number {
+  const markov   = markovNextProb(digits);
+  const freq30   = digitFrequency(digits.slice(-30));
+  const coldScore = markov.map((m, i) => m * 0.60 + (freq30[i] ?? 0) * 0.40);
+  return coldScore.indexOf(Math.min(...coldScore));
+}
+
+/**
+ * Extract OVER and UNDER barriers from the barriers array.
+ * Convention: barriers[0] = OVER barrier, barriers[1] = UNDER barrier.
+ * Each has its own independent default — never reuse barriers[0] as UNDER fallback.
+ */
+function extractBarriers(barriers: number[]): { overBarrier: number; underBarrier: number } {
+  const overBarrier  = barriers.length > 0 ? barriers[0] : 1;   // default OVER 1  (~90% win)
+  const underBarrier = barriers.length > 1 ? barriers[1] : 8;   // default UNDER 8 (~90% win)
+  return { overBarrier, underBarrier };
+}
+
+/**
+ * PrecisionAI v2 — five-signal, contract-type-specific market scorer.
+ *
+ * Five signals per contract type:
+ *   1. Empirical win rate   (last 50 ticks) — actual market behaviour
+ *   2. Short-term momentum  (last 15 ticks) — what the market is doing RIGHT NOW
+ *   3. Markov chain         (full buffer)   — probabilistic next-digit prediction
+ *   4. Entry timing         (last 3-5 ticks) — is this the optimal entry moment?
+ *   5. Pattern stability    (30t vs 15t)    — how consistent is the signal? (noise filter)
+ *
+ * Score formula:
+ *   base  = 50 + clamp((winP − theoretical) / 0.15, −1, 1) × 50
+ *   bonus = timingBonus (±10) + stabilityBonus (±5)
+ *   score = clamp(base + bonus, 0, 100)
+ *
+ * Score 50 = exactly at theoretical win rate (marginal edge), 100 = excellent.
+ * Requires score ≥ MIN_TRADE_SCORE (50) for normal, ≥ MIN_RECOVERY_SCORE (52) for recovery.
+ */
+function precisionScore(
+  symbol: string,
+  displayName: string,
+  contractType: SpeedContractType,
+  barrier: number | undefined,
+  digits: number[],
+  prices: number[],
+): MarketScore | null {
+  if (contractType.startsWith("DIGIT") && digits.length < 35) return null;
+  if ((contractType === "CALL" || contractType === "PUT") && prices.length < 20) return null;
+
+  const freq50   = digitFrequency(digits.slice(-50));
+  const markov   = markovNextProb(digits);
+  const momentum = momentumRate(digits, contractType, barrier, 15);
+  const timing   = entryTimingScore(digits, prices, contractType, barrier);
+
+  // Stability: agreement between 30-tick and 15-tick momentum (high = reliable pattern)
+  const mom30       = momentumRate(digits, contractType, barrier, 30);
+  const stabilityRaw = Math.max(0, 1 - Math.abs(mom30 - momentum) / 0.30);
+
+  let empirical: number;
+  let markovWin: number;
+  let payout: number;
+
+  switch (contractType) {
+    case "DIGITOVER": {
+      if (barrier === undefined) return null;
+      empirical = freq50.slice(barrier + 1).reduce((a, b) => a + b, 0);
+      markovWin = markov.slice(barrier + 1).reduce((a, b) => a + b, 0);
+      payout    = DIGIT_PAYOUTS_OVER[barrier] ?? 1.63;
+      break;
+    }
+    case "DIGITUNDER": {
+      if (barrier === undefined) return null;
+      empirical = freq50.slice(0, barrier).reduce((a, b) => a + b, 0);
+      markovWin = markov.slice(0, barrier).reduce((a, b) => a + b, 0);
+      payout    = DIGIT_PAYOUTS_UNDER[barrier] ?? 1.63;
+      break;
+    }
+    case "DIGITEVEN": {
+      empirical = [0, 2, 4, 6, 8].reduce((s, d) => s + (freq50[d] ?? 0), 0);
+      markovWin = [0, 2, 4, 6, 8].reduce((s, d) => s + (markov[d] ?? 0), 0);
+      payout    = 1.96;
+      break;
+    }
+    case "DIGITODD": {
+      empirical = [1, 3, 5, 7, 9].reduce((s, d) => s + (freq50[d] ?? 0), 0);
+      markovWin = [1, 3, 5, 7, 9].reduce((s, d) => s + (markov[d] ?? 0), 0);
+      payout    = 1.96;
+      break;
+    }
+    case "DIGITMATCH": {
+      if (barrier === undefined) return null;
+      empirical = freq50[barrier] ?? 0.1;
+      markovWin = markov[barrier] ?? 0.1;
+      payout    = 9.0;
+      break;
+    }
+    case "DIGITDIFF": {
+      if (barrier === undefined) return null;
+      empirical = 1 - (freq50[barrier] ?? 0.1);
+      markovWin = 1 - (markov[barrier] ?? 0.1);
+      payout    = 1.04;
+      break;
+    }
+    case "CALL": {
+      let ups = 0;
+      for (let i = 1; i < prices.length; i++) if (prices[i] > prices[i - 1]) ups++;
+      empirical = ups / Math.max(1, prices.length - 1);
+      markovWin = empirical;
+      payout    = 1.91;
+      break;
+    }
+    case "PUT": {
+      let downs = 0;
+      for (let i = 1; i < prices.length; i++) if (prices[i] < prices[i - 1]) downs++;
+      empirical = downs / Math.max(1, prices.length - 1);
+      markovWin = empirical;
+      payout    = 1.91;
+      break;
+    }
+    default: return null;
+  }
+
+  // Composite win probability (three signals, weighted)
+  const winP = empirical * 0.50 + markovWin * 0.25 + momentum * 0.25;
+
+  // Normalize edge relative to theoretical win rate
+  // max achievable edge ≈ 15 percentage points above theoretical
+  const theoretical    = theoreticalWinRate(contractType, barrier);
+  const edgeNorm       = Math.max(-1, Math.min(1, (winP - theoretical) / 0.15));
+  const timingBonus    = (timing - 50) * 0.20;          // ±10 pts
+  const stabilityBonus = (stabilityRaw - 0.5) * 10;     // ±5 pts
+
+  const score = Math.min(100, Math.max(0,
+    50 + edgeNorm * 50 + timingBonus + stabilityBonus
+  ));
+
+  const ev = winP * (payout - 1) - (1 - winP);
+  const reason = [
+    `${(winP * 100).toFixed(1)}% win-p`,
+    `timing ${timing.toFixed(0)}/100`,
+    `EV ${ev >= 0 ? "+" : ""}${(ev * 100).toFixed(1)}%`,
+    `stability ${(stabilityRaw * 100).toFixed(0)}%`,
+  ].join(" · ");
+
+  return { symbol, displayName, contractType, barrier, score, winProbability: winP, payout, reason };
+}
+
+/**
+ * Green-light entry check — is this the OPTIMAL moment to execute this contract?
+ *
+ * Each contract type has a specific "entry moment" that maximises win probability:
+ *
+ *   DIGITOVER (barrier B):
+ *     GREEN if last digit was ≤ B (reversal setup — market just hit/went below
+ *     barrier → statistically more likely to bounce back above it next tick).
+ *     Also GREEN if short-term momentum ≥ 65% (strong trend — ride it).
+ *
+ *   DIGITUNDER (barrier B):
+ *     GREEN if last digit was ≥ B (reversal setup).
+ *     Also GREEN if momentum ≥ 65%.
+ *
+ *   DIGITEVEN:
+ *     GREEN if last digit was ODD (alternation play — volatile indices oscillate).
+ *     Also GREEN if even frequency in last 10 ticks > 60%.
+ *
+ *   DIGITODD:
+ *     GREEN if last digit was EVEN. Also GREEN if odd freq last 10 > 60%.
+ *
+ *   CALL:
+ *     GREEN if last tick was UP and ≥ 2 of last 5 ticks were UP (momentum).
+ *
+ *   PUT:
+ *     GREEN if last tick was DOWN and ≥ 2 of last 5 ticks were DOWN.
+ *
+ *   DIGITMATCH (target digit):
+ *     GREEN if target appeared in last 7 ticks BUT NOT in the last 2 ticks.
+ *     (Hot but not just hit — peak probability window.)
+ *
+ *   DIGITDIFF (target digit):
+ *     GREEN if target digit NOT in last 8 ticks (cold enough to safely exclude).
+ */
+function isGreenLight(
+  digits: number[],
+  prices: number[],
+  contractType: SpeedContractType,
+  barrier: number | undefined,
+): boolean {
+  const lastDigit = digits[digits.length - 1];
+
+  switch (contractType) {
+    case "DIGITOVER": {
+      if (barrier === undefined) return true;
+      const reversal  = lastDigit !== undefined && lastDigit <= barrier;
+      const momentum  = momentumRate(digits, contractType, barrier, 10) >= 0.65;
+      return reversal || momentum;
+    }
+    case "DIGITUNDER": {
+      if (barrier === undefined) return true;
+      const reversal  = lastDigit !== undefined && lastDigit >= barrier;
+      const momentum  = momentumRate(digits, contractType, barrier, 10) >= 0.65;
+      return reversal || momentum;
+    }
+    case "DIGITEVEN": {
+      const reversal  = lastDigit !== undefined && lastDigit % 2 !== 0;
+      const momentum  = momentumRate(digits, contractType, undefined, 10) >= 0.60;
+      return reversal || momentum;
+    }
+    case "DIGITODD": {
+      const reversal  = lastDigit !== undefined && lastDigit % 2 === 0;
+      const momentum  = momentumRate(digits, contractType, undefined, 10) >= 0.60;
+      return reversal || momentum;
+    }
+    case "CALL": {
+      if (prices.length < 3) return true;
+      const lastUp = prices[prices.length - 1] > prices[prices.length - 2];
+      const last5  = prices.slice(-5);
+      let ups = 0;
+      for (let i = 1; i < last5.length; i++) if (last5[i] > last5[i - 1]) ups++;
+      return lastUp && ups >= 2;
+    }
+    case "PUT": {
+      if (prices.length < 3) return true;
+      const lastDown = prices[prices.length - 1] < prices[prices.length - 2];
+      const last5    = prices.slice(-5);
+      let downs = 0;
+      for (let i = 1; i < last5.length; i++) if (last5[i] < last5[i - 1]) downs++;
+      return lastDown && downs >= 2;
+    }
+    case "DIGITMATCH": {
+      if (barrier === undefined) return true;
+      const last7 = digits.slice(-7);
+      const last2 = digits.slice(-2);
+      // Target digit appeared recently (hot) but not in the very last 2 ticks
+      return last7.includes(barrier) && !last2.includes(barrier);
+    }
+    case "DIGITDIFF": {
+      if (barrier === undefined) return true;
+      // Target digit has NOT appeared in the last 8 ticks (cold enough)
+      return !digits.slice(-8).includes(barrier);
+    }
+    default: return true;
+  }
+}
+
+/**
+ * FastRecoveryGate — selects the best recovery contract in under 2 seconds.
+ *
+ * Key differences from the old deepRecoveryGate (3-window consensus):
+ *  1. Single 60-tick window — no waiting for 100/150-tick agreement.
+ *     60 ticks is statistically sufficient and immediately available.
+ *  2. Always returns a candidate — never blocks indefinitely. Falls back to
+ *     best available even if below threshold (caller uses a hard attempt cap).
+ *  3. Green-light check is a SUGGESTION, not a gate. Caller allows 1 extra tick
+ *     if not green, then executes regardless.
+ *  4. Scores ALL user-selected recovery contract types simultaneously and picks
+ *     the highest-quality setup, not just the configured one.
+ *
+ * Adaptive threshold (slightly tighter after consecutive losses, still bounded):
+ *   0 consecutive recovery losses → minScore 52
+ *   1 loss                        → minScore 55
+ *   2+ losses                     → minScore 58
+ */
+function fastRecoveryGate(
+  symbol: string,
+  displayName: string,
+  contractTypes: SpeedContractType[],
+  barriers: number[],
   consecutiveLosses: number,
-): RecoveryCandidate | null {
-  // Adaptive thresholds — tighter after each consecutive recovery loss
-  const minWinP     = consecutiveLosses >= 2 ? 0.61 : consecutiveLosses >= 1 ? 0.57 : 0.54;
-  const maxSpread   = consecutiveLosses >= 2 ? 14   : consecutiveLosses >= 1 ? 18   : 22;
-  const minMomentum = consecutiveLosses >= 2 ? 0.56 : consecutiveLosses >= 1 ? 0.50 : 0.43;
+): { winner: MarketScore; greenLight: boolean } | null {
+  const minScore = consecutiveLosses >= 2 ? 58 : consecutiveLosses >= 1 ? 55 : 52;
+  const { overBarrier, underBarrier } = extractBarriers(barriers);
 
-  const digits60  = tickManager.getDigits(symbol, 60);
-  const digits100 = tickManager.getDigits(symbol, 100);
-  const digits150 = tickManager.getDigits(symbol, 150);
+  const digits = tickManager.getDigits(symbol, 60);
+  const prices = tickManager.getTicks(symbol, 50);
+  if (digits.length < 30) return null; // insufficient tick data
 
-  // All three windows need sufficient data (scoreMarket requires ≥50 for DIGIT contracts)
-  if (digits60.length < 45 || digits100.length < 70 || digits150.length < 90) return null;
-
-  const candidates: RecoveryCandidate[] = [];
+  const candidates: (MarketScore & { greenLight: boolean })[] = [];
 
   for (const ct of contractTypes) {
-    // Build the barrier sweep list for this contract type
-    let barriersToTry: Array<number | undefined>;
+    let barrier: number | undefined;
+    if      (ct === "DIGITOVER")  barrier = overBarrier;
+    else if (ct === "DIGITUNDER") barrier = underBarrier;
+    else if (ct === "DIGITMATCH") barrier = pickBestMatchBarrier(digits);
+    else if (ct === "DIGITDIFF")  barrier = pickBestDiffBarrier(digits);
 
-    if (ct === "DIGITOVER") {
-      // Search ALL valid OVER barriers — gate picks the one with best 3-window consensus
-      barriersToTry = [0, 1, 2, 3, 4, 5, 6, 7, 8];
-    } else if (ct === "DIGITUNDER") {
-      barriersToTry = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-    } else if (ct === "DIGITMATCH" || ct === "DIGITDIFF") {
-      // Auto-select hottest / coldest digit from the 150-tick baseline
-      const freq = digitFrequency(digits150);
-      barriersToTry = [pickMatchDiffBarrier(freq, ct)];
-    } else {
-      barriersToTry = [undefined]; // DIGITEVEN / DIGITODD / CALL / PUT — no barrier
-    }
+    const result = precisionScore(symbol, displayName, ct, barrier, digits, prices);
+    if (!result) continue;
+    if (result.score < minScore) continue;
 
-    for (const b of barriersToTry) {
-      // Score each window independently using the same scoreMarket function
-      const s60  = scoreMarket(symbol, displayName, ct, b, digits60,  []);
-      const s100 = scoreMarket(symbol, displayName, ct, b, digits100, []);
-      const s150 = scoreMarket(symbol, displayName, ct, b, digits150, []);
-      if (!s60 || !s100 || !s150) continue;
-
-      const minWP  = Math.min(s60.winProbability, s100.winProbability, s150.winProbability);
-      const avgSc  = (s60.score + s100.score + s150.score) / 3;
-      const spread = Math.max(s60.score, s100.score, s150.score)
-                   - Math.min(s60.score, s100.score, s150.score);
-      const payout = s150.payout;
-      const ev     = minWP * (payout - 1) - (1 - minWP); // EV using conservative (lowest) winP
-
-      // ── Gate battery — every condition must pass ───────────────────────────
-      if (minWP  < minWinP)          continue; // all 3 windows must agree on edge strength
-      if (spread > maxSpread)        continue; // reject unstable patterns / noise spikes
-      if (ev     <= 0)               continue; // must have positive EV even in worst window
-      if (avgSc  < MIN_RECOVERY_SCORE) continue; // quality floor
-
-      // Momentum: what fraction of the last 8 ticks already satisfies the bet
-      const momentum = momentumAlignment(digits150, ct, b, 8);
-      if (momentum < minMomentum) continue; // market must be aligned RIGHT NOW
-
-      // Composite ranking: min win probability weighted most, then stability, then momentum
-      const composite = minWP * 0.50 + (1 - spread / 100) * 0.25 + momentum * 0.25;
-
-      candidates.push({
-        contractType:   ct,
-        barrier:        b,
-        payout,
-        minWinP:        minWP,
-        avgScore:       avgSc,
-        spread,
-        ev,
-        momentumScore:  momentum,
-        compositeScore: composite,
-        reason: `${ct}${b !== undefined ? ` ${b}` : ""} — ${(minWP * 100).toFixed(1)}% min-consensus (60/100/150t), momentum ${(momentum * 100).toFixed(0)}%, spread ${spread.toFixed(0)}, EV${ev >= 0 ? "+" : ""}${(ev * 100).toFixed(1)}%`,
-      });
-    }
+    const gl = isGreenLight(digits, prices, ct, barrier);
+    candidates.push({ ...result, greenLight: gl });
   }
 
   if (candidates.length === 0) return null;
 
-  // Pick highest composite score
-  candidates.sort((a, b) => b.compositeScore - a.compositeScore);
-  return candidates[0]!;
+  // Rank: green-light candidates first, then by score descending
+  candidates.sort((a, b) => {
+    if (a.greenLight !== b.greenLight) return a.greenLight ? -1 : 1;
+    return b.score - a.score;
+  });
+
+  const best = candidates[0]!;
+  return { winner: best, greenLight: best.greenLight };
 }
 
+// ── Market ranking functions ───────────────────────────────────────────────────
+
+/**
+ * Score all markets for a given set of contract types and barriers.
+ * Uses precisionScore (5-signal) instead of the old single-formula scoreMarket.
+ * Returns markets sorted by score descending.
+ */
 export async function analyzeMarketsForStrategy(
   contractTypes: SpeedContractType[],
   barriers: number[],
@@ -470,51 +620,20 @@ export async function analyzeMarketsForStrategy(
   for (const market of DERIV_MARKETS) {
     if (!market.digitEnabled && contractTypes.some(ct => ct.startsWith("DIGIT"))) continue;
 
-    // ── Dual-window tick data ──────────────────────────────────────────────────
-    // Primary (150-tick): stable, representative signal.
-    // Recent  ( 50-tick): short-term check — catches regime changes the longer
-    //                     window would absorb but which make the bet riskier NOW.
-    const digits150 = tickManager.getDigits(market.symbol, 150);
-    const digits50  = tickManager.getDigits(market.symbol, 50);
-    const prices    = tickManager.getTicks(market.symbol, 100);
-    // Fall back to a combined 200-tick read when we don't have enough for both windows
-    const digitsMain = digits150.length >= 80 ? digits150 : tickManager.getDigits(market.symbol, 200);
+    const digits = tickManager.getDigits(market.symbol, 60);
+    const prices = tickManager.getTicks(market.symbol, 50);
 
     for (const ct of contractTypes) {
       let barrier: number | undefined;
-      if (ct === "DIGITOVER") {
-        barrier = overBarrier;
-      } else if (ct === "DIGITUNDER") {
-        barrier = underBarrier;
-      } else if (ct === "DIGITMATCH" || ct === "DIGITDIFF") {
-        // Barrier selection on the more stable long window
-        const freq = digitFrequency(digitsMain);
-        barrier = pickMatchDiffBarrier(freq, ct);
+      if      (ct === "DIGITOVER")                     barrier = overBarrier;
+      else if (ct === "DIGITUNDER")                    barrier = underBarrier;
+      else if (ct === "DIGITMATCH" || ct === "DIGITDIFF") {
+        if (digits.length < 30) continue;
+        barrier = ct === "DIGITMATCH" ? pickBestMatchBarrier(digits) : pickBestDiffBarrier(digits);
       }
 
-      // Primary score on the main (longer) window
-      const s = scoreMarket(market.symbol, market.displayName, ct, barrier, digitsMain, prices);
-      if (!s) continue;
-
-      // ── Window consistency cross-check ─────────────────────────────────────
-      // When we have enough ticks for both windows, compare the short-term signal
-      // against the long-term baseline.  A big disagreement means the pattern is
-      // noisy or regime-shifting — penalise the score rather than reject entirely
-      // so we always have a ranked result for the fallback path.
-      if (digits50.length >= 40 && digits150.length >= 80) {
-        const s50 = scoreMarket(market.symbol, market.displayName, ct, barrier, digits50, prices);
-        if (s50) {
-          const windowDelta = Math.abs(s.score - s50.score);
-          // Each point of disagreement above 10 shaves 0.6 pts from the score
-          if (windowDelta > 10) {
-            s.score = Math.max(0, s.score - Math.round((windowDelta - 10) * 0.6));
-          }
-          // Conservative blend: weight the short-term (recent) window at 40%
-          s.winProbability = s.winProbability * 0.6 + s50.winProbability * 0.4;
-        }
-      }
-
-      scored.push(s);
+      const s = precisionScore(market.symbol, market.displayName, ct, barrier, digits, prices);
+      if (s) scored.push(s);
     }
   }
 
@@ -522,8 +641,8 @@ export async function analyzeMarketsForStrategy(
 }
 
 /**
- * Score a single market symbol across the given contract types and return the best setup.
- * Barriers are the exact values the user configured — never substituted or auto-picked for OVER/UNDER.
+ * Score a single locked market across the given contract types and return the best setup.
+ * Barriers are the exact values the user configured for OVER/UNDER.
  */
 export async function scoreSingleMarket(
   symbol: string,
@@ -531,42 +650,29 @@ export async function scoreSingleMarket(
   contractTypes: SpeedContractType[],
   barriers: number[],
 ): Promise<MarketScore | null> {
-  const digits = tickManager.getDigits(symbol, 200);
-  const prices = tickManager.getTicks(symbol, 100);
-  const scored: MarketScore[] = [];
+  const digits = tickManager.getDigits(symbol, 60);
+  const prices = tickManager.getTicks(symbol, 50);
   const { overBarrier, underBarrier } = extractBarriers(barriers);
+  const scored: MarketScore[] = [];
 
   for (const ct of contractTypes) {
-    if (ct === "DIGITOVER") {
-      const s = scoreMarket(symbol, displayName, ct, overBarrier, digits, prices);
-      if (s) scored.push(s);
-    } else if (ct === "DIGITUNDER") {
-      const s = scoreMarket(symbol, displayName, ct, underBarrier, digits, prices);
-      if (s) scored.push(s);
-    } else if (ct === "DIGITMATCH" || ct === "DIGITDIFF") {
-      const freq = digitFrequency(digits);
-      const b = pickMatchDiffBarrier(freq, ct);
-      const s = scoreMarket(symbol, displayName, ct, b, digits, prices);
-      if (s) scored.push(s);
-    } else {
-      const s = scoreMarket(symbol, displayName, ct, undefined, digits, prices);
-      if (s) scored.push(s);
-    }
+    let barrier: number | undefined;
+    if      (ct === "DIGITOVER")  barrier = overBarrier;
+    else if (ct === "DIGITUNDER") barrier = underBarrier;
+    else if (ct === "DIGITMATCH") barrier = pickBestMatchBarrier(digits);
+    else if (ct === "DIGITDIFF")  barrier = pickBestDiffBarrier(digits);
+
+    const s = precisionScore(symbol, displayName, ct, barrier, digits, prices);
+    if (s) scored.push(s);
   }
 
   return scored.sort((a, b) => b.score - a.score)[0] ?? null;
 }
 
 /**
- * Scan ALL markets for both normal and recovery contract settings, then return
- * the single best market ranked by a weighted combined score (recovery weighted 60%,
- * normal 40% — recovery is where losses compound so it matters more).
- *
- * No skip logic: every market in DERIV_MARKETS is evaluated regardless of
- * digitEnabled — scoreMarket already returns null when insufficient data exists.
- *
- * Broadcasts SSE "speed_ai_scan_progress" events as each market is evaluated so
- * the frontend can animate the scan progress in real time.
+ * Full market scan — evaluates every market for both normal and recovery settings.
+ * Recovery is weighted 60% (where losses compound) vs normal 40%.
+ * Emits SSE progress events so the frontend can animate the scan in real time.
  */
 export async function scanBestMarket(config: SpeedAIConfig): Promise<ScanResult> {
   const candidatesBySymbol = new Map<string, MarketScore>();
@@ -574,7 +680,6 @@ export async function scanBestMarket(config: SpeedAIConfig): Promise<ScanResult>
   let scanned = 0;
 
   for (const market of DERIV_MARKETS) {
-    // Emit: this market is now being analyzed
     broadcastSSE("speed_ai_scan_progress", {
       scanning: market.displayName,
       symbol: market.symbol,
@@ -583,64 +688,44 @@ export async function scanBestMarket(config: SpeedAIConfig): Promise<ScanResult>
       results: [...candidatesBySymbol.values()].sort((a, b) => b.score - a.score),
     });
 
-    // Score normal contracts on this market
-    const normalBest = await scoreSingleMarket(
-      market.symbol, market.displayName,
-      config.normalContractTypes, config.normalBarriers,
-    );
-
-    // Score recovery contracts on this market
-    const recoveryBest = await scoreSingleMarket(
-      market.symbol, market.displayName,
-      config.recoveryContractTypes, config.recoveryBarriers,
-    );
+    const normalBest   = await scoreSingleMarket(market.symbol, market.displayName, config.normalContractTypes,   config.normalBarriers);
+    const recoveryBest = await scoreSingleMarket(market.symbol, market.displayName, config.recoveryContractTypes, config.recoveryBarriers);
 
     scanned++;
-
-    // Deliberate pause per market so the scan feels real-time to the user
-    // and each market's SSE event reaches the frontend before the next one fires.
-    await sleep(280);
+    await sleep(280); // pacing so SSE events reach the frontend before next fires
 
     if (!normalBest && !recoveryBest) continue;
 
-    const normalScore  = normalBest?.score  ?? 0;
+    const normalScore   = normalBest?.score   ?? 0;
     const recoveryScore = recoveryBest?.score ?? 0;
-    // Weight recovery 60% — that's where losses compound and correct positioning matters most
     const combinedScore = Math.round((normalScore * 0.4 + recoveryScore * 0.6) * 10) / 10;
 
     const base = normalBest ?? recoveryBest!;
     candidatesBySymbol.set(market.symbol, {
       ...base,
-      score:               combinedScore,
-      normalScore:         Math.round(normalScore  * 10) / 10,
-      recoveryScore:       Math.round(recoveryScore * 10) / 10,
+      score:                combinedScore,
+      normalScore:          Math.round(normalScore   * 10) / 10,
+      recoveryScore:        Math.round(recoveryScore * 10) / 10,
       recoveryContractType: recoveryBest?.contractType,
-      recoveryBarrier:     recoveryBest?.barrier,
+      recoveryBarrier:      recoveryBest?.barrier,
     });
   }
 
-  // Final progress — scan complete
   const allScored = [...candidatesBySymbol.values()].sort((a, b) => b.score - a.score);
+
   broadcastSSE("speed_ai_scan_progress", {
-    scanning: null,
-    symbol: null,
-    scanned: total,
-    total,
+    scanning: null, symbol: null,
+    scanned: total, total,
     results: allScored,
   });
 
   if (allScored.length === 0) {
-    return {
-      suitable: false,
-      best: null,
-      allScored: [],
-      reason: "No tick data available yet — wait a few seconds and scan again",
-    };
+    return { suitable: false, best: null, allScored: [], reason: "No tick data available yet — wait a few seconds and scan again" };
   }
 
-  const best = allScored[0];
+  const best     = allScored[0];
   const suitable = best.score >= SUITABLE_SCORE_THRESHOLD;
-  const reason = suitable
+  const reason   = suitable
     ? `${best.displayName} has a strong edge (score ${best.score.toFixed(0)}/100) for your settings`
     : `No market shows a clear edge yet — best was ${best.displayName} at ${best.score.toFixed(0)}/100`;
 
@@ -668,11 +753,11 @@ function computeRecoveryStake(
     return Math.max(0.35, Math.min(stake, maxStake));
   }
 
-  // Split: progressive cap
-  const stepOffset = Math.max(0, rec.recoveryStep - 1);
+  // Split: progressive cap per step
+  const stepOffset     = Math.max(0, rec.recoveryStep - 1);
   const payoutImpliedMin = (1 / netPayout) * 1.05;
-  const effective = Math.max(baseMultiplier, payoutImpliedMin) + stepOffset;
-  const splitCap = rec.baseStake * effective;
+  const effective      = Math.max(baseMultiplier, payoutImpliedMin) + stepOffset;
+  const splitCap       = rec.baseStake * effective;
   return Math.max(0.35, Math.min(minRecovery, splitCap, maxStake));
 }
 
@@ -689,15 +774,12 @@ function recordRecoveryOutcome(
       if (remaining <= 0.005) {
         return { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: rec.baseStake, consecutiveRecoveryLosses: 0 };
       }
-      // Partial win while in recovery: clear the consecutive loss streak
       return { ...rec, unrecoveredAmount: remaining, consecutiveRecoveryLosses: 0 };
     }
     return rec;
   }
   // Loss
   if (!rec.inRecovery) {
-    // First loss — entering recovery. consecutiveRecoveryLosses starts at 0
-    // because the normal trade that lost is NOT a recovery trade.
     return {
       inRecovery: true,
       recoveryStep: 1,
@@ -706,7 +788,6 @@ function recordRecoveryOutcome(
       consecutiveRecoveryLosses: 0,
     };
   }
-  // Already in recovery and lost again — this IS a consecutive recovery loss
   return {
     ...rec,
     recoveryStep: Math.min(rec.recoveryStep + 1, Math.max(1, maxSteps)),
@@ -715,74 +796,9 @@ function recordRecoveryOutcome(
   };
 }
 
-// ── Minimum score for a normal trade ─────────────────────────────────────────
-// Trades below this threshold are skipped — a low-quality setup is more likely
-// to cause a recovery spiral than produce a win. 50/100 is deliberately set at
-// "meaningful edge" not "theoretical best available".
-const MIN_TRADE_SCORE = 50;
-
-// ── Live-tick pattern confirmation ────────────────────────────────────────────
-/**
- * Quick sanity check on the CURRENT live digit buffer before placing a recovery
- * trade. Returns false when the last few live ticks directly contradict the
- * prediction — a signal that the pattern has not yet aligned and waiting one
- * tick cycle is safer than executing immediately.
- *
- * This is intentionally a lightweight, fast check — NOT a second full analysis.
- * It only catches the most obvious "the market is doing the exact opposite right
- * now" scenarios. The intelligent recovery scanner (dual-window) already handles
- * deeper quality validation for its candidates.
- */
-function hasPatternConfirmation(
-  symbol: string,
-  contractType: SpeedContractType,
-  barrier: number | undefined,
-): boolean {
-  const recent = tickManager.getDigits(symbol, 5);
-  if (recent.length < 3) return true; // insufficient data — do not block
-
-  const last3 = recent.slice(-3);
-
-  switch (contractType) {
-    case "DIGITOVER": {
-      if (barrier === undefined) return true;
-      // Bad sign: ALL last-3 digits were ≤ barrier (persistent low-digit pattern)
-      return !last3.every(d => d <= barrier!);
-    }
-    case "DIGITUNDER": {
-      if (barrier === undefined) return true;
-      // Bad sign: ALL last-3 digits were ≥ barrier (persistent high-digit pattern)
-      return !last3.every(d => d >= barrier!);
-    }
-    case "DIGITDIFF": {
-      if (barrier === undefined) return true;
-      // Bad sign: target digit appeared in BOTH of the last 2 ticks — currently very hot
-      const last2 = recent.slice(-2);
-      return !last2.every(d => d === barrier);
-    }
-    case "DIGITMATCH": {
-      if (barrier === undefined) return true;
-      // Bad sign: target digit has not appeared at all in the last 5 ticks — too cold
-      return recent.includes(barrier!);
-    }
-    case "DIGITEVEN": {
-      // Bad sign: ALL last-3 digits were odd (strongly odd-biased recent ticks)
-      return !last3.every(d => d % 2 !== 0);
-    }
-    case "DIGITODD": {
-      // Bad sign: ALL last-3 digits were even (strongly even-biased recent ticks)
-      return !last3.every(d => d % 2 === 0);
-    }
-    default:
-      return true;
-  }
-}
-
-// ── Sleep helper ──────────────────────────────────────────────────────────────
+// ── Sleep / broadcast helpers ─────────────────────────────────────────────────
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
-
-// ── Broadcast helper ──────────────────────────────────────────────────────────
 
 function broadcast() {
   broadcastSSE("speed_ai_update", getStatus());
@@ -792,30 +808,30 @@ function broadcast() {
 
 export function getStatus(): SpeedAIStatus {
   return {
-    running: session.running,
-    sessionId: session.sessionId,
-    totalProfit: Math.round(session.totalProfit * 100) / 100,
-    tradeCount: session.tradeCount,
-    winCount: session.winCount,
-    lossCount: session.lossCount,
-    currentStake: session.currentStake,
-    inRecovery: session.recovery.inRecovery,
-    recoveryStep: session.recovery.recoveryStep,
-    unrecoveredAmount: Math.round(session.recovery.unrecoveredAmount * 100) / 100,
+    running:                   session.running,
+    sessionId:                 session.sessionId,
+    totalProfit:               Math.round(session.totalProfit * 100) / 100,
+    tradeCount:                session.tradeCount,
+    winCount:                  session.winCount,
+    lossCount:                 session.lossCount,
+    currentStake:              session.currentStake,
+    inRecovery:                session.recovery.inRecovery,
+    recoveryStep:              session.recovery.recoveryStep,
+    unrecoveredAmount:         Math.round(session.recovery.unrecoveredAmount * 100) / 100,
     consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses,
-    currentMarket: session.currentMarket,
-    currentContractType: session.currentContractType,
-    lastResult: session.lastResult,
-    config: session.config ?? undefined,
-    message: session.message,
-    topMarkets: session.topMarkets.slice(0, 6),
+    currentMarket:             session.currentMarket,
+    currentContractType:       session.currentContractType,
+    lastResult:                session.lastResult,
+    config:                    session.config ?? undefined,
+    message:                   session.message,
+    topMarkets:                session.topMarkets.slice(0, 6),
   };
 }
 
 export function stopSession() {
   session.stopRequested = true;
-  session.running = false;
-  session.message = "Session stopped by user";
+  session.running       = false;
+  session.message       = "Session stopped by user";
   broadcast();
   logger.info("SpeedAI session stop requested");
 }
@@ -823,24 +839,23 @@ export function stopSession() {
 export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean; error?: string }> {
   if (session.running) return { ok: false, error: "A SpeedAI session is already running" };
 
-  // Validate config
-  if (config.stake < 0.35) return { ok: false, error: "Minimum stake is $0.35" };
-  if (config.stopLoss <= 0) return { ok: false, error: "Stop loss must be positive" };
-  if (config.takeProfit <= 0) return { ok: false, error: "Take profit must be positive" };
-  if (config.normalContractTypes.length === 0) return { ok: false, error: "Select at least one normal contract type" };
+  if (config.stake < 0.35)             return { ok: false, error: "Minimum stake is $0.35" };
+  if (config.stopLoss <= 0)            return { ok: false, error: "Stop loss must be positive" };
+  if (config.takeProfit <= 0)          return { ok: false, error: "Take profit must be positive" };
+  if (config.normalContractTypes.length   === 0) return { ok: false, error: "Select at least one normal contract type" };
   if (config.recoveryContractTypes.length === 0) return { ok: false, error: "Select at least one recovery contract type" };
 
   session = {
-    running: true,
-    sessionId: `spd_${Date.now()}`,
+    running:    true,
+    sessionId:  `spd_${Date.now()}`,
     config,
     totalProfit: 0,
-    tradeCount: 0,
-    winCount: 0,
-    lossCount: 0,
+    tradeCount:  0,
+    winCount:    0,
+    lossCount:   0,
     currentStake: config.stake,
     recovery: { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: config.stake, consecutiveRecoveryLosses: 0 },
-    topMarkets: [],
+    topMarkets:   [],
     stopRequested: false,
     message: "Analyzing markets…",
   };
@@ -848,7 +863,6 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
   logger.info({ config }, "SpeedAI session starting");
   broadcast();
 
-  // Run the loop in the background (fire-and-forget)
   runLoop(config).catch(err => {
     logger.error({ err }, "SpeedAI loop crashed");
     session.running = false;
@@ -862,20 +876,22 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
 // ── Trade loop ─────────────────────────────────────────────────────────────────
 
 async function runLoop(config: SpeedAIConfig) {
-  const accounts = await db.select().from(accountsTable).limit(1);
-  const settings = await db.select().from(settingsTable).limit(1);
+  // Always trade on the active account (real vs demo switch respected)
+  let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
+  if (accounts.length === 0) accounts = await db.select().from(accountsTable).limit(1);
+
+  const settings      = await db.select().from(settingsTable).limit(1);
   const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
-  const token = getCachedToken() ?? (accounts.length > 0 ? accounts[0].token ?? null : null);
+  // Prefer module-level cache; fall back to DB bearer token then legacy PAT
+  const token    = getCachedToken() ?? (accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null);
   const currency = accounts.length > 0 ? accounts[0].currency : "USD";
-  const isLive = !paperTradeMode && !!token;
+  const isLive   = !paperTradeMode && !!token;
   const maxStake = settings.length > 0 ? Number(settings[0].maxTradeStake) : 500;
 
-  // Resolve the locked market object once (if symbol is locked)
   const lockedDerivsMarket = config.lockedSymbol
     ? DERIV_MARKETS.find(m => m.symbol === config.lockedSymbol) ?? null
     : null;
 
-  // Guard: if a lock was requested but the symbol isn't in DERIV_MARKETS, abort immediately
   if (config.lockedSymbol && !lockedDerivsMarket) {
     session.running = false;
     session.message = `⚠️ Market ${config.lockedSymbol} not found — session aborted`;
@@ -884,40 +900,30 @@ async function runLoop(config: SpeedAIConfig) {
     return;
   }
 
-  // ── Execution latency tracker ──────────────────────────────────────────────
-  // Exponential moving average of round-trip time from proposal to settlement.
-  // Logged every trade so timing regressions are visible in server logs.
+  // Execution latency EMA (logged each trade for regression visibility)
   let avgExecLatencyMs = 800;
 
-  // ── Pre-analyzed result cache ──────────────────────────────────────────────
-  // Market analysis is kicked off in parallel with the post-trade sleep so the
-  // next iteration can start executing immediately without waiting for scan time.
-  // Null means the next iteration must scan fresh.
+  // Pre-analyzed cache: market analysis runs in parallel with the post-trade
+  // pause so the next iteration starts executing immediately — no scan latency.
   let preAnalyzedScored: MarketScore[] | null = null;
 
   while (session.running && !session.stopRequested) {
-    // ── Determine trade mode (normal vs recovery) ──────────────────────────
-    const inRecovery = session.recovery.inRecovery;
+    // ── Mode: normal or recovery ───────────────────────────────────────────────
+    const inRecovery    = session.recovery.inRecovery;
     const contractTypes = inRecovery ? config.recoveryContractTypes : config.normalContractTypes;
-    const barriers = inRecovery ? config.recoveryBarriers : config.normalBarriers;
+    const barriers      = inRecovery ? config.recoveryBarriers      : config.normalBarriers;
 
-    // ── Find best setup ────────────────────────────────────────────────────
+    // ── Find best market setup ─────────────────────────────────────────────────
     let best: MarketScore | undefined;
 
     if (lockedDerivsMarket) {
-      // Locked market mode — use pre-analyzed if it covers this symbol
       const cached = preAnalyzedScored?.find(m => m.symbol === lockedDerivsMarket.symbol);
       preAnalyzedScored = null;
 
       if (cached) {
         best = cached;
       } else {
-        const result = await scoreSingleMarket(
-          lockedDerivsMarket.symbol,
-          lockedDerivsMarket.displayName,
-          contractTypes,
-          barriers,
-        );
+        const result = await scoreSingleMarket(lockedDerivsMarket.symbol, lockedDerivsMarket.displayName, contractTypes, barriers);
         if (!result) {
           session.message = "Waiting for tick data on locked market…";
           broadcast();
@@ -928,9 +934,8 @@ async function runLoop(config: SpeedAIConfig) {
       }
       session.topMarkets = [best];
     } else {
-      // Free scan mode — use pre-analyzed batch if available
       if (preAnalyzedScored) {
-        const scored = preAnalyzedScored;
+        const scored      = preAnalyzedScored;
         preAnalyzedScored = null;
         session.topMarkets = scored;
         if (scored.length === 0) {
@@ -939,9 +944,6 @@ async function runLoop(config: SpeedAIConfig) {
           await sleep(3000);
           continue;
         }
-        // Quality floor: skip this cycle if no market meets the minimum trade score.
-        // Trading a low-quality setup (< MIN_TRADE_SCORE) is more likely to cause
-        // a recovery spiral than to win.
         if (scored[0].score < MIN_TRADE_SCORE) {
           session.message = `No high-quality setup (best ${scored[0].score}/100) — waiting for edge…`;
           broadcast();
@@ -972,122 +974,175 @@ async function runLoop(config: SpeedAIConfig) {
       }
     }
 
-    // ── Recovery: deep multi-window consensus gate ────────────────────────────
-    // Recovery trades go through a strict 3-window consensus check (60t/100t/150t)
-    // + last-8-tick momentum alignment before executing. Normal trades use the
-    // lighter hasPatternConfirmation check (sufficient for non-compounding trades).
+    // ── Gate: recovery (fast, bounded) vs normal (lightweight) ────────────────
     if (inRecovery) {
-      const consLosses = session.recovery.consecutiveRecoveryLosses;
-      const candidate  = deepRecoveryGate(
-        best.symbol,
-        best.displayName,
-        config.recoveryContractTypes,
-        barriers,
-        consLosses,
-      );
+      // ── FastRecoveryGate: max 3 attempts × ~600 ms = under 2 seconds ──────
+      const consLosses   = session.recovery.consecutiveRecoveryLosses;
+      const baseWaitMs   = consLosses >= 2 ? 700 : consLosses >= 1 ? 600 : 500;
+      const maxAttempts  = 3;
+      let candidate: { winner: MarketScore; greenLight: boolean } | null = null;
 
-      if (!candidate) {
-        // No high-confidence entry — scale wait time with consecutive losses
-        const waitMs = consLosses >= 2 ? 2000 : consLosses >= 1 ? 1200 : 700;
-        session.message = `⏳ Awaiting high-confidence recovery entry${consLosses > 0 ? ` (${consLosses} consec. loss${consLosses > 1 ? "es" : ""})` : ""}…`;
-        broadcast();
-        logger.info(
-          { symbol: best.symbol, consLosses },
-          "SpeedAI recovery gate: no 3-window consensus — waiting for alignment",
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        candidate = fastRecoveryGate(
+          best.symbol, best.displayName,
+          config.recoveryContractTypes, barriers, consLosses,
         );
+        if (candidate) break;
+
+        session.message = `⏳ Recovery analysis${consLosses > 0 ? ` (${consLosses} loss${consLosses > 1 ? "es" : ""})` : ""}…`;
+        broadcast();
         preAnalyzedScored = null;
-        await sleep(waitMs);
-        continue;
+        await sleep(baseWaitMs);
+        if (!session.running || session.stopRequested) break;
       }
 
-      // Deep gate won — override `best` with the consensus-selected contract + barrier
+      // Adaptive fallback: if no candidate cleared the threshold, lower it and
+      // pick the best available. Never block recovery indefinitely.
+      if (!candidate) {
+        const fallDigits = tickManager.getDigits(best.symbol, 60);
+        const fallPrices = tickManager.getTicks(best.symbol, 50);
+        const { overBarrier: fo, underBarrier: fu } = extractBarriers(barriers);
+        let bestFallback: MarketScore | null = null;
+
+        for (const ct of config.recoveryContractTypes) {
+          let fb: number | undefined;
+          if      (ct === "DIGITOVER")  fb = fo;
+          else if (ct === "DIGITUNDER") fb = fu;
+          else if (ct === "DIGITMATCH") fb = pickBestMatchBarrier(fallDigits);
+          else if (ct === "DIGITDIFF")  fb = pickBestDiffBarrier(fallDigits);
+
+          const s = precisionScore(best.symbol, best.displayName, ct, fb, fallDigits, fallPrices);
+          if (s && (!bestFallback || s.score > bestFallback.score)) bestFallback = s;
+        }
+
+        if (bestFallback) {
+          const gl = isGreenLight(fallDigits, fallPrices, bestFallback.contractType, bestFallback.barrier);
+          candidate = { winner: bestFallback, greenLight: gl };
+          logger.info({ symbol: best.symbol, score: bestFallback.score, consLosses },
+            "SpeedAI recovery: using adaptive fallback (threshold lowered)");
+        } else {
+          // Truly no data — wait one cycle
+          session.message = "⏳ Waiting for market data for recovery…";
+          broadcast();
+          preAnalyzedScored = null;
+          await sleep(1000);
+          continue;
+        }
+      }
+
+      // Green-light check: wait at most 1 extra tick (~600 ms) then execute regardless
+      if (!candidate.greenLight) {
+        await sleep(600);
+        if (!session.running || session.stopRequested) break;
+        const freshDigits = tickManager.getDigits(best.symbol, 60);
+        const freshPrices = tickManager.getTicks(best.symbol, 50);
+        const refreshed   = fastRecoveryGate(
+          best.symbol, best.displayName,
+          config.recoveryContractTypes, barriers, consLosses,
+        );
+        if (refreshed) candidate = refreshed;
+        // Even if still not green, we execute — never wait beyond this point
+      }
+
+      // Override best with the recovery candidate
       best = {
         ...best,
-        contractType:   candidate.contractType,
-        barrier:        candidate.barrier,
-        payout:         candidate.payout,
-        winProbability: candidate.minWinP,
-        score:          Math.round(candidate.avgScore),
-        reason:         candidate.reason,
+        contractType:   candidate.winner.contractType,
+        barrier:        candidate.winner.barrier,
+        payout:         candidate.winner.payout,
+        winProbability: candidate.winner.winProbability,
+        score:          candidate.winner.score,
+        reason:         candidate.winner.reason,
       };
 
-      logger.info(
-        {
-          symbol:        best.symbol,
-          contractType:  best.contractType,
-          barrier:       best.barrier,
-          minWinP:       candidate.minWinP,
-          spread:        candidate.spread,
-          momentum:      candidate.momentumScore,
-          composite:     candidate.compositeScore,
-          consLosses,
-        },
-        "SpeedAI recovery gate: 3-window consensus passed",
-      );
+      logger.info({
+        symbol:       best.symbol,
+        contractType: best.contractType,
+        barrier:      best.barrier,
+        score:        best.score,
+        winP:         best.winProbability,
+        greenLight:   candidate.greenLight,
+        consLosses,
+      }, "SpeedAI recovery: fast gate complete");
+
     } else {
-      // Normal trade — lightweight directional check is sufficient
-      if (!hasPatternConfirmation(best.symbol, best.contractType, best.barrier)) {
-        session.message = `⏳ Pattern check: waiting for better entry on ${best.displayName}…`;
-        broadcast();
-        preAnalyzedScored = null;
-        await sleep(1200);
-        continue;
+      // ── Normal trade: green-light check, max 2 × 400 ms wait ─────────────
+      const normalDigits = tickManager.getDigits(best.symbol, 60);
+      const normalPrices = tickManager.getTicks(best.symbol, 50);
+      const gl = isGreenLight(normalDigits, normalPrices, best.contractType, best.barrier);
+
+      if (!gl) {
+        if (best.score >= 70) {
+          // High-confidence setup → execute immediately regardless of timing
+          logger.info({ symbol: best.symbol, score: best.score },
+            "SpeedAI normal: high-score override (≥70) — skipping green-light wait");
+        } else {
+          // Wait up to 2 ticks for a better entry, then execute anyway
+          session.message = `⏳ Awaiting optimal entry on ${best.displayName}…`;
+          broadcast();
+          preAnalyzedScored = null;
+          for (let gl_retry = 0; gl_retry < 2; gl_retry++) {
+            await sleep(400);
+            if (!session.running || session.stopRequested) break;
+            const rDigits = tickManager.getDigits(best.symbol, 60);
+            const rPrices = tickManager.getTicks(best.symbol, 50);
+            if (isGreenLight(rDigits, rPrices, best.contractType, best.barrier)) break;
+          }
+          // After max retries, execute whatever we have — never skip a full cycle
+        }
       }
     }
 
+    // ── Compute stake and announce ─────────────────────────────────────────────
     const stake = Math.round(computeRecoveryStake(session.recovery, best.payout, config, maxStake) * 100) / 100;
 
-    session.currentMarket = best.displayName;
+    session.currentMarket       = best.displayName;
     session.currentContractType = best.contractType + (best.barrier !== undefined ? ` ${best.barrier}` : "");
-    session.currentStake = stake;
+    session.currentStake        = stake;
     session.message = `Trading ${best.contractType}${best.barrier !== undefined ? ` ${best.barrier}` : ""} on ${best.displayName}`;
     broadcast();
 
-    // ── Execute trade ──────────────────────────────────────────────────────
+    // ── Execute trade ──────────────────────────────────────────────────────────
     const execStart = Date.now();
     let won: boolean;
     let profit: number;
 
     if (isLive) {
       try {
-        // ── Barrier validation ────────────────────────────────────────────────
-        // Normal trades: enforce the user's configured barriers.
-        // Recovery trades: deepRecoveryGate already selected the optimal barrier
-        // via 3-window consensus — overriding it would defeat the analysis.
+        // Normal trades: enforce configured barriers (never drift from user's choice)
+        // Recovery trades: fastRecoveryGate already selected the optimal barrier
         if (!inRecovery) {
           const { overBarrier: cfgOver, underBarrier: cfgUnder } = extractBarriers(barriers);
-          if (best.contractType === "DIGITOVER" && best.barrier !== cfgOver) {
-            logger.error({ expected: cfgOver, actual: best.barrier, contractType: "DIGITOVER" },
-              "SpeedAI barrier mismatch — forcing configured OVER barrier");
+          if (best.contractType === "DIGITOVER"  && best.barrier !== cfgOver) {
+            logger.error({ expected: cfgOver,  actual: best.barrier }, "SpeedAI barrier mismatch — forcing configured OVER barrier");
             best = { ...best, barrier: cfgOver };
           }
           if (best.contractType === "DIGITUNDER" && best.barrier !== cfgUnder) {
-            logger.error({ expected: cfgUnder, actual: best.barrier, contractType: "DIGITUNDER" },
-              "SpeedAI barrier mismatch — forcing configured UNDER barrier");
+            logger.error({ expected: cfgUnder, actual: best.barrier }, "SpeedAI barrier mismatch — forcing configured UNDER barrier");
             best = { ...best, barrier: cfgUnder };
           }
         }
 
         logger.info({
-          symbol: best.symbol,
+          symbol:      best.symbol,
           contractType: best.contractType,
-          barrier: best.barrier,
-          stake: Math.round(stake * 100) / 100,
+          barrier:     best.barrier,
+          stake:       Math.round(stake * 100) / 100,
           inRecovery,
           consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses,
-        }, inRecovery ? "SpeedAI executing deep-gate recovery trade" : "SpeedAI executing normal trade");
+        }, inRecovery ? "SpeedAI executing fast-gate recovery trade" : "SpeedAI executing normal trade");
 
         const liveResult = await executeLiveTrade(token!, {
-          symbol: best.symbol,
+          symbol:       best.symbol,
           contractType: best.contractType,
-          stake: Math.round(stake * 100) / 100,
-          duration: 1,
+          stake:        Math.round(stake * 100) / 100,
+          duration:     1,
           durationUnit: "t",
           currency,
-          barrier: best.barrier,
+          barrier:      best.barrier,
         });
         const result = await waitForContractResult(token!, liveResult.contractId, 30_000);
-        won = result.won;
+        won    = result.won;
         profit = result.profit;
       } catch (err) {
         logger.warn({ err, symbol: best.symbol }, "SpeedAI live trade failed — skipping");
@@ -1097,14 +1152,14 @@ async function runLoop(config: SpeedAIConfig) {
         continue;
       }
     } else {
-      // Paper/demo simulation
-      won = Math.random() < best.winProbability;
+      // Paper / demo simulation
+      won    = Math.random() < best.winProbability;
       profit = won ? stake * (best.payout - 1) : -stake;
     }
 
-    // ── Track execution latency ────────────────────────────────────────────
+    // ── Track execution latency ────────────────────────────────────────────────
     const execLatencyMs = Date.now() - execStart;
-    avgExecLatencyMs = Math.round(avgExecLatencyMs * 0.7 + execLatencyMs * 0.3);
+    avgExecLatencyMs    = Math.round(avgExecLatencyMs * 0.7 + execLatencyMs * 0.3);
     if (isLive) {
       logger.info(
         { execLatencyMs, avgExecLatencyMs, symbol: best.symbol, contractType: best.contractType },
@@ -1112,30 +1167,29 @@ async function runLoop(config: SpeedAIConfig) {
       );
     }
 
-    // ── Record outcome ─────────────────────────────────────────────────────
+    // ── Record outcome ─────────────────────────────────────────────────────────
     session.tradeCount++;
     session.totalProfit = Math.round((session.totalProfit + profit) * 100) / 100;
-    if (won) { session.winCount++; session.lastResult = "won"; }
+    if (won) { session.winCount++;  session.lastResult = "won";  }
     else      { session.lossCount++; session.lastResult = "lost"; }
 
     session.recovery = recordRecoveryOutcome(session.recovery, won, profit, stake, config.maxRecoverySteps);
 
-    // Sync live balance
+    // Sync live balance — update only the active account
     if (isLive) {
       try {
         const newBal = await getLiveBalance(token!);
         if (newBal !== null && accounts.length > 0) {
-          const { db: _db, accountsTable: at } = await import("@workspace/db");
-          const { eq } = await import("drizzle-orm");
-          await _db.update(at).set({ balance: String(newBal), updatedAt: new Date() }).where(eq(at.id, accounts[0].id));
+          await db.update(accountsTable)
+            .set({ balance: String(newBal), updatedAt: new Date() })
+            .where(eq(accountsTable.id, accounts[0].id));
         }
       } catch { /* best-effort */ }
     }
 
-    // Broadcast immediately — zero delay between trade result and UI update
     broadcast();
 
-    // ── Check TP / SL ──────────────────────────────────────────────────────
+    // ── Check TP / SL ──────────────────────────────────────────────────────────
     if (session.totalProfit >= config.takeProfit) {
       session.running = false;
       session.message = `✅ Take profit $${config.takeProfit.toFixed(2)} reached! Session complete.`;
@@ -1150,25 +1204,22 @@ async function runLoop(config: SpeedAIConfig) {
       logger.info({ profit: session.totalProfit }, "SpeedAI stop loss triggered");
       return;
     }
-    // Max recovery steps reached → cap the multiplier at the last step stake but
-    // keep trading until SL or TP is hit.
     if (session.recovery.inRecovery && session.recovery.recoveryStep >= config.maxRecoverySteps) {
       session.message = `⚡ Recovery step ${config.maxRecoverySteps} — holding stake until debt cleared`;
       broadcast();
     }
 
-    // ── Pre-analyze next trade while pausing ──────────────────────────────────
-    // Kick off the next market scan in the background so the next iteration can
-    // execute immediately with a fresh result instead of waiting for analysis time.
-    // This effectively removes scan latency from the critical path on every trade.
-    const nextInRecovery = session.recovery.inRecovery;
+    // ── Pre-analyze next trade during the post-trade pause ────────────────────
+    // This overlaps scan time with the mandatory pause so the next iteration can
+    // execute immediately without waiting for analysis.
+    const nextInRecovery    = session.recovery.inRecovery;
     const nextContractTypes = nextInRecovery ? config.recoveryContractTypes : config.normalContractTypes;
-    const nextBarriers = nextInRecovery ? config.recoveryBarriers : config.normalBarriers;
+    const nextBarriers      = nextInRecovery ? config.recoveryBarriers      : config.normalBarriers;
 
-    // Adaptive pause duration:
-    // - Win → 400 ms (fast; no recovery debt to manage)
-    // - Loss → 1800 ms (market breathe time)
-    const pauseMs = isLive ? (won ? 400 : 1800) : 200;
+    // Adaptive pause:
+    //   Win  → 300 ms (keep the momentum, no recovery debt to manage)
+    //   Loss → 800 ms (brief market breath before recovery analysis)
+    const pauseMs = isLive ? (won ? 300 : 800) : 200;
 
     const preAnalyzePromise = lockedDerivsMarket
       ? scoreSingleMarket(lockedDerivsMarket.symbol, lockedDerivsMarket.displayName, nextContractTypes, nextBarriers)
@@ -1178,9 +1229,8 @@ async function runLoop(config: SpeedAIConfig) {
     await sleep(pauseMs);
     if (!session.running || session.stopRequested) break;
 
-    // Collect the pre-analyzed result; errors are non-fatal (next iteration scans fresh)
     try {
-      const result = await preAnalyzePromise;
+      const result  = await preAnalyzePromise;
       preAnalyzedScored = result.length > 0 ? result : null;
     } catch {
       preAnalyzedScored = null;
