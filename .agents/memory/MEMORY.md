@@ -41,4 +41,5 @@
 - [AI engine quality improvements](ai-engine-quality-improvements.md) — payout-calibrated split cap in recovery-engine.ts; digit ticks expanded to [1,3,5]; structural loss pattern detection blocks repeat losing combos.
 - [SpeedAI engine improvements](speed-ai-improvements.md) — RAF batching for SSE stops FAB freeze; pre-analysis overlaps post-trade sleep; recovery gate blocks 3rd consecutive loss until score ≥65.
 - [SpeedAI recovery scanner constraints](speed-ai-recovery-scanner.md) — tiered priority (OVER/UNDER → EVEN/ODD → DIGITMATCH); only barriers with ≥ user's payout; never DIGITDIFF or RISE/FALL.
+- [SpeedAI PrecisionAI v3](speed-ai-precision-v3.md) — contract-type-specific weights; 4 new helpers (streakAgainst, digitGap, markovToTarget, priceMomentum); 3-window scoring (30/60/100) throughout; enhanced green-light; normal retry → 3×.
 - [Deriv journal pagination](journal-pagination.md) — profit_table max 500/call; JournalManager chains offset pages until batch < 500; user had 3500+ trades before the cap caused analytics blackout.
