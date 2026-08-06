@@ -144,17 +144,11 @@ function HoloChart() {
   return <canvas ref={ref} width={140} height={140} style={{ imageRendering: "auto" }} />;
 }
 
-// ── Hexagon icon (SVG) ────────────────────────────────────────────────────────
+// ── NeuroAI logo ──────────────────────────────────────────────────────────────
 function HexIcon() {
   return (
     <div className="relative w-10 h-10 flex items-center justify-center">
-      <svg viewBox="0 0 40 40" width={40} height={40} className="absolute inset-0">
-        <polygon points="20,2 36,11 36,29 20,38 4,29 4,11" fill="rgba(76,201,255,0.08)" stroke="rgba(76,201,255,0.7)" strokeWidth="1.2" />
-      </svg>
-      <svg viewBox="0 0 16 16" width={16} height={16} className="relative z-10">
-        <polyline points="3,13 8,3 13,13" fill="none" stroke="#4CC9FF" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-        <line x1="5.5" y1="9" x2="10.5" y2="9" stroke="#4CC9FF" strokeWidth="1.8" strokeLinecap="round" />
-      </svg>
+      <img src="/neuroai-logo.png" alt="" aria-hidden="true" className="w-10 h-10 object-contain" />
     </div>
   );
 }

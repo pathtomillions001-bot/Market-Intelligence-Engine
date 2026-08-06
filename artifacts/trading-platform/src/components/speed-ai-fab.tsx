@@ -1248,7 +1248,12 @@ export function SpeedAIFab() {
             : "bg-gradient-to-br from-[#0d1a2d] to-[#0a1525]"}
         `}>
           <div className="absolute inset-0 rounded-[18px] bg-gradient-to-tr from-white/8 to-transparent pointer-events-none" />
-          <Zap className={`w-5 h-5 drop-shadow-sm ${isRunning ? "text-white" : "text-cyan-300"}`} />
+          <img
+            src="/neuroai-logo.png"
+            alt=""
+            aria-hidden="true"
+            className="w-5 h-5 object-contain drop-shadow-sm"
+          />
           <span className={`text-[7px] font-bold tracking-wider ${isRunning ? "text-white/90" : "text-cyan-400/90"}`}>
             {isRunning ? "LIVE" : "NEUROAI"}
           </span>
