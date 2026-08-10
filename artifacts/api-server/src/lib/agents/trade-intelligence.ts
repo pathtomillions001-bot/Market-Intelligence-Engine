@@ -93,8 +93,10 @@ function extractMarketFeatures(output: CoordinatorOutput) {
 
   const momentum    = (feAgent?.data?.["features"] as any)?.price?.momentum5 ?? null;
   const volatility  = (feAgent?.data?.["features"] as any)?.price?.vol20 ?? null;
-  const noiseScore  = (tickAgent?.data?.["noiseScore"] ?? tickAgent?.data?.["tickResult"]?.["noiseScore"] ?? null) as number | null;
-  const tickAccel   = (tickAgent?.data?.["tickResult"]?.["acceleration"] ?? tickAgent?.data?.["acceleration"] ?? null) as number | null;
+  const tickData     = tickAgent?.data as Record<string, unknown> | undefined;
+  const tickResult   = tickData?.["tickResult"] as Record<string, unknown> | undefined;
+  const noiseScore  = (tickData?.["noiseScore"] ?? tickResult?.["noiseScore"] ?? null) as number | null;
+  const tickAccel   = (tickResult?.["acceleration"] ?? tickData?.["acceleration"] ?? null) as number | null;
   const regime      = output.regime ?? (regimeAgent?.data?.["regime"] as string | undefined) ?? null;
 
   return { momentum, volatility, noiseScore, tickAccel, regime };

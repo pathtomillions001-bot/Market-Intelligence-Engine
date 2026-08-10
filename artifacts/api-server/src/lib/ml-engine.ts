@@ -11,6 +11,8 @@
  * Adaptive tick windows selected per market via cross-validation proxy.
  */
 
+import { OVER_PAYOUTS, UNDER_PAYOUTS } from "./payouts";
+
 // ── Math utilities ────────────────────────────────────────────────────────────
 function mean(arr: number[]): number {
   return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
@@ -441,11 +443,10 @@ export function predictDigitContract(digits: number[]): DigitPrediction | null {
     const expectedOver = (9 - barrier) / 10;
     const expectedUnder = barrier / 10;
 
-    // Approximate Deriv payout multipliers per barrier (stake-based)
-    const OVER_PAYOUTS = [1.05, 1.10, 1.18, 1.28, 1.45, 1.95, 2.60, 4.20, 9.40];
-    const UNDER_PAYOUTS = [9.40, 4.20, 2.60, 1.95, 1.45, 1.28, 1.18, 1.10, 1.05];
-    const overPayout = OVER_PAYOUTS[barrier] ?? 1.1;
-    const underPayout = UNDER_PAYOUTS[barrier] ?? 1.1;
+    // Canonical total-return payout multipliers (live proposal pricing is used
+    // later by the execution pipeline whenever available).
+    const overPayout = OVER_PAYOUTS[barrier] ?? OVER_PAYOUTS[4];
+    const underPayout = UNDER_PAYOUTS[barrier] ?? UNDER_PAYOUTS[5];
 
     // Edge = deviation from theoretical + EV weighting
     const overEdge = pOver - expectedOver;

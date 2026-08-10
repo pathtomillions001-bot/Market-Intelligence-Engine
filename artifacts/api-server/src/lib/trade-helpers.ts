@@ -4,6 +4,7 @@ import type { MarketAnalysis } from "./ai-engine";
 import { getContractProposal } from "./deriv";
 import { calibrateConfidence, computeBreakevenWinRate, computeExpectedValue } from "./calibration";
 import { logger } from "./logger";
+import { getFallbackPayout } from "./payouts";
 
 export interface FinalizedAnalysis extends MarketAnalysis {
   calibratedConfidence: number;
@@ -17,11 +18,6 @@ export interface FinalizedAnalysis extends MarketAnalysis {
 // ── Payout multiplier cache (avoids slow WS round-trip on every scan) ─────────
 const payoutCache = new Map<string, { value: number; ts: number }>();
 const PAYOUT_TTL_MS = 20 * 60 * 1000;
-
-const DEFAULT_PAYOUT: Record<string, number> = {
-  RISE: 1.87, FALL: 1.87, CALL: 1.87, PUT: 1.87,
-  DIGITOVER: 9.4, DIGITUNDER: 9.4,
-};
 
 function payoutKey(symbol: string, contractType: string, barrier?: number): string {
   return `${symbol}:${contractType}:${barrier ?? ""}`;
@@ -59,7 +55,7 @@ export async function finalizeAnalysis(
   if (cached !== null) {
     payoutMultiplier = cached;
   } else if (opts.skipProposal) {
-    payoutMultiplier = DEFAULT_PAYOUT[analysis.recommendedContractType] ?? 1.87;
+    payoutMultiplier = getFallbackPayout(analysis.recommendedContractType, barrier);
   } else {
     try {
       const proposal = await Promise.race([
@@ -74,10 +70,10 @@ export async function finalizeAnalysis(
         }),
         new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
       ]);
-      payoutMultiplier = proposal?.payoutMultiplier ?? DEFAULT_PAYOUT[analysis.recommendedContractType] ?? 1.87;
+      payoutMultiplier = proposal?.payoutMultiplier ?? getFallbackPayout(analysis.recommendedContractType, barrier);
       setCachedPayout(opts.symbol, analysis.recommendedContractType, isDigit ? barrier : undefined, payoutMultiplier);
     } catch {
-      payoutMultiplier = DEFAULT_PAYOUT[analysis.recommendedContractType] ?? 1.87;
+      payoutMultiplier = getFallbackPayout(analysis.recommendedContractType, barrier);
     }
   }
 

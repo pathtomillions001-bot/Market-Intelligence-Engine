@@ -13,14 +13,22 @@
  * (wired in ai.ts → ScanContext.recoveryBarrierOverride, consumed by
  * digit-probability.ts). This module only tracks recovery STATE and STAKE.
  *
- * Partial recovery: if a win doesn't fully cover the accumulated unrecovered
- * amount, the remaining balance stays active in recovery — it does NOT reset
- * to "normal" until a win (or sequence of wins) fully covers the debt.
+ * Partial recovery: each win pays debt first, then the original normal-trade
+ * target profit. Recovery does NOT reset until both remaining obligations reach
+ * zero, which keeps base-capped Split recovery mathematically complete.
  *
  * State persisted to DB (recoveryStateJson) so recovery survives restarts.
  */
 
 import { getLocalTodayKey } from "../tz";
+import { applyRecoveryStakeLimits, calculateRecoveryStakeRequest } from "../recovery-math";
+
+export {
+  applyRecoveryStakeLimits,
+  calculateExactRecoveryStake,
+  calculateRecoveryStakeRequest,
+  roundRecoveryStakeUp,
+} from "../recovery-math";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -31,6 +39,9 @@ export interface RecoveryState {
   baseStake:                number;       // normal stake the engine recovers back to
   streakLossCount:          number;       // consecutive losses in the current streak (drives dashboard + cooldown gate)
   streakStartAmount:        number;       // total lost in this streak (display)
+  targetProfit:             number;       // original expected net profit of the normal trade that started recovery
+  remainingTargetProfit:    number;       // target profit still outstanding after partial recovery wins
+  originPayoutMultiplier:   number;       // total-return multiplier of that original normal trade
   resetDate:                string;       // local YYYY-MM-DD this state belongs to — drives the daily auto-reset
   consecutiveMatchLosses:   number;       // DIGITMATCH losses in a row while in recovery — triggers DIFF fallback at ≥3
 }
@@ -48,6 +59,9 @@ function freshState(): RecoveryState {
     baseStake:                0,
     streakLossCount:          0,
     streakStartAmount:        0,
+    targetProfit:             0,
+    remainingTargetProfit:    0,
+    originPayoutMultiplier:   1,
     resetDate:                todayKey(),
     consecutiveMatchLosses:   0,
   };
@@ -61,9 +75,12 @@ let state: RecoveryState = freshState();
  * (midnight scheduler) share identical logic.
  */
 function applyNewDay(): void {
-  const prevDebt      = state.unrecoveredAmount;
-  const prevBaseStake = state.baseStake;
-  const hadCarryOver  = state.inRecovery || prevDebt > 0 || state.streakLossCount > 0;
+  const prevDebt             = state.unrecoveredAmount;
+  const prevBaseStake        = state.baseStake;
+  const prevTargetProfit     = state.targetProfit;
+  const prevRemainingTarget  = state.remainingTargetProfit;
+  const prevOriginPayout     = state.originPayoutMultiplier;
+  const hadCarryOver         = state.inRecovery || prevDebt > 0 || state.streakLossCount > 0;
 
   state = freshState();
 
@@ -77,8 +94,11 @@ function applyNewDay(): void {
       state.unrecoveredAmount = carryDebt;
       state.baseStake         = prevBaseStake;
       state.recoveryStep      = 1;
-      state.streakLossCount   = 1;
-      state.streakStartAmount = carryDebt;
+      state.streakLossCount         = 1;
+      state.streakStartAmount       = carryDebt;
+      state.targetProfit            = Math.max(0, prevTargetProfit);
+      state.remainingTargetProfit   = Math.max(0, prevRemainingTarget);
+      state.originPayoutMultiplier  = Math.max(1, prevOriginPayout);
     }
   }
 
@@ -150,182 +170,54 @@ export function isInRecovery(): boolean {
 
 // ── Stake calculation ─────────────────────────────────────────────────────────
 
+
 /**
- * Compute the stake for a recovery trade.
+ * Compute the next recovery stake.
  *
- * SPLIT mode (default): cap stake at `baseStake × recoveryMultiplier`.
- *   If the required stake exceeds this cap, partial recovery happens —
- *   the remaining debt persists until the next winning recovery trade.
- *   The multiplier comes from settings (default 1.62×), meaning the
- *   recovery stake is at most 1.62× the original trade stake per step.
+ * AUTO
+ * - Instant: use the exact debt-plus-target formula. This is the smallest stake whose net
+ *   profit clears all current debt and preserves the original normal trade's
+ *   expected profit.
+ * - Split: use the same exact calculation, capped at one normal base stake.
+ *   Remaining debt stays in recovery and is recalculated after every result.
  *
- * INSTANT mode: use the SAME recoveryMultiplier as Split whenever that's enough
- *   to cover the debt in one trade (i.e. it behaves exactly like Split's step 1,
- *   just always attempted in a single shot instead of progressively). Only when
- *   the accumulated debt is too large for that multiplier to fully cover does the
- *   stake grow beyond it — and even then, only up to the exact minimum needed to
- *   recover the debt, never more. This keeps Instant from ever over-exposing the
- *   user's capital chasing a bigger win than the debt requires.
+ * MANUAL
+ * - The user-entered multiplier is never payout-calibrated, raised to a hidden
+ *   floor, or replaced by an automatic multiplier.
+ * - The configured multiplier compounds per consecutive recovery loss up to
+ *   maxRecoverySteps. In Split mode it acts as a cap on the exact target; in
+ *   Instant mode the manual amount is used directly.
  *
- * In both modes the stake is floored at $0.35 and capped at maxTradeStake.
- *
- * SPLIT mode progressive cap: each consecutive recovery LOSS raises the cap by
- *   1.0× so the sequence naturally becomes recoveryMultiplier, recoveryMultiplier+1,
- *   recoveryMultiplier+2, … (e.g. 1.62 → 2.62 → 3.62 for OVER 3 / UNDER 6).
- *   Step 1 stakes enough to cover the base loss; later steps grow to cover
- *   accumulated debt while keeping stakes predictable and non-exponential.
- *
- * Example (SPLIT, OVER 3, payout 1.62×, multiplier 1.62):
- *   Step 1: cap = base × 1.62;  win profit = 1.62 × 0.62 = 1.004 × base ✓
- *   Step 2: cap = base × 2.62;  win profit = 2.62 × 0.62 = 1.624 × base ✓
- *   Step 3: cap = base × 3.62;  win profit = 3.62 × 0.62 = 2.244 × base
- *
- * Example (INSTANT, small loss — the standard multiplier is enough):
- *   base=$10, lost $10, payout 1.62× → splitEquivalentStake = $16.20;
- *   $16.20 × 0.62 = $10.04 ≥ $10 debt → use $16.20 (same as Split step 1, not larger).
- *
- * Example (INSTANT, larger accumulated debt — standard multiplier isn't enough):
- *   base=$10, debt=$40, payout 1.62× → $16.20 × 0.62 = $10.04 < $40, so scale up to
- *   minRecovery = $40 / 0.62 × 1.02 ≈ $65.80 — the exact minimum to win back ~$41
- *   (debt + small buffer), not an oversized stake chasing a much bigger profit.
+ * All modes still respect the explicit Max Stake Per Trade and available-balance
+ * hard limits. Deriv's $0.35 minimum may necessarily produce a small overshoot.
  */
 function computeDynamicStake(
   unrecoveredAmount: number,
+  remainingTargetProfit: number,
   payout: number,
-  _blendedWinP: number,   // intentionally unused — win probability does not inflate stake
+  _blendedWinP: number,
   balance: number,
   maxTradeStake: number,
-  riskProfile: "conservative" | "moderate" | "aggressive",
+  _riskProfile: "conservative" | "moderate" | "aggressive",
   baseStake: number,
-  recoveryMultiplier: number,  // from settings (default 1.62); only used in manual mode
+  recoveryMultiplier: number,
   recoveryMethod: "split" | "instant",
-  recoveryStep: number,        // how many consecutive recovery losses so far (drives progressive cap)
-  maxRecoverySteps: number,    // from settings — bounds instant mode's exposure the same way split mode is bounded
-  recoveryAutoMode: boolean,   // true = AI computes exact stake; false = manual multiplier-driven
+  recoveryStep: number,
+  maxRecoverySteps: number,
+  recoveryAutoMode: boolean,
 ): number {
-  const netPayout = payout - 1;
-  if (netPayout <= 0) return 0.35;
-
-  // Exact minimum stake to recover the full unrecovered amount in one win,
-  // plus a 2% buffer for Deriv's decimal rounding and near-1.0 payout edge cases.
-  const minRecovery = (unrecoveredAmount / netPayout) * 1.02;
-
-  // Profile-based safety cap: never risk more than this fraction of balance.
-  const maxExposurePct = riskProfile === "conservative" ? 0.08
-    : riskProfile === "aggressive" ? 0.20
-    : 0.12;   // moderate
-  const maxExposure = Math.min(balance * maxExposurePct, maxTradeStake);
-
-  // ── AUTO MODE ────────────────────────────────────────────────────────────────
-  // Intelligent stake sizing that adapts to both the barrier's real payout and
-  // the actual accumulated debt, while keeping stakes predictable and bounded.
-  //
-  // STEP 1: always the K-calibrated gentle entry.
-  //   K = 0.777 → step1Mult = K / netPayout (capped at 15 for low-payout barriers)
-  //   e.g. OVER 3/UNDER 6 (net=0.37) → 2.10× base → $1.47 for $0.70 base stake.
-  //   A single win here recovers ~77.7% of the initial loss; accepting partial
-  //   recovery on step 1 keeps the entry stake conservative.
-  //
-  // STEPS 2+: target the actual accumulated debt, but cap the stake using a
-  //   LINEARLY growing ceiling (not geometric) so repeated consecutive losses
-  //   never create an exponential runaway in required stake size.
-  //
-  //   cap = step1Reference × (baseFactor + (recoveryStep − 2) × 0.5)
-  //
-  //   recoveryMethod determines baseFactor:
-  //     INSTANT (recover quickly): baseFactor = 3.0
-  //       step 2: 3.0×, step 3: 3.5×, step 4: 4.0×, step 5: 4.5× step1Ref
-  //     SPLIT (recover conservatively): baseFactor = 2.0
-  //       step 2: 2.0×, step 3: 2.5×, step 4: 3.0×, step 5: 3.5× step1Ref
-  //
-  //   stake = min(exactDebtRecovery, cap)
-  //
-  //   When the cap is hit, only partial recovery happens — the remaining debt
-  //   persists and shrinks with subsequent wins. When minRecovery < cap (small
-  //   remaining debt), the exact-recovery stake is used; we never overshoot.
-  //
-  // Example: OVER 3/UNDER 6, base=$0.70, step1Ref=$1.47, all consecutive losses:
-  //   INSTANT → step1=$1.47, step2=min($5.97,$4.41)=$4.41,
-  //             step3=min($18.13,$5.15)=$5.15, step4=min($32.33,$5.88)=$5.88
-  //   SPLIT   → step1=$1.47, step2=min($5.97,$2.94)=$2.94,
-  //             step3=min($14.07,$3.68)=$3.68, step4=min($22.17,$4.41)=$4.41
-  //   (Old geometric had: step2=$4.56, step3=$14.13, step4=$43.80 — too aggressive)
-  if (recoveryAutoMode) {
-    if (baseStake <= 0 || netPayout <= 0) {
-      return Math.max(0.35, Math.min(minRecovery, maxExposure, maxTradeStake));
-    }
-
-    const K           = 0.777;
-    const step1Mult   = Math.min(K / netPayout, 15);     // e.g. 2.10 for OVER 3
-    const step1Reference = baseStake * step1Mult;        // e.g. $1.47 for $0.70 base
-
-    if (recoveryStep <= 1) {
-      // Step 1: always the calibrated entry stake — not the full debt recovery amount.
-      return Math.max(0.35, Math.min(step1Reference, maxExposure, maxTradeStake));
-    }
-
-    // Steps 2+: intelligent cap grows linearly per consecutive loss.
-    // INSTANT starts higher (faster recovery), SPLIT starts lower (more conservative).
-    const stepOffset  = recoveryStep - 2;                // 0 at step 2, 1 at step 3, …
-    const baseFactor  = recoveryMethod === "instant" ? 3.0 : 2.0;
-    const capFactor   = baseFactor + stepOffset * 0.5;
-    const cap         = step1Reference * capFactor;
-
-    // Use whichever is smaller: exact debt recovery or the intelligent cap.
-    // Partial recovery is accepted when capped — remaining debt carries forward.
-    const stake = Math.min(minRecovery, cap);
-    return Math.max(0.35, Math.min(stake, maxExposure, maxTradeStake));
-  }
-
-  // ── MANUAL MODE ──────────────────────────────────────────────────────────────
-  // Capital-protection override: for very-low net-payout contracts such as
-  // DIGITDIFF (payout 1.04×, netPayout = 0.04), full instant recovery in one
-  // trade would require a stake ≈ 26× the accumulated debt — dangerously
-  // over-exposing the user's capital. Always use split-mode progressive capping
-  // for these contracts regardless of the recoveryMethod setting so recovery
-  // happens gradually over multiple near-certain wins rather than one huge bet.
-  //
-  // Threshold: netPayout < 0.15 covers DIGITDIFF (0.04) while leaving all
-  // DIGITOVER/DIGITUNDER barriers (minimum OVER 8 netPayout = 3.9) unaffected.
-  const isLowNetPayout = netPayout < 0.15;
-
-  if (recoveryMethod === "instant" && !isLowNetPayout) {
-    // Instant: use the SAME reasonable multiplier Split mode uses (recoveryMultiplier,
-    // e.g. 1.62×) whenever that's enough to cover the loss in one trade — Instant
-    // should never stake more than Split's own step-1 stake just because it's
-    // "instant". Only when the accumulated debt is too large for that multiplier to
-    // cover in one shot does the stake grow — and even then, only up to the exact
-    // minimum needed to fully recover (plus a 5% rounding buffer), never further.
-    const splitEquivalentStake = baseStake > 0 ? baseStake * recoveryMultiplier : minRecovery;
-    const stake = (splitEquivalentStake * netPayout >= unrecoveredAmount)
-      ? splitEquivalentStake   // the standard multiplier already covers the debt — use it, nothing bigger
-      : minRecovery;           // debt exceeds what the standard multiplier covers — use the exact minimum needed instead
-    return Math.max(0.35, Math.min(stake, maxExposure, maxTradeStake));
-  }
-
-  // Split (and low-net-payout instant): progressive cap grows per consecutive recovery loss.
-  //
-  // KEY FIX — payout-calibrated cap: the user-configured recoveryMultiplier is the FLOOR,
-  // but the cap can never be lower than what the live barrier payout mathematically requires
-  // to cover exactly one base-stake loss in a single win.
-  //
-  //   payoutImpliedMinMult = 1 / netPayout × 1.05
-  //   → OVER 3  (payout 1.37×, netPayout 0.37): needs 2.84× — user's 1.62× would only
-  //     win back 0.60× base, leaving partial debt after every recovery step.
-  //   → OVER 5  (payout 1.96×, netPayout 0.96): needs 1.09× — user's 1.62× is more
-  //     than sufficient; minRecovery wins and the stake stays at ~1.09×.
-  //   → DIGITMATCH (payout 9×, netPayout 8):    needs 0.13× — minRecovery governs
-  //     as always (tiny stake fully covers the debt at 9× payout).
-  //
-  // Progressive step still grows by 1× baseEffectiveMult so each consecutive recovery
-  // loss raises the cap predictably: step1=baseEffective, step2=baseEffective+1, …
-  const stepOffset = Math.max(0, recoveryStep - 1);
-  const payoutImpliedMinMult = (1 / netPayout) * 1.05;
-  const baseEffectiveMult    = Math.max(recoveryMultiplier, payoutImpliedMinMult);
-  const progressiveMultiplier = Math.max(1.1, baseEffectiveMult + stepOffset);
-  const splitCap = baseStake > 0 ? baseStake * progressiveMultiplier : maxTradeStake;
-
-  return Math.max(0.35, Math.min(minRecovery, maxExposure, splitCap, maxTradeStake));
+  const requestedStake = calculateRecoveryStakeRequest({
+    unrecoveredAmount,
+    remainingTargetProfit,
+    payoutMultiplier: payout,
+    baseStake,
+    recoveryAutoMode,
+    recoveryMethod,
+    recoveryMultiplier,
+    recoveryStep,
+    maxRecoverySteps,
+  });
+  return applyRecoveryStakeLimits(requestedStake, maxTradeStake, balance);
 }
 
 /**
@@ -335,12 +227,10 @@ function computeDynamicStake(
  * contract type the AI has selected for this trade (recovery is not tied to a
  * specific contract type).
  *
- * @param recoveryMultiplier  From settings — controls the split-mode base multiplier (and Instant's floor, see
- *                            computeDynamicStake above). Must be calibrated to the REAL payout of the recovery
- *                            barrier so step 1 recovers exactly one base-stake loss: multiplier ≈ 1/(payout-1) × 1.02.
- *                            The frontend's "Auto" button computes this from the actual Deriv payout table —
- *                            a generic barrier-index formula disconnected from real payouts was the previous bug.
- * @param recoveryMethod      "split" (progressive, non-exponential) or "instant" (full recovery in one trade)
+ * @param recoveryMultiplier  Used only in Manual mode. It is never substituted or
+ *                            payout-calibrated by Auto mode.
+ * @param recoveryMethod      Auto Split caps each attempt at the normal base stake;
+ *                            Auto Instant targets complete debt + remaining target in one win.
  */
 export function getDynamicRecoveryStake(
   baseStakeFromAI: number,
@@ -361,9 +251,9 @@ export function getDynamicRecoveryStake(
   }
 
   const raw = computeDynamicStake(
-    state.unrecoveredAmount, payoutMultiplier, winProbability01, balance, maxTradeStake, riskProfile,
-    state.baseStake, recoveryMultiplier, recoveryMethod, state.recoveryStep, maxRecoverySteps,
-    recoveryAutoMode,
+    state.unrecoveredAmount, state.remainingTargetProfit, payoutMultiplier, winProbability01,
+    balance, maxTradeStake, riskProfile, state.baseStake, recoveryMultiplier,
+    recoveryMethod, state.recoveryStep, maxRecoverySteps, recoveryAutoMode,
   );
   return Math.max(0.35, Math.min(raw, maxTradeStake));
 }
@@ -376,9 +266,8 @@ export function getDynamicRecoveryStake(
  *
  * - Loss: enters/extends recovery. The debt (unrecoveredAmount) and streak
  *   accumulate regardless of what contract type just lost.
- * - Win while in recovery: reduces the debt by the profit earned. Only
- *   resets to "normal" once the win (or wins) fully cover the debt — a
- *   partial win leaves the remaining balance active in recovery.
+ * - Win while in recovery: applies profit to debt first and then to the saved
+ *   target profit. It resets only when both obligations are covered.
  * - Win while NOT in recovery: no-op (already normal).
  */
 export function recordOutcome(
@@ -387,6 +276,7 @@ export function recordOutcome(
   stakeUsed: number,
   maxRecoverySteps: number,
   contractType?: string,
+  payoutMultiplier = 1,
 ): RecoveryState {
   ensureFreshDay();
   const isMatch = contractType === "DIGITMATCH";
@@ -394,19 +284,22 @@ export function recordOutcome(
   if (won) {
     if (state.inRecovery) {
       const recovered = Math.max(0, profit);
-      const remaining = state.unrecoveredAmount - recovered;
-      // Use a half-cent epsilon so floating-point accumulation across many partial
-      // recovery steps (e.g. 0.1 + 0.2 style drift) can never leave a phantom few
-      // cents of "debt" that rounds to $0.00 on screen but keeps the card stuck in
-      // recovery mode forever. Anything under half a cent counts as fully cleared.
-      if (remaining <= 0.005) {
-        // Fully recovered — return to normal immediately, regardless of whether the
-        // winning trade was placed manually or by the AI engine.
+      const debtRecovered = Math.min(state.unrecoveredAmount, recovered);
+      const profitAvailableForTarget = Math.max(0, recovered - debtRecovered);
+      const remainingDebt = Math.max(0, state.unrecoveredAmount - debtRecovered);
+      const remainingTarget = Math.max(0, state.remainingTargetProfit - profitAvailableForTarget);
+
+      // Use a half-cent epsilon so floating-point accumulation can never leave a
+      // phantom obligation that rounds to $0.00 but keeps recovery active.
+      if (remainingDebt + remainingTarget <= 0.005) {
+        // Debt AND the original normal-trade target are now covered.
         state = freshState();
       } else {
-        state.unrecoveredAmount = remaining;
-        // Streak is broken by a win, but the debt (and recovery mode) persists
-        // until it is fully covered. Reset consecutive MATCH loss counter on any win.
+        state.unrecoveredAmount = remainingDebt;
+        state.remainingTargetProfit = remainingTarget;
+        // A partial win breaks the loss streak, but recovery remains active until
+        // both obligations are covered. This is essential for base-capped Split:
+        // a win may clear debt before it finishes earning the target profit.
         state.streakLossCount = 0;
         state.consecutiveMatchLosses = 0;
       }
@@ -419,6 +312,14 @@ export function recordOutcome(
       state.unrecoveredAmount        = stakeUsed;
       state.streakLossCount          = 1;
       state.streakStartAmount        = stakeUsed;
+      // Preserve the profit the lost NORMAL trade was expected to earn. Auto
+      // recovery targets debt + this amount, not an arbitrary percentage buffer.
+      const originPayout = Number.isFinite(payoutMultiplier) && payoutMultiplier > 1
+        ? payoutMultiplier
+        : 1;
+      state.originPayoutMultiplier   = originPayout;
+      state.targetProfit             = stakeUsed * (originPayout - 1);
+      state.remainingTargetProfit    = state.targetProfit;
       // If the very first loss was a MATCH trade, start the counter
       state.consecutiveMatchLosses   = isMatch ? 1 : 0;
     } else {
@@ -477,6 +378,11 @@ export function loadState(json: string): void {
         baseStake:         Math.max(0, ...parsed.map((s: any) => Number(s?.baseStake) || 0)),
         streakLossCount:   parsed.reduce((sum: number, s: any) => sum + (Number(s?.streakLossCount) || 0), 0),
         streakStartAmount:        parsed.reduce((sum: number, s: any) => sum + (Number(s?.streakStartAmount) || 0), 0),
+        // The original normal-trade payout was not stored by the legacy format.
+        // Zero is the safest target: recover existing debt without inventing profit.
+        targetProfit:             0,
+        remainingTargetProfit:    0,
+        originPayoutMultiplier:   1,
         // Legacy per-family rows predate this feature — always treat as "not today".
         resetDate:                "",
         consecutiveMatchLosses:   0,
@@ -493,6 +399,9 @@ export function loadState(json: string): void {
       baseStake:                Number(parsed.baseStake)          || 0,
       streakLossCount:          Number(parsed.streakLossCount)    || 0,
       streakStartAmount:        Number(parsed.streakStartAmount)  || 0,
+      targetProfit:             Math.max(0, Number(parsed.targetProfit) || 0),
+      remainingTargetProfit:    Math.max(0, Number(parsed.remainingTargetProfit ?? parsed.targetProfit) || 0),
+      originPayoutMultiplier:   Math.max(1, Number(parsed.originPayoutMultiplier) || 1),
       // Older/legacy saved rows never had resetDate — treat as "not today" so a
       // pre-existing carry-over debt from before this feature existed is cleared
       // immediately on load rather than silently resurrected.
@@ -513,6 +422,7 @@ export function getLossStreakSummary(): {
   totalUnrecovered: number;
   totalStreakLosses: number;
   totalStreakAmount: number;
+  remainingTargetProfit: number;
 } {
   ensureFreshDay();
   return {
@@ -520,5 +430,6 @@ export function getLossStreakSummary(): {
     totalUnrecovered:  state.unrecoveredAmount,
     totalStreakLosses: state.streakLossCount,
     totalStreakAmount: state.streakStartAmount,
+    remainingTargetProfit: state.remainingTargetProfit,
   };
 }

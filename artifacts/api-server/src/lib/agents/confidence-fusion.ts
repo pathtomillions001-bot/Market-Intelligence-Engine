@@ -35,6 +35,7 @@ export interface FusionInput {
   preferredTypes: ProductType[];
   contractType: ProductType | null;
   barrier: number | null;
+  regime: string | null;
 }
 
 export interface FusionResult {
@@ -78,6 +79,7 @@ export function runConfidenceFusionAgent(
   const enhancers: string[] = [];
   const preferred = input.preferredTypes;
   const isOverUnder = input.contractType === "DIGITOVER" || input.contractType === "DIGITUNDER";
+  const sessionLosses = ctx.daily.consecutiveLosses;
 
   // ── 1. Hard gates ────────────────────────────────────────────────────────────
   if (input.marketScannerScore < 20 && !isOverUnder) {
@@ -106,11 +108,11 @@ export function runConfidenceFusionAgent(
   if (
     structuralPattern &&
     structuralPattern.contractType === candidateType &&
-    structuralPattern.regime === (ctx.regime as string) &&
+    structuralPattern.regime === input.regime &&
     sessionLosses >= 2
   ) {
     blockers.push(
-      `Structural loss pattern: ${candidateType} in ${regime} regime has lost ≥2 times — waiting for regime shift`,
+      `Structural loss pattern: ${candidateType} in ${structuralPattern.regime} regime has lost ≥2 times — waiting for regime shift`,
     );
   }
 
@@ -126,7 +128,6 @@ export function runConfidenceFusionAgent(
   // 0 losses  → EV ≥ max(adaptive, -0.04)  — baseline always enforced
   // 2 losses  → EV ≥ -0.02                 — tighter: edge required
   // 3+ losses → EV > 0                     — strictly positive (capital protection)
-  const sessionLosses = ctx.daily.consecutiveLosses;
   const adaptiveMinEV = getAdaptiveEvThreshold();
   const baselineMinEV = Math.max(adaptiveMinEV, -0.04);   // -4% floor, always applied
   const minEV = sessionLosses >= 3 ? 0.001 : sessionLosses >= 2 ? -0.02 : baselineMinEV;

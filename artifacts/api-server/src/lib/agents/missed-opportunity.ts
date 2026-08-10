@@ -23,6 +23,7 @@ import { desc } from "drizzle-orm";
 import type { CoordinatorOutput } from "./types";
 import { tickManager } from "../deriv";
 import { logger } from "../logger";
+import { getFallbackPayout } from "../payouts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -88,8 +89,8 @@ function estimateOutcome(
     return null; // Unknown contract type
   }
 
-  // Estimated profit: simplified (1.91x payout for direction, 1.19x for tier-1 digit)
-  const payoutMultiplier = ct.startsWith("DIGIT") ? 1.19 : 1.91;
+  // Estimated profit uses the same canonical barrier-aware fallback schedule as execution.
+  const payoutMultiplier = getFallbackPayout(ct, barrier);
   const stake = 1; // normalised — caller scales
   const estimatedProfit = wouldHaveWon ? stake * (payoutMultiplier - 1) : -stake;
 

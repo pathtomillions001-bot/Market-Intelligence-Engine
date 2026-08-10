@@ -9,6 +9,7 @@
  */
 
 import type { AgentOutput, ScanContext } from "./types";
+import { RISE_FALL_PAYOUT } from "../payouts";
 import { scoreToSignal } from "./types";
 
 export interface RiskAssessment {
@@ -53,7 +54,7 @@ function kellyFraction(winRate: number, payoutMult: number): number {
 export function runRiskIntelligenceAgent(
   ctx: ScanContext,
   winProbability = 0.5,
-  payoutMultiplier = 1.91,
+  payoutMultiplier = RISE_FALL_PAYOUT,
   currentDrawdown = 0, // as fraction 0-1
 ): AgentOutput & { riskAssessment: RiskAssessment } {
   const t0 = Date.now();

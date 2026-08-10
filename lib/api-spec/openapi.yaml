@@ -958,7 +958,16 @@ components:
             type: string
         totalUnrecovered:
           type: number
-          description: Sum of unrecovered amounts (USD) across all families currently in recovery
+          description: Accumulated loss amount still to be recovered (USD)
+        targetProfit:
+          type: number
+          description: Original expected net profit of the normal trade whose loss started recovery
+        remainingTargetProfit:
+          type: number
+          description: Portion of the original target profit still outstanding after partial recovery wins
+        originPayoutMultiplier:
+          type: number
+          description: Total-return payout multiplier of the normal trade whose loss started recovery
         highestStep:
           type: integer
           description: The highest recovery step among all families currently in recovery
@@ -1050,10 +1059,10 @@ components:
           description: Enable conservative stake recovery after losses
         recoveryMultiplier:
           type: number
-          description: Stake multiplier after a loss (e.g. 1.2 = 20% increase)
+          description: User-controlled multiplier used only in Manual recovery mode
         maxRecoverySteps:
           type: integer
-          description: Max consecutive recovery multiplications before reset
+          description: Maximum loss step at which a manual multiplier keeps compounding
         scanAllMarkets:
           type: boolean
           description: Scan all available markets in parallel
@@ -1083,6 +1092,22 @@ components:
         recoveryUnderDigit:
           type: integer
           description: Digit barrier used for DIGITUNDER trades while in recovery mode
+        recoveryMethod:
+          type: string
+          enum: [split, instant]
+          description: Split caps recovery attempts; Instant targets one-win recovery
+        recoveryAutoMode:
+          type: boolean
+          description: Compute recovery stake from live payout, debt, and original target profit
+        allowedMarkets:
+          type: array
+          items:
+            type: string
+        riskAmountType:
+          type: string
+          enum: [fixed, percentage]
+        riskAmountValue:
+          type: number
 
     TradingSettingsInput:
       type: object
@@ -1142,3 +1167,18 @@ components:
           type: integer
         recoveryUnderDigit:
           type: integer
+        recoveryMethod:
+          type: string
+          enum: [split, instant]
+        recoveryAutoMode:
+          type: boolean
+          description: Compute recovery stake from live payout, debt, and original target profit
+        allowedMarkets:
+          type: array
+          items:
+            type: string
+        riskAmountType:
+          type: string
+          enum: [fixed, percentage]
+        riskAmountValue:
+          type: number

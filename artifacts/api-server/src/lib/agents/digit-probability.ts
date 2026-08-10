@@ -11,30 +11,11 @@
 
 import type { AgentOutput, ProductType, ScanContext } from "./types";
 import { scoreToSignal } from "./types";
+import { DIGIT_PAYOUTS, MATCH_PAYOUT, DIFF_PAYOUT } from "../payouts";
 
-// ── Digit payout table (Deriv's actual payout schedule) ──────────────────────
-// OVER 0/UNDER 9 = lowest risk = lowest payout
-// OVER 8/UNDER 1 = highest risk = highest payout
-// DIGITMATCH barrier 0-9: ~9.00× (10% theoretical win rate)
-// DIGITDIFF  barrier 0-9: ~1.04× (90% theoretical win rate)
-export const DIGIT_PAYOUTS: Record<string, Record<number, number>> = {
-  DIGITOVER: {
-    0: 1.04, 1: 1.08, 2: 1.19, 3: 1.37, 4: 1.63,
-    5: 1.96, 6: 2.45, 7: 3.27, 8: 4.90,
-  },
-  DIGITUNDER: {
-    9: 1.04, 8: 1.08, 7: 1.19, 6: 1.37, 5: 1.63,
-    4: 1.96, 3: 2.45, 2: 3.27, 1: 4.90,
-  },
-  DIGITMATCH: {
-    0: 9.00, 1: 9.00, 2: 9.00, 3: 9.00, 4: 9.00,
-    5: 9.00, 6: 9.00, 7: 9.00, 8: 9.00, 9: 9.00,
-  },
-  DIGITDIFF: {
-    0: 1.04, 1: 1.04, 2: 1.04, 3: 1.04, 4: 1.04,
-    5: 1.04, 6: 1.04, 7: 1.04, 8: 1.04, 9: 1.04,
-  },
-};
+// Re-export the canonical table for existing consumers (ai.ts and tests).
+// Values are total winning returns, including the original stake.
+export { DIGIT_PAYOUTS } from "../payouts";
 
 // Tier 1 = safest barriers; Tier 2 = medium-risk; Tier 3 = high risk
 export const DIGIT_TIERS: Record<string, Record<number, number>> = {
@@ -293,7 +274,7 @@ function buildBarrierOptions(
 // DIGITDIFF:  win if last digit ≠ chosen digit. Best choice: the "hot" digit
 //   (differ from the most frequent one gives LOWEST win rate — actually we want
 //   to differ from the COLDEST digit so we almost always win). EV positive when
-//   frequency of chosen digit < (1 - 1/1.04) = ~3.8%.
+//   frequency of chosen digit < (1 - 1/1.09) = ~8.3%.
 //
 // The agent returns the best match digit and best diff digit along with their
 // estimated win probabilities.
@@ -318,8 +299,9 @@ export function analyzeMatchDiffers(
   digits: number[],
   analysis: ReturnType<typeof analyzeDigits>,
 ): MatchDiffersAnalysis {
-  const MATCH_PAYOUT = 9.00;
-  const DIFF_PAYOUT  = 1.04;
+  // Canonical total-return multipliers (the original stake is included).
+  const matchPayout = MATCH_PAYOUT;
+  const diffPayout  = DIFF_PAYOUT;
 
   // For DIGITMATCH: use ensemble of Bayesian + Markov next-digit probability
   // Sample-size-dependent ensemble: same tiered weighting as winProbForBarrier —
@@ -341,8 +323,8 @@ export function analyzeMatchDiffers(
   for (let d = 0; d <= 9; d++) {
     if (ensembleProb[d] > matchWinP) { matchWinP = ensembleProb[d]; matchDigit = d; }
   }
-  const matchEV   = matchWinP * (MATCH_PAYOUT - 1) - (1 - matchWinP);
-  const matchEdge = matchWinP - 1 / MATCH_PAYOUT;
+  const matchEV   = matchWinP * (matchPayout - 1) - (1 - matchWinP);
+  const matchEdge = matchWinP - 1 / matchPayout;
 
   // Best DIGITDIFF: differ from the digit with the LOWEST ensemble probability
   // (we are predicting "not that digit", so pick the rarest one to differ from
@@ -353,8 +335,8 @@ export function analyzeMatchDiffers(
     if (ensembleProb[d] < diffTargetP) { diffTargetP = ensembleProb[d]; diffDigit = d; }
   }
   const diffWinP  = 1 - diffTargetP;
-  const diffEV    = diffWinP * (DIFF_PAYOUT - 1) - (1 - diffWinP);
-  const diffEdge  = diffWinP - 1 / DIFF_PAYOUT;
+  const diffEV    = diffWinP * (diffPayout - 1) - (1 - diffWinP);
+  const diffEdge  = diffWinP - 1 / diffPayout;
 
   return {
     matchDigit, matchWinProbability: matchWinP,
@@ -458,7 +440,7 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
 
   if (digits.length < 10) {
     return {
-      agentId: "digitProbability", score: 50, confidence: 0, signal: "hold",
+      agentId: "digitProbability", score: 50, confidence: 0, signal: "neutral",
       reasoning: `Insufficient digit data (${digits.length} samples — need ≥30).`,
       data: {}, executionTimeMs: Date.now() - t0,
       barrierOptions: [], evenAnalysis: analyzeEvenOdd([]),

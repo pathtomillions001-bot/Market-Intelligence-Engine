@@ -10,12 +10,11 @@
  *
  * Breakeven win rate = 1 / payout_multiplier
  *
- * RISE/FALL: Real Deriv payouts on synthetic indices are 1.87–1.95x.
- * We default to 1.91x which is representative and gives a 52.4% breakeven.
- * CALL/PUT: ~1.87x (slightly less than RISE/FALL on most synthetics).
+ * RISE/FALL uses the canonical 1.92× fallback when a live proposal is unavailable.
+ * This is a total-return multiplier, so its net profit rate is 0.92 per $1 stake.
  *
  * Task 2 fix: Direction trades need achievable thresholds.
- * With 1.91x payout, only 52.4% win probability is needed — achievable by the
+ * With 1.92x payout, about 52.1% win probability is needed — achievable by the
  * direction model when market regime and momentum strongly agree.
  */
 
@@ -24,22 +23,12 @@ import { scoreToSignal } from "./types";
 import type { DirectionResult } from "./direction-agent";
 import type { BarrierOption } from "./digit-probability";
 import { DIGIT_TIERS } from "./digit-probability";
+import { DEFAULT_CONTRACT_PAYOUTS } from "../payouts";
 
 // ── Default payout table ──────────────────────────────────────────────────────
-// Updated to more realistic Deriv values for synthetic indices.
-// CALL/PUT (Rise/Fall) on Volatility indices typically pay 1.88–1.95x.
-// DIGITEVEN/DIGITODD are 50/50 contracts that pay ~1.95x on Deriv.
-// NOTE: Deriv API uses CALL (price ends higher = Rise) and PUT (price ends lower = Fall).
-export const DEFAULT_PAYOUTS: Record<string, number> = {
-  CALL:        1.91,   // Rise — price ends higher than entry
-  PUT:         1.91,   // Fall — price ends lower than entry
-  RISE:        1.91,   // Alias for backward compatibility
-  FALL:        1.91,   // Alias for backward compatibility
-  DIGITOVER:   1.96,   // barrier=5 (most common)
-  DIGITUNDER:  1.96,
-  DIGITEVEN:   1.95,   // 50/50 contract: even digit wins
-  DIGITODD:    1.95,   // 50/50 contract: odd digit wins
-};
+// Live proposals take precedence. These canonical total-return multipliers are
+// used only when pricing is unavailable (the original stake is included).
+export const DEFAULT_PAYOUTS: Record<string, number> = { ...DEFAULT_CONTRACT_PAYOUTS };
 
 // Minimum EV threshold for "near-breakeven" classification.
 // Widened to -0.05 so direction trades at ~50% win rate are still returned as

@@ -16,7 +16,7 @@
  *   weighted consensus is high (≥60). They are allowed to fire with near-zero EV
  *   (EV > -0.008 per $1 stake) because:
  *   a) The timing agent already uses threshold=48 for direction (not 55)
- *   b) 1.91x payout only needs 52.4% win probability — achievable with good momentum
+ *   b) 1.92x payout needs about 52.1% win probability — achievable with good momentum
  *   c) Blocking all direction trades because EV is -0.2% is overcorrecting
  *
  * Agent weights (used for consensus score):
@@ -38,7 +38,7 @@ import type {
   ScanContext,
 } from "./types";
 import { scoreToSignal } from "./types";
-import type { EVResult } from "./ev-calculator";
+import { DEFAULT_PAYOUTS, type EVResult } from "./ev-calculator";
 import type { RiskDecision } from "./risk-manager";
 import type { TimingResult } from "./execution-timing";
 import type { StrategyStats } from "./performance-feedback";
@@ -160,9 +160,9 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   }
 
   // ── Gate 2: EV gate (product-aware) ──────────────────────────────────────
-  // For tier-1 digit barriers (OVER 2, UNDER 8), positive EV is mathematically
-  // impossible: OVER 2 payout is 1.19x → breakeven win rate is 84% — unreachable.
-  // The real signal is EDGE: actual win rate > theoretical 70%.
+  // Normal digit barriers are evaluated against their live (or canonical
+  // fallback) payout and the user's exact barrier. The real signal remains the
+  // deviation of observed win probability from that barrier's theoretical rate.
   // For all other products, require EV > -0.06.
   if (!bestEV) {
     // OVER/UNDER still uses the agent analysis and configured barrier when the
@@ -199,9 +199,9 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     const isDigitDiff  = bestEV.product === "DIGITDIFF";
 
     if (isDigitMatch) {
-      // DIGITMATCH → ~10% theoretical win, 9.0x payout.
-      // Breakeven frequency = 1/9 ≈ 11.1%. Require EV > -0.05 (digit appears
-      // at roughly fair odds or better). The 9× payout in recovery mode means
+      // DIGITMATCH → ~10% theoretical win, 8.93x fallback payout.
+      // Breakeven frequency = 1/8.93 ≈ 11.2%. Require EV > -0.05 (digit appears
+      // at roughly fair odds or better). The high payout in recovery mode means
       // even a near-fair digit frequency is worth trading to cover the debt cheaply.
       if (bestEV.expectedValue < -0.05) {
         rejectReasons.push(
@@ -209,9 +209,9 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
         );
       }
     } else if (isDigitDiff) {
-      // DIGITDIFF → ~90-96% theoretical win, 1.04x payout.
-      // Positive EV requires >96.2% win rate — nearly impossible in practice.
-      // Gate on EV > -0.05 instead of edge > 0: even at 93% win the near-certain
+      // DIGITDIFF → ~90-96% theoretical win, 1.09x fallback payout.
+      // Positive EV requires >91.7% win rate at the 1.09× fallback.
+      // Gate on EV > -0.05 instead of edge > 0: even near 92% the high-frequency
       // wins provide strong portfolio stability and pair well with MATCH recovery.
       if (bestEV.expectedValue < -0.05) {
         rejectReasons.push(
@@ -228,8 +228,8 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
       //
       // The EV > -0.08 gate instead allows trades when the configured barrier is showing
       // at least partial statistical favourability from the Bayesian + Markov ensemble.
-      // Example: OVER 1 (payout 1.08×) passes when digits 0+1 combined appear ≤ 14.8 %
-      // of the time (i.e. both are somewhat cold), giving P(win) ≥ 85.2 %.
+      // Example: OVER 1 uses the configured/live payout while edge remains
+      // measured against its theoretical 80% win rate.
       if (bestEV.expectedValue < -0.08) {
         rejectReasons.push(
           `Normal barrier EV too weak: ${bestEV.product} barrier=${bestEV.barrier}: ` +
@@ -367,9 +367,9 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
       product,
       barrier,
       winProbability: Math.round(probUpLocal * 100),
-      payoutMultiplier: wantDir ? 1.91 : 1.95,
+      payoutMultiplier: DEFAULT_PAYOUTS[product] ?? DEFAULT_PAYOUTS["CALL"],
       expectedValue: 0,
-      breakevenWinRate: wantDir ? 52.4 : 51.3,
+      breakevenWinRate: 100 / (DEFAULT_PAYOUTS[product] ?? DEFAULT_PAYOUTS["CALL"]),
       duration: tradeDuration,
       stake: riskDecision.recommendedStake,
       reasoning: "No positive-EV opportunity — recommend waiting.",

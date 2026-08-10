@@ -412,8 +412,14 @@ export interface RecoveryStatus {
   active?: boolean;
   families?: RecoveryFamilyState[];
   activeFamilies?: string[];
-  /** Sum of unrecovered amounts (USD) across all families currently in recovery */
+  /** Accumulated loss amount still to be recovered (USD) */
   totalUnrecovered?: number;
+  /** Original expected net profit of the normal trade whose loss started recovery */
+  targetProfit?: number;
+  /** Portion of the original target profit still outstanding after partial recovery wins */
+  remainingTargetProfit?: number;
+  /** Total-return payout multiplier of the normal trade whose loss started recovery */
+  originPayoutMultiplier?: number;
   /** The highest recovery step among all families currently in recovery */
   highestStep?: number;
 }
@@ -472,9 +478,9 @@ export interface TradingSettings {
   loopIntervalSec: number;
   /** Enable conservative stake recovery after losses */
   recoveryMode: boolean;
-  /** Stake multiplier after a loss (e.g. 1.2 = 20% increase) */
+  /** User-controlled multiplier used only in Manual recovery mode */
   recoveryMultiplier: number;
-  /** Max consecutive recovery multiplications before reset */
+  /** Maximum loss step at which a manual multiplier keeps compounding */
   maxRecoverySteps: number;
   /** Scan all available markets in parallel */
   scanAllMarkets: boolean;
@@ -497,6 +503,11 @@ export interface TradingSettings {
   recoveryUnderDigit?: number;
   /** Recovery method: split (gradual across wins) or instant (full recovery in one trade) */
   recoveryMethod?: string;
+  /** Compute recovery stake from live payout, debt, and original target profit */
+  recoveryAutoMode?: boolean;
+  allowedMarkets?: string[];
+  riskAmountType?: "fixed" | "percentage";
+  riskAmountValue?: number;
 }
 
 export type TradingSettingsInputRiskProfile = typeof TradingSettingsInputRiskProfile[keyof typeof TradingSettingsInputRiskProfile];
@@ -535,6 +546,10 @@ export interface TradingSettingsInput {
   recoveryOverDigit?: number;
   recoveryUnderDigit?: number;
   recoveryMethod?: string;
+  recoveryAutoMode?: boolean;
+  allowedMarkets?: string[];
+  riskAmountType?: "fixed" | "percentage";
+  riskAmountValue?: number;
 }
 
 export type GetMarketsParams = {

@@ -9,6 +9,16 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { useGetSettings } from "@workspace/api-client-react";
+import {
+  OVER_PAYOUTS,
+  UNDER_PAYOUTS,
+  EVEN_ODD_PAYOUT,
+  RISE_FALL_PAYOUT,
+  MATCH_PAYOUT,
+  DIFF_PAYOUT,
+  exactRecoveryStake,
+  roundRecoveryStakeUp,
+} from "@/lib/payouts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -75,6 +85,9 @@ interface SessionStatus {
   inRecovery: boolean;
   recoveryStep: number;
   unrecoveredAmount: number;
+  recoveryTargetProfit: number;
+  recoveryRemainingTargetProfit: number;
+  recoveryOriginPayout: number;
   consecutiveRecoveryLosses: number;
   currentMarket?: string;
   currentContractType?: string;
@@ -84,6 +97,7 @@ interface SessionStatus {
     stake: number;
     stopLoss: number;
     takeProfit: number;
+    recoveryAutoMode: boolean;
     recoveryMultiplier: number;
     recoveryMethod: string;
     maxRecoverySteps: number;
@@ -121,7 +135,7 @@ const ALL_SCAN_MARKETS: { symbol: string; short: string; group: string }[] = [
 
 // Normal mode never trades Matches (recovery-only); recovery mode never trades
 // Differs (normal-only). This keeps the cold-digit / hot-digit strategy split intact:
-// Differ = ~96% win avoiding the coldest digit, Match = 9× payout recovering losses fast.
+// Differ = ~96% win avoiding the coldest digit, Match = 8.93× payout recovering losses fast.
 const NORMAL_FAMILIES: { id: ContractFamily; label: string; icon: React.ReactNode; desc: string }[] = [
   { id: "overUnder", label: "Over & Under", icon: <Hash className="w-3.5 h-3.5" />, desc: "Digit barrier trades" },
   { id: "riseFall",  label: "Rise & Fall",  icon: <TrendingUp className="w-3.5 h-3.5" />, desc: "Price direction trades" },
@@ -133,21 +147,8 @@ const RECOVERY_FAMILIES: { id: ContractFamily; label: string; icon: React.ReactN
   { id: "overUnder", label: "Over & Under", icon: <Hash className="w-3.5 h-3.5" />, desc: "Digit barrier trades" },
   { id: "riseFall",  label: "Rise & Fall",  icon: <TrendingUp className="w-3.5 h-3.5" />, desc: "Price direction trades" },
   { id: "evenOdd",   label: "Even & Odd",   icon: <Equal className="w-3.5 h-3.5" />, desc: "Digit parity trades" },
-  { id: "match",     label: "Matches",      icon: <BarChart2 className="w-3.5 h-3.5" />, desc: "Hot-digit recovery (9× payout)" },
+  { id: "match",     label: "Matches",      icon: <BarChart2 className="w-3.5 h-3.5" />, desc: "Hot-digit recovery (8.93× payout)" },
 ];
-
-const DIGIT_PAYOUTS_OVER: Record<number, number> = {
-  0: 1.04, 1: 1.08, 2: 1.19, 3: 1.37, 4: 1.63, 5: 1.96, 6: 2.45, 7: 3.27, 8: 4.90,
-};
-
-function autoMultiplier(barrier: number, contractType: "over" | "under") {
-  const payout = contractType === "over"
-    ? (DIGIT_PAYOUTS_OVER[barrier] ?? 1.63)
-    : (DIGIT_PAYOUTS_OVER[9 - barrier] ?? 1.63);
-  const netPayout = payout - 1;
-  if (netPayout <= 0) return 9.0;
-  return Math.round((1 / netPayout) * 1.02 * 100) / 100;
-}
 
 function familyToContracts(family: ContractFamily, overB: number, underB: number) {
   switch (family) {
@@ -273,7 +274,7 @@ function BarrierRow({ label, overBarrier, underBarrier, onOverBarrier, onUnderBa
             </SelectTrigger>
             <SelectContent>
               {[0,1,2,3,4,5,6,7,8].map(b => (
-                <SelectItem key={b} value={String(b)}>OVER {b} · {(100*(9-b)/10).toFixed(0)}%</SelectItem>
+                <SelectItem key={b} value={String(b)}>OVER {b} · {(100*(9-b)/10).toFixed(0)}% · {OVER_PAYOUTS[b].toFixed(2)}×</SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -286,7 +287,7 @@ function BarrierRow({ label, overBarrier, underBarrier, onOverBarrier, onUnderBa
             </SelectTrigger>
             <SelectContent>
               {[1,2,3,4,5,6,7,8,9].map(b => (
-                <SelectItem key={b} value={String(b)}>UNDER {b} · {(100*b/10).toFixed(0)}%</SelectItem>
+                <SelectItem key={b} value={String(b)}>UNDER {b} · {(100*b/10).toFixed(0)}% · {UNDER_PAYOUTS[b].toFixed(2)}×</SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -468,9 +469,6 @@ export function SpeedAIFab() {
       recoveryBarrierSet.push(config.recoveryOverBarrier, config.recoveryUnderBarrier);
     }
 
-    // In auto mode, pin the multiplier to the payout-calibrated suggestion
-    const effectiveMultiplier = config.recoveryAutoMode ? suggestedMult : config.recoveryMultiplier;
-
     return {
       normalContractTypes:   normalContracts.types,
       normalBarriers:        normalContracts.barriers,
@@ -479,7 +477,9 @@ export function SpeedAIFab() {
       stake:                 config.stake,
       stopLoss:              config.stopLoss,
       takeProfit:            config.takeProfit,
-      recoveryMultiplier:    effectiveMultiplier,
+      recoveryAutoMode:      config.recoveryAutoMode,
+      // Ignored by the server in Auto mode; used exactly as entered in Manual.
+      recoveryMultiplier:    config.recoveryMultiplier,
       recoveryMethod:        config.recoveryMethod,
       maxRecoverySteps:      config.maxRecoverySteps,
       ...(lockedSymbol ? { lockedSymbol } : {}),
@@ -560,11 +560,24 @@ export function SpeedAIFab() {
   const winRate = status && status.tradeCount > 0
     ? Math.round((status.winCount / status.tradeCount) * 100) : 0;
 
-  // Calibrate suggested multiplier to the recovery Over barrier payout.
-  // Only meaningful when overUnder is among the selected recovery families.
-  const suggestedMult = config.recoveryFamilies.includes("overUnder")
-    ? autoMultiplier(config.recoveryOverBarrier, "over")
-    : 2.0;
+  const selectedOverPayout = OVER_PAYOUTS[config.recoveryOverBarrier] ?? OVER_PAYOUTS[4];
+  const selectedUnderPayout = UNDER_PAYOUTS[config.recoveryUnderBarrier] ?? UNDER_PAYOUTS[5];
+  const normalOverPayout = config.normalFamily === "overUnder"
+    ? (OVER_PAYOUTS[config.normalOverBarrier] ?? OVER_PAYOUTS[1])
+    : config.normalFamily === "riseFall" ? RISE_FALL_PAYOUT
+    : config.normalFamily === "evenOdd" ? EVEN_ODD_PAYOUT
+    : DIFF_PAYOUT;
+  const normalUnderPayout = config.normalFamily === "overUnder"
+    ? (UNDER_PAYOUTS[config.normalUnderBarrier] ?? UNDER_PAYOUTS[8])
+    : normalOverPayout;
+  const overTargetProfit = config.stake * (normalOverPayout - 1);
+  const underTargetProfit = config.stake * (normalUnderPayout - 1);
+  const overInstantExample = roundRecoveryStakeUp(
+    exactRecoveryStake(config.stake, overTargetProfit, selectedOverPayout),
+  );
+  const underInstantExample = roundRecoveryStakeUp(
+    exactRecoveryStake(config.stake, underTargetProfit, selectedUnderPayout),
+  );
 
   return (
     <>
@@ -673,10 +686,39 @@ export function SpeedAIFab() {
                       </div>
 
                       {/* Auto mode info */}
-                      {config.recoveryAutoMode && (
-                        <div className="text-[9px] text-muted-foreground/70 px-0.5">
-                          AI stakes the exact minimum to cover accumulated debt in one win. Multiplier auto-set to <span className="text-cyan-400 font-mono">{suggestedMult}×</span> (calibrated to OVER {config.recoveryOverBarrier} payout).
+                      {config.recoveryAutoMode ? (
+                        <div className="space-y-1.5 text-[9px] text-muted-foreground/70 px-0.5">
+                          <p>
+                            <span className="text-cyan-400 font-medium">Exact formula:</span>{" "}
+                            (unrecovered amount + original normal-trade profit) ÷ (live payout − 1).
+                            No multiplier is used.
+                          </p>
+                          <p>
+                            Instant uses the full exact stake. Split caps each attempt at your
+                            <span className="text-white/70"> ${config.stake.toFixed(2)} base stake</span> and carries the rest forward.
+                          </p>
+                          {config.recoveryFamilies.includes("overUnder") && (
+                            <div className="rounded border border-white/5 bg-black/20 px-2 py-1.5 text-muted-foreground/60">
+                              <p>
+                                ${config.stake.toFixed(2)} loss example · OVER {config.recoveryOverBarrier} / UNDER {config.recoveryUnderBarrier}
+                              </p>
+                              <p className="font-mono text-cyan-400/80">
+                                Instant ${overInstantExample.toFixed(2)} / ${underInstantExample.toFixed(2)} · Split ≤${config.stake.toFixed(2)}
+                              </p>
+                            </div>
+                          )}
+                          <p className="text-muted-foreground/50">
+                            Selected O/U fallback: OVER {config.recoveryOverBarrier} {selectedOverPayout.toFixed(2)}× · UNDER {config.recoveryUnderBarrier} {selectedUnderPayout.toFixed(2)}×
+                          </p>
+                          <p className="text-muted-foreground/50">
+                            Even/Odd {EVEN_ODD_PAYOUT.toFixed(2)}× · Rise/Fall {RISE_FALL_PAYOUT.toFixed(2)}× · Match {MATCH_PAYOUT.toFixed(2)}× · Differ {DIFF_PAYOUT.toFixed(2)}×
+                          </p>
                         </div>
+                      ) : (
+                        <p className="text-[9px] text-muted-foreground/70 px-0.5">
+                          Your multiplier is used without payout calibration or a hidden floor/ceiling.
+                          It compounds after each recovery loss until Max steps.
+                        </p>
                       )}
 
                       {/* Method */}
@@ -684,9 +726,13 @@ export function SpeedAIFab() {
                         <div className="flex-1">
                           <span className="text-xs text-muted-foreground">Method</span>
                           {config.recoveryMethod === "split" ? (
-                            <p className="text-[8px] text-muted-foreground/50 mt-0.5">Cap grows by 1× each step — spreads recovery across wins</p>
+                            <p className="text-[8px] text-muted-foreground/50 mt-0.5">
+                              Auto: max one base stake per attempt · Manual: multiplier-capped
+                            </p>
                           ) : (
-                            <p className="text-[8px] text-muted-foreground/50 mt-0.5">Tries multiplier stake; escalates to full debt clearance if needed</p>
+                            <p className="text-[8px] text-muted-foreground/50 mt-0.5">
+                              Auto: exact one-win clearance · Manual: your multiplier
+                            </p>
                           )}
                         </div>
                         <Select value={config.recoveryMethod} onValueChange={v => set("recoveryMethod", v as RecoveryMethod)}>
@@ -706,19 +752,11 @@ export function SpeedAIFab() {
                           <span className="text-xs text-muted-foreground flex-1">Multiplier</span>
                           <div className="flex items-center gap-1">
                             <Input
-                              type="number" value={config.recoveryMultiplier} min={1.01} max={20} step={0.01}
+                              type="number" value={config.recoveryMultiplier} step={0.01}
                               onChange={e => set("recoveryMultiplier", Number(e.target.value))}
                               className="w-20 h-7 text-right font-mono text-xs bg-black/30 border-white/10"
                             />
                             <span className="text-[10px] text-muted-foreground">×</span>
-                            {Math.abs(suggestedMult - config.recoveryMultiplier) > 0.01 && config.recoveryFamilies.includes("overUnder") && (
-                              <button
-                                onClick={() => set("recoveryMultiplier", suggestedMult)}
-                                className="text-[9px] px-1.5 py-1 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/20 whitespace-nowrap font-medium"
-                              >
-                                Auto {suggestedMult}×
-                              </button>
-                            )}
                           </div>
                         </div>
                       )}
@@ -1130,7 +1168,7 @@ export function SpeedAIFab() {
                               </p>
                             ) : (
                               <p className={aiOverride ? "text-red-400 font-medium" : "text-amber-400"}>
-                                Recovery step {status.recoveryStep}{status.config ? `/${status.config.maxRecoverySteps}` : ""} · ${status.unrecoveredAmount.toFixed(2)} to recover
+                                Recovery step {status.recoveryStep}{status.config ? `/${status.config.maxRecoverySteps}` : ""} · ${status.unrecoveredAmount.toFixed(2)} debt + ${(status.recoveryRemainingTargetProfit ?? status.recoveryTargetProfit ?? 0).toFixed(2)} target
                               </p>
                             )}
                           </div>

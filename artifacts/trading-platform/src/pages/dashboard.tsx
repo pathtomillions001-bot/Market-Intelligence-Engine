@@ -109,7 +109,10 @@ function RecoveryStatCard({ engine }: { engine: any }) {
               )}
             </div>
             <div className="text-xs text-amber-400/80 mt-0.5 font-medium">
-              ${engine.recovery.totalUnrecovered?.toFixed(2) ?? "0.00"} to recover
+              ${engine.recovery.totalUnrecovered?.toFixed(2) ?? "0.00"} debt
+              {engine.recovery.remainingTargetProfit > 0 && (
+                <> + ${engine.recovery.remainingTargetProfit.toFixed(2)} target remaining</>
+              )}
             </div>
             <div className="text-xs text-muted-foreground mt-1">
               {engine.recovery.totalStreakLosses > 0 ? (

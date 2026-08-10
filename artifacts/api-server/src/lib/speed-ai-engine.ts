@@ -45,6 +45,16 @@ import { broadcastSSE } from "./sse";
 import { db, accountsTable, settingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { logger } from "./logger";
+import {
+  OVER_PAYOUTS,
+  UNDER_PAYOUTS,
+  EVEN_ODD_PAYOUT,
+  RISE_FALL_PAYOUT,
+  MATCH_PAYOUT,
+  DIFF_PAYOUT,
+} from "./payouts";
+import { resolveRecoveryPayout } from "./recovery-payout";
+import { applyRecoveryStakeLimits, calculateRecoveryStakeRequest } from "./recovery-math";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -56,15 +66,6 @@ const MIN_TRADE_SCORE = 50;
 
 /** Minimum score for recovery — slightly tighter but still always achievable */
 const MIN_RECOVERY_SCORE = 52;
-
-const DIGIT_PAYOUTS_OVER: Record<number, number> = {
-  0: 1.04, 1: 1.08, 2: 1.19, 3: 1.37, 4: 1.63,
-  5: 1.96, 6: 2.45, 7: 3.27, 8: 4.90,
-};
-const DIGIT_PAYOUTS_UNDER: Record<number, number> = {
-  9: 1.04, 8: 1.08, 7: 1.19, 6: 1.37, 5: 1.63,
-  4: 1.96, 3: 2.45, 2: 3.27, 1: 4.90,
-};
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -82,6 +83,7 @@ export interface SpeedAIConfig {
   stake: number;
   stopLoss: number;
   takeProfit: number;
+  recoveryAutoMode: boolean;
   recoveryMultiplier: number;
   recoveryMethod: "split" | "instant";
   maxRecoverySteps: number;
@@ -126,6 +128,12 @@ interface SpeedRecoveryState {
   recoveryStep: number;
   unrecoveredAmount: number;
   baseStake: number;
+  /** Expected net profit of the normal trade whose loss started recovery. */
+  targetProfit: number;
+  /** Portion of that target not yet earned after partial recovery wins. */
+  remainingTargetProfit: number;
+  /** Total-return multiplier of that original normal trade. */
+  originPayoutMultiplier: number;
   /** Losses taken while already IN recovery (resets to 0 on any recovery win) */
   consecutiveRecoveryLosses: number;
   /** Last 8 recovery trade outcomes — feeds anti-pattern penalty in fastRecoveryGate */
@@ -143,6 +151,9 @@ export interface SpeedAIStatus {
   inRecovery: boolean;
   recoveryStep: number;
   unrecoveredAmount: number;
+  recoveryTargetProfit: number;
+  recoveryRemainingTargetProfit: number;
+  recoveryOriginPayout: number;
   consecutiveRecoveryLosses: number;
   currentMarket?: string;
   currentContractType?: string;
@@ -179,7 +190,7 @@ let session: {
   winCount: 0,
   lossCount: 0,
   currentStake: 0,
-  recovery: { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: 0, consecutiveRecoveryLosses: 0, recentRecoveryTrades: [] },
+  recovery: { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: 0, targetProfit: 0, remainingTargetProfit: 0, originPayoutMultiplier: 1, consecutiveRecoveryLosses: 0, recentRecoveryTrades: [] },
   topMarkets: [],
   stopRequested: false,
 };
@@ -499,7 +510,7 @@ function precisionScore(
       if (barrier === undefined) return null;
       empirical = freq50.slice(barrier + 1).reduce((a, b) => a + b, 0);
       markovWin = markov.slice(barrier + 1).reduce((a, b) => a + b, 0);
-      payout    = DIGIT_PAYOUTS_OVER[barrier] ?? 1.63;
+      payout    = OVER_PAYOUTS[barrier] ?? OVER_PAYOUTS[4];
       // Streak-against bonus: consecutive recent digits at/below barrier = building reversal pressure
       signalBonus = Math.min(12, streakAgainstLength(digits, "DIGITOVER", barrier) * 4);
       break;
@@ -508,14 +519,14 @@ function precisionScore(
       if (barrier === undefined) return null;
       empirical = freq50.slice(0, barrier).reduce((a, b) => a + b, 0);
       markovWin = markov.slice(0, barrier).reduce((a, b) => a + b, 0);
-      payout    = DIGIT_PAYOUTS_UNDER[barrier] ?? 1.63;
+      payout    = UNDER_PAYOUTS[barrier] ?? UNDER_PAYOUTS[5];
       signalBonus = Math.min(12, streakAgainstLength(digits, "DIGITUNDER", barrier) * 4);
       break;
     }
     case "DIGITEVEN": {
       empirical = [0, 2, 4, 6, 8].reduce((s, d) => s + (freq50[d] ?? 0), 0);
       markovWin = [0, 2, 4, 6, 8].reduce((s, d) => s + (markov[d] ?? 0), 0);
-      payout    = 1.96;
+      payout    = EVEN_ODD_PAYOUT;
       // Consecutive odd ticks = alternation setup — the longer the odd streak, the stronger the signal
       signalBonus = Math.min(15, streakAgainstLength(digits, "DIGITEVEN", undefined) * 5);
       break;
@@ -523,7 +534,7 @@ function precisionScore(
     case "DIGITODD": {
       empirical = [1, 3, 5, 7, 9].reduce((s, d) => s + (freq50[d] ?? 0), 0);
       markovWin = [1, 3, 5, 7, 9].reduce((s, d) => s + (markov[d] ?? 0), 0);
-      payout    = 1.96;
+      payout    = EVEN_ODD_PAYOUT;
       signalBonus = Math.min(15, streakAgainstLength(digits, "DIGITODD", undefined) * 5);
       break;
     }
@@ -532,7 +543,7 @@ function precisionScore(
       empirical = freq50[barrier] ?? 0.1;
       // Direct Markov transition FROM current digit TO target — the most predictive signal for MATCH
       markovWin = markovToTarget(digits, barrier);
-      payout    = 9.0;
+      payout    = MATCH_PAYOUT;
       // Gap-since-last: hot window [3-10 ticks] = optimal MATCH setup
       const matchGap = digitGapSinceLast(digits, barrier);
       signalBonus = matchGap >= 3 && matchGap <= 10 ? 10
@@ -545,7 +556,7 @@ function precisionScore(
       empirical = 1 - (freq50[barrier] ?? 0.1);
       // P(≠ barrier | current last digit) — how likely is the market to avoid this digit next tick?
       markovWin = 1 - markovToTarget(digits, barrier);
-      payout    = 1.04;
+      payout    = DIFF_PAYOUT;
       // Gap-since-last: longer = colder = safer exclusion
       const diffGap = digitGapSinceLast(digits, barrier);
       signalBonus = diffGap >= 8 ? 8 : diffGap >= 5 ? 3 : diffGap <= 1 ? -8 : -3;
@@ -556,7 +567,7 @@ function precisionScore(
       for (let i = 1; i < prices.length; i++) if (prices[i] > prices[i - 1]) ups++;
       empirical = ups / Math.max(1, prices.length - 1);
       markovWin = empirical;
-      payout    = 1.91;
+      payout    = RISE_FALL_PAYOUT;
       // Recency-weighted momentum: recent up moves matter far more than old ones
       signalBonus = Math.round((priceMomentumScore(prices, "CALL") - 0.5) * 30); // ±15 pts
       break;
@@ -566,7 +577,7 @@ function precisionScore(
       for (let i = 1; i < prices.length; i++) if (prices[i] < prices[i - 1]) downs++;
       empirical = downs / Math.max(1, prices.length - 1);
       markovWin = empirical;
-      payout    = 1.91;
+      payout    = RISE_FALL_PAYOUT;
       signalBonus = Math.round((priceMomentumScore(prices, "PUT") - 0.5) * 30);
       break;
     }
@@ -1155,26 +1166,22 @@ function computeRecoveryStake(
   payout: number,
   config: SpeedAIConfig,
   maxStake: number,
+  availableBalance: number,
 ): number {
   if (!rec.inRecovery) return config.stake;
-  const netPayout = payout - 1;
-  if (netPayout <= 0) return config.stake;
 
-  const minRecovery = (rec.unrecoveredAmount / netPayout) * 1.05;
-  const baseMultiplier = config.recoveryMultiplier;
-
-  if (config.recoveryMethod === "instant") {
-    const splitEquiv = rec.baseStake * baseMultiplier;
-    const stake = splitEquiv * netPayout >= rec.unrecoveredAmount ? splitEquiv : minRecovery;
-    return Math.max(0.35, Math.min(stake, maxStake));
-  }
-
-  // Split: progressive cap per step
-  const stepOffset     = Math.max(0, rec.recoveryStep - 1);
-  const payoutImpliedMin = (1 / netPayout) * 1.05;
-  const effective      = Math.max(baseMultiplier, payoutImpliedMin) + stepOffset;
-  const splitCap       = rec.baseStake * effective;
-  return Math.max(0.35, Math.min(minRecovery, splitCap, maxStake));
+  const requestedStake = calculateRecoveryStakeRequest({
+    unrecoveredAmount: rec.unrecoveredAmount,
+    remainingTargetProfit: rec.remainingTargetProfit,
+    payoutMultiplier: payout,
+    baseStake: rec.baseStake > 0 ? rec.baseStake : config.stake,
+    recoveryAutoMode: config.recoveryAutoMode,
+    recoveryMethod: config.recoveryMethod,
+    recoveryMultiplier: config.recoveryMultiplier,
+    recoveryStep: rec.recoveryStep,
+    maxRecoverySteps: config.maxRecoverySteps,
+  });
+  return applyRecoveryStakeLimits(requestedStake, maxStake, availableBalance);
 }
 
 function recordRecoveryOutcome(
@@ -1183,6 +1190,7 @@ function recordRecoveryOutcome(
   profit: number,
   stake: number,
   maxSteps: number,
+  payoutMultiplier: number,
   tradeContractType?: SpeedContractType,
   tradeBarrier?: number,
 ): SpeedRecoveryState {
@@ -1196,12 +1204,32 @@ function recordRecoveryOutcome(
 
   if (won) {
     if (rec.inRecovery) {
-      const remaining = rec.unrecoveredAmount - Math.max(0, profit);
-      if (remaining <= 0.005) {
-        // Debt fully cleared — reset recovery state and history for next episode
-        return { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: rec.baseStake, consecutiveRecoveryLosses: 0, recentRecoveryTrades: [] };
+      const recovered = Math.max(0, profit);
+      const debtRecovered = Math.min(rec.unrecoveredAmount, recovered);
+      const profitAvailableForTarget = Math.max(0, recovered - debtRecovered);
+      const remainingDebt = Math.max(0, rec.unrecoveredAmount - debtRecovered);
+      const remainingTarget = Math.max(0, rec.remainingTargetProfit - profitAvailableForTarget);
+      if (remainingDebt + remainingTarget <= 0.005) {
+        // Debt and original normal-trade target are both fully covered.
+        return {
+          inRecovery: false,
+          recoveryStep: 0,
+          unrecoveredAmount: 0,
+          baseStake: rec.baseStake,
+          targetProfit: 0,
+          remainingTargetProfit: 0,
+          originPayoutMultiplier: 1,
+          consecutiveRecoveryLosses: 0,
+          recentRecoveryTrades: [],
+        };
       }
-      return { ...rec, unrecoveredAmount: remaining, consecutiveRecoveryLosses: 0, recentRecoveryTrades: recentTrades };
+      return {
+        ...rec,
+        unrecoveredAmount: remainingDebt,
+        remainingTargetProfit: remainingTarget,
+        consecutiveRecoveryLosses: 0,
+        recentRecoveryTrades: recentTrades,
+      };
     }
     return rec;
   }
@@ -1212,6 +1240,9 @@ function recordRecoveryOutcome(
       recoveryStep: 1,
       unrecoveredAmount: stake,
       baseStake: rec.baseStake > 0 ? rec.baseStake : stake,
+      targetProfit: stake * Math.max(0, payoutMultiplier - 1),
+      remainingTargetProfit: stake * Math.max(0, payoutMultiplier - 1),
+      originPayoutMultiplier: payoutMultiplier > 1 ? payoutMultiplier : 1,
       consecutiveRecoveryLosses: 0,
       recentRecoveryTrades: recentTrades,
     };
@@ -1247,6 +1278,9 @@ export function getStatus(): SpeedAIStatus {
     inRecovery:                session.recovery.inRecovery,
     recoveryStep:              session.recovery.recoveryStep,
     unrecoveredAmount:         Math.round(session.recovery.unrecoveredAmount * 100) / 100,
+    recoveryTargetProfit:      Math.round(session.recovery.targetProfit * 100) / 100,
+    recoveryRemainingTargetProfit: Math.round(session.recovery.remainingTargetProfit * 100) / 100,
+    recoveryOriginPayout:      Math.round(session.recovery.originPayoutMultiplier * 1000) / 1000,
     consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses,
     currentMarket:             session.currentMarket,
     currentContractType:       session.currentContractType,
@@ -1283,7 +1317,7 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
     winCount:    0,
     lossCount:   0,
     currentStake: config.stake,
-    recovery: { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: config.stake, consecutiveRecoveryLosses: 0, recentRecoveryTrades: [] },
+    recovery: { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: config.stake, targetProfit: 0, remainingTargetProfit: 0, originPayoutMultiplier: 1, consecutiveRecoveryLosses: 0, recentRecoveryTrades: [] },
     topMarkets:   [],
     stopRequested: false,
     message: "Analyzing markets…",
@@ -1316,6 +1350,9 @@ async function runLoop(config: SpeedAIConfig) {
   const currency = accounts.length > 0 ? accounts[0].currency : "USD";
   const isLive   = !paperTradeMode && !!token;
   const maxStake = settings.length > 0 ? Number(settings[0].maxTradeStake) : 500;
+  let availableBalance = accounts.length > 0 && Number(accounts[0].balance) > 0
+    ? Number(accounts[0].balance)
+    : Number.POSITIVE_INFINITY;
 
   const lockedDerivsMarket = config.lockedSymbol
     ? DERIV_MARKETS.find(m => m.symbol === config.lockedSymbol) ?? null
@@ -1529,7 +1566,21 @@ async function runLoop(config: SpeedAIConfig) {
     }
 
     // ── Compute stake and announce ─────────────────────────────────────────────
-    const stake = Math.round(computeRecoveryStake(session.recovery, best.payout, config, maxStake) * 100) / 100;
+    // Quote the exact candidate immediately before sizing. The $1 live proposal
+    // provides the total-return multiplier; canonical payouts are the fallback.
+    const payoutQuote = await resolveRecoveryPayout({
+      symbol: best.symbol,
+      contractType: best.contractType,
+      barrier: best.barrier,
+      duration: 1,
+      durationUnit: "t",
+      currency,
+    });
+    best = { ...best, payout: payoutQuote.payoutMultiplier };
+
+    // computeRecoveryStake rounds UP to cents, preventing an exact recovery from
+    // finishing a cent short after normal decimal rounding.
+    const stake = computeRecoveryStake(session.recovery, best.payout, config, maxStake, availableBalance);
 
     session.currentMarket       = best.displayName;
     session.currentContractType = best.contractType + (best.barrier !== undefined ? ` ${best.barrier}` : "");
@@ -1609,16 +1660,21 @@ async function runLoop(config: SpeedAIConfig) {
     else      { session.lossCount++; session.lastResult = "lost"; }
 
     session.recovery = recordRecoveryOutcome(
-      session.recovery, won, profit, stake, config.maxRecoverySteps,
+      session.recovery, won, profit, stake, config.maxRecoverySteps, best.payout,
       inRecovery ? best.contractType : undefined,
       inRecovery ? best.barrier      : undefined,
     );
+
+    if (!isLive && Number.isFinite(availableBalance)) {
+      availableBalance = Math.max(0, availableBalance + profit);
+    }
 
     // Sync live balance — update only the active account
     if (isLive) {
       try {
         const newBal = await getLiveBalance(token!);
         if (newBal !== null && accounts.length > 0) {
+          availableBalance = newBal;
           await db.update(accountsTable)
             .set({ balance: String(newBal), updatedAt: new Date() })
             .where(eq(accountsTable.id, accounts[0].id));

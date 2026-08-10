@@ -24,6 +24,7 @@
 import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { logger } from "./logger";
+import { RISE_FALL_PAYOUT } from "./payouts";
 
 // ── Deriv API base URLs ───────────────────────────────────────────────────────
 export const DERIV_REST_BASE = "https://api.derivws.com";
@@ -1512,11 +1513,11 @@ export async function getContractProposal(
             clearTimeout(timeout);
             ws.close();
             const askPrice = Number(msg.proposal.ask_price ?? params.stake);
-            const payout = Number(msg.proposal.payout ?? askPrice * 1.87);
+            const payout = Number(msg.proposal.payout ?? askPrice * RISE_FALL_PAYOUT);
             resolve({
               payout,
               stake: askPrice,
-              payoutMultiplier: askPrice > 0 ? payout / askPrice : 1.87,
+              payoutMultiplier: askPrice > 0 ? payout / askPrice : RISE_FALL_PAYOUT,
               spot: Number(msg.proposal.spot ?? 0),
               longcode: msg.proposal.longcode ?? "",
               proposalId: String(msg.proposal.id ?? ""),
