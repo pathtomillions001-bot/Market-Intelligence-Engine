@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { accountsTable } from "@workspace/db";
-import { eq, ne, like } from "drizzle-orm";
+import { eq, ne } from "drizzle-orm";
 import {
   authorizeWithDeriv,
   setDerivCredentials,
@@ -17,168 +17,8 @@ import {
 } from "../lib/deriv";
 import { ConnectDerivAccountBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
-import { createHash } from "crypto";
 
 const router = Router();
-
-// Rows created with this loginId prefix represent tokens saved locally that have
-// NOT yet been verified against Deriv (e.g. Deriv's API was unreachable at
-// connect time). They are placeholders until verification succeeds and the real
-// Deriv sub-accounts are upserted.
-const PENDING_LOGIN_PREFIX = "pending_";
-
-// Cooldown between verification attempts for unverified tokens (avoids spamming
-// Deriv's API while it is unreachable — e.g. restricted sandbox egress).
-const VERIFY_COOLDOWN_MS = 60_000;
-const lastVerifyAttempt = new Map<string, number>();
-
-function isPendingLoginId(loginId: string | null | undefined): boolean {
-  return !!loginId && loginId.startsWith(PENDING_LOGIN_PREFIX);
-}
-
-function pendingLoginIdFor(token: string): string {
-  const hash = createHash("sha256").update(token).digest("hex").slice(0, 12);
-  return `${PENDING_LOGIN_PREFIX}${hash}`;
-}
-
-/**
- * Save a token locally WITHOUT requiring a successful Deriv round-trip.
- *
- * Used when Deriv's API is unreachable or rejects the token: the credential is
- * persisted (and activated in the module cache) so the user's connection is not
- * silently lost. The row is a placeholder that gets upgraded to the real Deriv
- * sub-accounts as soon as verification succeeds (see enrichPendingAccount).
- */
-async function savePendingTokenAccount(token: string): Promise<{
-  account: typeof accountsTable.$inferSelect;
-  warning: string;
-}> {
-  const loginId = pendingLoginIdFor(token);
-  await db.update(accountsTable).set({ isActive: false });
-
-  const existing = await db.select().from(accountsTable).where(eq(accountsTable.loginId, loginId));
-  let row: typeof accountsTable.$inferSelect;
-  if (existing.length > 0) {
-    const [updated] = await db
-      .update(accountsTable)
-      .set({
-        token,
-        bearerToken: token,
-        derivAccountId: null,
-        isActive: true,
-        updatedAt: new Date(),
-      })
-      .where(eq(accountsTable.loginId, loginId))
-      .returning();
-    row = updated;
-  } else {
-    const [created] = await db
-      .insert(accountsTable)
-      .values({
-        loginId,
-        token,
-        bearerToken: token,
-        derivAccountId: null,
-        isActive: true,
-      })
-      .returning();
-    row = created;
-  }
-
-  setDerivCredentials(token, loginId);
-
-  return {
-    account: row,
-    warning:
-      "Token saved, but Deriv's API could not be reached to verify it. " +
-      "Live trading stays in offline/paper mode until verification succeeds.",
-  };
-}
-
-/**
- * Upsert ALL Deriv sub-accounts discovered for a token, marking only the
- * preferred one active. Returns the DB row of the preferred account.
- */
-async function upsertDerivAccounts(
-  token: string,
-  derivAccounts: Array<{
-    account_id: string;
-    balance: number;
-    currency: string;
-    account_type: "demo" | "real";
-    status?: string;
-  }>,
-  preferredAccountId: string,
-): Promise<typeof accountsTable.$inferSelect> {
-  await db.update(accountsTable).set({ isActive: false });
-
-  let preferredDbAccount: any = null;
-  for (const derivAcc of derivAccounts) {
-    const isActive = derivAcc.account_id === preferredAccountId;
-    const existing = await db.select().from(accountsTable)
-      .where(eq(accountsTable.loginId, derivAcc.account_id));
-
-    if (existing.length > 0) {
-      const [updated] = await db.update(accountsTable).set({
-        bearerToken: token, token: null,
-        derivAccountId: derivAcc.account_id,
-        currency: derivAcc.currency,
-        balance: String(derivAcc.balance),
-        isVirtual: derivAcc.account_type === "demo",
-        isActive,
-        updatedAt: new Date(),
-      }).where(eq(accountsTable.loginId, derivAcc.account_id)).returning();
-      if (isActive) preferredDbAccount = updated;
-    } else {
-      const [created] = await db.insert(accountsTable).values({
-        loginId: derivAcc.account_id,
-        token: null,
-        bearerToken: token,
-        derivAccountId: derivAcc.account_id,
-        currency: derivAcc.currency,
-        balance: String(derivAcc.balance),
-        isVirtual: derivAcc.account_type === "demo",
-        isActive,
-      }).returning();
-      if (isActive) preferredDbAccount = created;
-    }
-  }
-
-  // Clean up stale placeholder rows left over from offline connects
-  await db.delete(accountsTable).where(like(accountsTable.loginId, `${PENDING_LOGIN_PREFIX}%`));
-  return preferredDbAccount;
-}
-
-/**
- * Attempt to verify + enrich a saved-but-unverified token. If Deriv's API is
- * reachable and the token is valid, the real sub-accounts are upserted and the
- * placeholder row is replaced. Returns the (possibly upgraded) active account,
- * or null if nothing is connected.
- */
-async function enrichPendingAccount(
-  token: string,
-  placeholderLoginId: string,
-): Promise<{ account: any; verificationPending: boolean } | null> {
-  const now = Date.now();
-  const last = lastVerifyAttempt.get(placeholderLoginId) ?? 0;
-  if (now - last < VERIFY_COOLDOWN_MS) return null;
-  lastVerifyAttempt.set(placeholderLoginId, now);
-
-  try {
-    const derivAccounts = await getDerivAccounts(token);
-    if (derivAccounts.length === 0) throw new Error("No trading accounts found for this token");
-    const preferred = derivAccounts.find((a) => a.account_type === "real" && a.status === "active")
-      ?? derivAccounts[0];
-    const account = await upsertDerivAccounts(token, derivAccounts, preferred.account_id);
-    setDerivCredentials(token, preferred.account_id);
-    logger.info({ placeholderLoginId, active: preferred.account_id }, "Offline token verified — upgraded to live Deriv accounts");
-    return { account, verificationPending: false };
-  } catch (err) {
-    logger.warn({ err, placeholderLoginId }, "Token still unverified — Deriv unreachable or rejected");
-    return null;
-  }
-}
-
 
 // ── PKCE state store (in-memory, keyed by state param) ──────────────────────
 const pendingPkce = new Map<string, { codeVerifier: string; redirectUri: string; expiresAt: number }>();
@@ -231,7 +71,7 @@ function formatAccount(account: {
   fullName: string | null;
   country: string | null;
   connectedAt: Date;
-}, balance?: number, verificationPending = isPendingLoginId(account.loginId)) {
+}, balance?: number) {
   return {
     id: account.id,
     loginId: account.loginId,
@@ -239,7 +79,6 @@ function formatAccount(account: {
     balance: balance ?? Number(account.balance),
     isVirtual: account.isVirtual,
     isActive: account.isActive,
-    verificationPending,
     email: account.email,
     fullName: account.fullName,
     country: account.country,
@@ -408,11 +247,6 @@ router.post("/oauth/callback", async (req, res): Promise<void> => {
  * discover ALL sub-accounts (real + demo) associated with this token and stores
  * every one as a separate DB row — identical to the OAuth path — so the account
  * switcher works immediately after connecting with a token.
- *
- * If Deriv's API cannot be reached (network issue, sandbox egress restrictions,
- * etc.), the token is STILL saved locally as an unverified account so the user's
- * connection is never silently lost. It upgrades to the real Deriv sub-accounts
- * automatically as soon as verification succeeds (see GET /api/auth/account).
  */
 router.post("/connect", async (req, res): Promise<void> => {
   const parseResult = ConnectDerivAccountBody.safeParse(req.body);
@@ -422,22 +256,7 @@ router.post("/connect", async (req, res): Promise<void> => {
 
   try {
     // Fetch ALL sub-accounts for this token (same endpoint as OAuth path)
-    let derivAccounts: Awaited<ReturnType<typeof getDerivAccounts>>;
-    try {
-      derivAccounts = await getDerivAccounts(token);
-    } catch (err) {
-      // Deriv unreachable / token rejected — persist the token anyway so the
-      // user's connection is saved. It will be verified once Deriv is reachable.
-      logger.warn({ err }, "Deriv account discovery failed — saving token unverified");
-      const { account, warning } = await savePendingTokenAccount(token);
-      res.json({
-        ...formatAccount(account),
-        // surface the underlying reason to the client for diagnostics
-        warning,
-      });
-      return;
-    }
-
+    const derivAccounts = await getDerivAccounts(token);
     if (derivAccounts.length === 0) {
       // Fallback: try the older authorize path in case the token is a PAT
       // that doesn't work with the REST accounts endpoint
@@ -465,8 +284,7 @@ router.post("/connect", async (req, res): Promise<void> => {
         }).returning();
         account = created;
       }
-      await db.delete(accountsTable).where(like(accountsTable.loginId, `${PENDING_LOGIN_PREFIX}%`));
-      res.json(formatAccount(account, accountInfo.balance, false));
+      res.json(formatAccount(account, accountInfo.balance));
       return;
     }
 
@@ -474,8 +292,43 @@ router.post("/connect", async (req, res): Promise<void> => {
     const preferred = derivAccounts.find((a) => a.account_type === "real" && a.status === "active")
       ?? derivAccounts[0];
 
-    // Upsert ALL sub-accounts, marking only the preferred one as active
-    const preferredDbAccount = await upsertDerivAccounts(token, derivAccounts, preferred.account_id);
+    // Mark all existing rows inactive before re-upsert
+    await db.update(accountsTable).set({ isActive: false });
+
+    // ── Upsert ALL sub-accounts, marking only the preferred one as active ──
+    let preferredDbAccount: any = null;
+    for (const derivAcc of derivAccounts) {
+      const isActive = derivAcc.account_id === preferred.account_id;
+      const existing = await db.select().from(accountsTable)
+        .where(eq(accountsTable.loginId, derivAcc.account_id));
+
+      let dbRow;
+      if (existing.length > 0) {
+        const [updated] = await db.update(accountsTable).set({
+          bearerToken: token, token: null,
+          derivAccountId: derivAcc.account_id,
+          currency: derivAcc.currency,
+          balance: String(derivAcc.balance),
+          isVirtual: derivAcc.account_type === "demo",
+          isActive,
+          updatedAt: new Date(),
+        }).where(eq(accountsTable.loginId, derivAcc.account_id)).returning();
+        dbRow = updated;
+      } else {
+        const [created] = await db.insert(accountsTable).values({
+          loginId: derivAcc.account_id,
+          token: null,
+          bearerToken: token,
+          derivAccountId: derivAcc.account_id,
+          currency: derivAcc.currency,
+          balance: String(derivAcc.balance),
+          isVirtual: derivAcc.account_type === "demo",
+          isActive,
+        }).returning();
+        dbRow = created;
+      }
+      if (isActive) preferredDbAccount = dbRow;
+    }
 
     // Activate module-level cache with the preferred account
     setDerivCredentials(token, preferred.account_id);
@@ -485,19 +338,11 @@ router.post("/connect", async (req, res): Promise<void> => {
       active: preferred.account_id,
     }, "Token connect: stored all sub-accounts");
 
-    res.json(formatAccount(preferredDbAccount, preferred.balance, false));
+    res.json(formatAccount(preferredDbAccount, preferred.balance));
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Authorization failed";
     logger.error({ err }, "Deriv connect failed");
-    // Last-resort: never lose the user's token — persist unverified and let
-    // verification happen later.
-    try {
-      const { account, warning } = await savePendingTokenAccount(token);
-      res.json({ ...formatAccount(account), warning });
-    } catch (saveErr) {
-      logger.error({ err: saveErr }, "Failed to save token even unverified");
-      res.status(400).json({ error: msg });
-    }
+    res.status(400).json({ error: msg });
   }
 });
 
@@ -540,21 +385,6 @@ router.get("/account", async (req, res): Promise<void> => {
 
   const account = accounts[0];
   const bearerToken = account.bearerToken ?? account.token;
-
-  // Offline-saved token (placeholder row)? Try to verify it against Deriv and
-  // upgrade it to the real sub-accounts. Fails silently (and cheaply) while
-  // Deriv's API is unreachable.
-  if (isPendingLoginId(account.loginId) && bearerToken) {
-    const enriched = await enrichPendingAccount(bearerToken, account.loginId);
-    if (enriched) {
-      res.json(formatAccount(enriched.account, undefined, enriched.verificationPending));
-      return;
-    }
-    // Still unverified — report the placeholder as-is (verificationPending=true)
-    // and skip the live balance refresh below to avoid hammering Deriv.
-    res.json(formatAccount(account));
-    return;
-  }
 
   if (bearerToken) {
     try {

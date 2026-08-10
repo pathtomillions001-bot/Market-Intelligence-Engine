@@ -7,10 +7,6 @@
  */
 
 export interface DerivTokenInput {
-  /**
-     * Deriv Personal Access Token (PAT). New tokens start with "pat_" (e.g. pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx). Create one at app.deriv.com/account/api-token with Read and Trade permissions.
-
-     * @minLength 1
-     */
+  /** @minLength 1 */
   token: string;
 }

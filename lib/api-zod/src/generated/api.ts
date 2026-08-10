@@ -23,7 +23,7 @@ export const HealthCheckResponse = zod.object({
 
 
 export const ConnectDerivAccountBody = zod.object({
-  "token": zod.string().min(1).describe('Deriv Personal Access Token (PAT). New tokens start with \"pat_\" (e.g. pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx). Create one at app.deriv.com\/account\/api-token with Read and Trade permissions.\n')
+  "token": zod.string().min(1)
 })
 
 export const ConnectDerivAccountResponse = zod.object({
@@ -32,8 +32,6 @@ export const ConnectDerivAccountResponse = zod.object({
   "currency": zod.string(),
   "balance": zod.number(),
   "isVirtual": zod.boolean(),
-  "isActive": zod.boolean().optional().describe('True when this is the currently selected account for live trading'),
-  "verificationPending": zod.boolean().optional().describe('True when the token was saved locally but could not yet be verified against Deriv (e.g. Deriv\'s API is unreachable). The account is stored and the app runs in offline\/paper mode until verification succeeds; the account upgrades automatically once Deriv is reachable.\n'),
   "email": zod.string().nullish(),
   "fullName": zod.string().nullish(),
   "country": zod.string().nullish(),
@@ -50,13 +48,26 @@ export const GetAccountResponse = zod.object({
   "currency": zod.string(),
   "balance": zod.number(),
   "isVirtual": zod.boolean(),
-  "isActive": zod.boolean().optional().describe('True when this is the currently selected account for live trading'),
-  "verificationPending": zod.boolean().optional().describe('True when the token was saved locally but could not yet be verified against Deriv (e.g. Deriv\'s API is unreachable). The account is stored and the app runs in offline\/paper mode until verification succeeds; the account upgrades automatically once Deriv is reachable.\n'),
+  "isActive": zod.boolean().optional(),
   "email": zod.string().nullish(),
   "fullName": zod.string().nullish(),
   "country": zod.string().nullish(),
   "connectedAt": zod.string().optional()
 })
+
+/**
+ * @summary List all linked Deriv accounts
+ */
+export const GetAccountsResponse = zod.array(GetAccountResponse)
+
+/**
+ * @summary Switch the active trading account
+ */
+export const SwitchAccountBody = zod.object({
+  "loginId": zod.string().min(1)
+})
+
+export const SwitchAccountResponse = GetAccountResponse
 
 
 /**
@@ -65,47 +76,6 @@ export const GetAccountResponse = zod.object({
 export const DisconnectAccountResponse = zod.object({
   "success": zod.boolean(),
   "message": zod.string().nullish()
-})
-
-
-/**
- * @summary List all linked Deriv accounts
- */
-export const GetAccountsResponseItem = zod.object({
-  "id": zod.number(),
-  "loginId": zod.string(),
-  "currency": zod.string(),
-  "balance": zod.number(),
-  "isVirtual": zod.boolean(),
-  "isActive": zod.boolean().optional().describe('True when this is the currently selected account for live trading'),
-  "verificationPending": zod.boolean().optional().describe('True when the token was saved locally but could not yet be verified against Deriv (e.g. Deriv\'s API is unreachable). The account is stored and the app runs in offline\/paper mode until verification succeeds; the account upgrades automatically once Deriv is reachable.\n'),
-  "email": zod.string().nullish(),
-  "fullName": zod.string().nullish(),
-  "country": zod.string().nullish(),
-  "connectedAt": zod.string().optional()
-})
-export const GetAccountsResponse = zod.array(GetAccountsResponseItem)
-
-
-/**
- * @summary Switch the active Deriv account
- */
-export const SwitchAccountBody = zod.object({
-  "loginId": zod.string().describe('The Deriv login ID (account_id) to activate.')
-})
-
-export const SwitchAccountResponse = zod.object({
-  "id": zod.number(),
-  "loginId": zod.string(),
-  "currency": zod.string(),
-  "balance": zod.number(),
-  "isVirtual": zod.boolean(),
-  "isActive": zod.boolean().optional().describe('True when this is the currently selected account for live trading'),
-  "verificationPending": zod.boolean().optional().describe('True when the token was saved locally but could not yet be verified against Deriv (e.g. Deriv\'s API is unreachable). The account is stored and the app runs in offline\/paper mode until verification succeeds; the account upgrades automatically once Deriv is reachable.\n'),
-  "email": zod.string().nullish(),
-  "fullName": zod.string().nullish(),
-  "country": zod.string().nullish(),
-  "connectedAt": zod.string().optional()
 })
 
 
@@ -908,7 +878,12 @@ export const UpdateSettingsBody = zod.object({
   "normalOverDigit": zod.number().optional(),
   "normalUnderDigit": zod.number().optional(),
   "recoveryOverDigit": zod.number().optional(),
-  "recoveryUnderDigit": zod.number().optional()
+  "recoveryUnderDigit": zod.number().optional(),
+  "recoveryMethod": zod.string().optional(),
+  "recoveryAutoMode": zod.boolean().optional().describe('Auto-compute recovery stake from barrier payout; hide manual multiplier'),
+  "allowedMarkets": zod.union([zod.string(), zod.array(zod.string())]).optional(),
+  "riskAmountType": zod.enum(["fixed", "percentage"]).optional(),
+  "riskAmountValue": zod.number().optional()
 })
 
 export const UpdateSettingsResponse = zod.object({

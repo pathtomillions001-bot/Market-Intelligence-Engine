@@ -12,11 +12,6 @@ export interface DerivAccount {
   currency: string;
   balance: number;
   isVirtual: boolean;
-  /** True when this is the currently selected account for live trading */
-  isActive?: boolean;
-  /** True when the token was saved locally but could not yet be verified against Deriv (e.g. Deriv's API is unreachable). The account is stored and the app runs in offline/paper mode until verification succeeds; the account upgrades automatically once Deriv is reachable.
-   */
-  verificationPending?: boolean;
   /** @nullable */
   email?: string | null;
   /** @nullable */
