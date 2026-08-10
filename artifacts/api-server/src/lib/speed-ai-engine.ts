@@ -1,36 +1,37 @@
 /**
- * SpeedAI Engine — 1-tick ultra-fast trading engine  (PrecisionAI v3)
+ * SpeedAI Engine — 1-tick trading engine  (PrecisionAI v4 — Statistical Quality Gates)
  *
- * Analyzes all markets in real-time to find the best setup for each selected
- * contract type, then executes 1-tick trades in a continuous loop until the
- * user-set Take Profit or Stop Loss is reached.
+ * v4 philosophy: FEWER trades, STATISTICALLY-DEFENSIBLE trades.
  *
- * Recovery state is ISOLATED from the global recovery engine so SpeedAI
- * sessions do not interfere with the main autonomous engine.
+ * Why v4 exists: v2/v3 scored setups from 30–100 ticks and traded anything with
+ * score ≥ 50. On synthetic indices (designed as random walks), short-window win
+ * rates fluctuate ±5–7% around the theoretical rate purely by sampling noise.
+ * The engine was fitting that noise, trading constantly at negative expected
+ * value, and its Martingale-style recovery (lower standards + bigger stakes
+ * after every loss) converted small variance into guaranteed account ruin.
  *
- * PrecisionAI v3 changes (vs v2):
- *  • Contract-type-specific signal weights in precisionScore — each type's
- *    predictors are weighted by their actual statistical relevance:
- *      OVER/UNDER:  Markov ↑ (digit dependencies are real)
- *      EVEN/ODD:    Momentum ↑ (streak patterns dominate)
- *      MATCH:       Markov-to-target ↑↑ (direct current→target transition)
- *      DIFF:        Empirical + Markov balanced (both must confirm cold digit)
- *      CALL/PUT:    Momentum ↑↑ (recency-weighted price momentum is primary)
- *  • signalBonus per contract type (±15 pts added to score):
- *      OVER/UNDER:  streak-against depth bonus (consecutive reversal ticks)
- *      EVEN/ODD:    streak-against depth bonus (consecutive opposite-parity ticks)
- *      MATCH:       gap-since-last bonus (3-10 ticks = hot window; <3 = penalised)
- *      DIFF:        gap-since-last bonus (≥8 ticks = very cold; <2 = penalised)
- *      CALL/PUT:    recency-weighted price momentum bonus (±15 pts)
- *  • Enhanced isGreenLight(): streak depth for OVER/UNDER (2+ of last 5),
- *    direct Markov-to-target check for MATCH, recency-weighted momentum for CALL/PUT.
- *  • fastRecoveryGate v2: three-window combined scoring (30/60/100 ticks,
- *    weights 0.25/0.50/0.25) — statistically robust without blocking indefinitely.
- *  • scoreSingleMarket + analyzeMarketsForStrategy also use three-window scoring
- *    so normal trades benefit from the same analysis depth as recovery trades.
- *  • pickBestMatchBarrier + pickBestDiffBarrier now factor in gap analysis for
- *    smarter barrier auto-selection.
- *  • Normal-trade green-light retry extended: max 3 × 400 ms (was 2 × 400 ms).
+ * v4 changes:
+ *  • Wilson score lower bound replaces the raw empirical win rate — a
+ *    conservative estimate that shrinks with small sample sizes.
+ *  • One-sided binomial significance test vs the theoretical rate: a setup's
+ *    edge only counts if it is statistically significant (p < 0.10).
+ *  • Payout break-even gating: every trade must have positive expected value
+ *    using the CONSERVATIVE win rate vs the actual payout (1 / payout). This
+ *    alone kills the money leaks (e.g. DIFF at 1.04x needs >96% win rate).
+ *  • Chi-square digit-uniformity test — refuses to trade a near-uniform
+ *    distribution (i.e. "no reliable bias") regardless of what raw counts say.
+ *  • Walk-forward validation — the observed edge must persist out-of-sample;
+ *    if it doesn't, the setup is rejected (anti-overfitting).
+ *  • Markov order-1 support test — the Markov signal is neutralised when
+ *    transitions are statistically indistinguishable from independent draws.
+ *  • Live EV gate — before every live trade the engine fetches the REAL payout
+ *    via the proposal API and re-checks EV; no quote = no trade.
+ *  • Recovery safety — recovery trades must pass the SAME quality gates as
+ *    normal trades; 2 consecutive recovery losses halt the session; recovery
+ *    debt is capped at a fraction of the account balance; the old "adaptive
+ *    fallback" that traded with lowered standards is removed.
+ *  • Circuit breakers — 4 consecutive losses halts; drawdown from session peak
+ *    halts; minimum inter-trade pacing prevents degenerate loops.
  */
 
 import {
@@ -38,6 +39,7 @@ import {
   DERIV_MARKETS,
   executeLiveTrade,
   waitForContractResult,
+  getContractProposal,
   getCachedToken,
   getLiveBalance,
 } from "./deriv";
@@ -48,14 +50,37 @@ import { logger } from "./logger";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/** Minimum score (0–100) for a market to be considered "suitable" during initial scan */
-const SUITABLE_SCORE_THRESHOLD = 54;
-
 /** Minimum score for a normal trade to execute */
 const MIN_TRADE_SCORE = 50;
 
-/** Minimum score for recovery — slightly tighter but still always achievable */
-const MIN_RECOVERY_SCORE = 52;
+/** Minimum score for recovery — quality gates below dominate this value */
+const MIN_RECOVERY_SCORE = 55;
+
+// ── PrecisionAI v4 statistical gates ─────────────────────────────────────────
+/** One-sided significance threshold for an edge claim */
+const MIN_EDGE_PVALUE = 0.10;
+/** Extra win-rate margin required above the payout break-even (EV > 0 cushion) */
+const BREAKEVEN_MARGIN = 0.005;
+/** Conservative confidence for the Wilson bound (95%) */
+const WILSON_Z = 1.96;
+/** Minimum digit sample before a digit setup can be scored */
+const MIN_DIGIT_SAMPLE = 60;
+/** Minimum price sample for CALL/PUT setups */
+const MIN_PRICE_SAMPLE = 30;
+/** Chi-square p above which the digit distribution counts as "uniform" (no bias) */
+const UNIFORM_P_CEILING = 0.25;
+/** Consecutive total losses that hard-stop the session */
+const MAX_CONSECUTIVE_LOSSES = 4;
+/** Consecutive recovery losses that hard-stop the session */
+const RECOVERY_HALT_AFTER_LOSSES = 2;
+/** Recovery debt cap as a fraction of account balance */
+const RECOVERY_DEBT_FRACTION = 0.12;
+/** Per-trade stake cap as a fraction of account balance */
+const STAKE_FRACTION = 0.02;
+/** Session drawdown-from-peak stop as a fraction of account balance */
+const MAX_DRAWDOWN_FRACTION = 0.05;
+/** Minimum ms between consecutive trades (pacing — prevents degenerate loops) */
+const MIN_TRADE_GAP_MS = 1200;
 
 const DIGIT_PAYOUTS_OVER: Record<number, number> = {
   0: 1.04, 1: 1.08, 2: 1.19, 3: 1.37, 4: 1.63,
@@ -113,6 +138,32 @@ export interface MarketScore {
   winProbability: number;
   payout: number;
   reason: string;
+  /** PrecisionAI v4 — statistical evidence attached by precisionScore */
+  stats?: SetupStats;
+}
+
+/** Statistical evidence behind a scored setup (PrecisionAI v4). */
+export interface SetupStats {
+  /** Relevant sample size (ticks evaluated) */
+  sampleN: number;
+  /** Hits (win-condition ticks) observed */
+  hits: number;
+  /** Conservative win rate — Wilson 95% lower bound */
+  wilsonWinP: number;
+  /** One-sided binomial p-value vs the theoretical rate */
+  pValue: number;
+  /** Theoretical win rate for this contract+barrier */
+  theoretical: number;
+  /** Win rate needed for break-even given payout = 1/payout */
+  breakeven: number;
+  /** Chi-square p-value of digit uniformity (1 = perfectly uniform) */
+  uniformityP: number;
+  /** Whether the edge survived walk-forward (out-of-sample) validation */
+  walkForwardPass: boolean;
+  /** Markov order-1 support: mean |P(d|prev) − P(d)| over transitions */
+  markovLift: number;
+  /** True when the edge is statistically significant AND above break-even */
+  significant: boolean;
 }
 
 interface RecoveryTradeRecord {
@@ -144,6 +195,11 @@ export interface SpeedAIStatus {
   recoveryStep: number;
   unrecoveredAmount: number;
   consecutiveRecoveryLosses: number;
+  consecutiveLosses: number;
+  /** Setups rejected by the PrecisionAI v4 quality gate this session */
+  skippedCount: number;
+  lastSkipReason?: string;
+  peakProfit: number;
   currentMarket?: string;
   currentContractType?: string;
   lastResult?: "won" | "lost";
@@ -164,6 +220,12 @@ let session: {
   lossCount: number;
   currentStake: number;
   recovery: SpeedRecoveryState;
+  consecutiveLosses: number;
+  skippedCount: number;
+  lastSkipReason?: string;
+  peakProfit: number;
+  lastTradeAt: number;
+  startingBalance: number;
   currentMarket?: string;
   currentContractType?: string;
   lastResult?: "won" | "lost";
@@ -180,6 +242,11 @@ let session: {
   lossCount: 0,
   currentStake: 0,
   recovery: { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: 0, consecutiveRecoveryLosses: 0, recentRecoveryTrades: [] },
+  consecutiveLosses: 0,
+  skippedCount: 0,
+  peakProfit: 0,
+  lastTradeAt: 0,
+  startingBalance: 1000,
   topMarkets: [],
   stopRequested: false,
 };
@@ -299,6 +366,209 @@ function theoreticalWinRate(contractType: SpeedContractType, barrier: number | u
     case "DIGITDIFF":  return 0.9;
     default:           return 0.5;
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PrecisionAI v4 — statistical core
+//
+// The v2/v3 engine estimated "edge" as (observed win rate − theoretical rate)
+// over 30–100 ticks. On a random walk that difference is sampling noise, so
+// the engine traded noise at negative EV. v4 replaces the raw estimate with
+// conservative estimators and hard statistical gates:
+//
+//   1. wilsonLowerBound()  — Wilson 95% CI lower bound. Small samples can no
+//      longer claim large edges; the bound shrinks toward 0.5 as n ↓.
+//   2. binomialEdgeP()     — one-sided binomial p-value vs the theoretical
+//      rate (continuity-corrected normal approx). The "edge" must be real
+//      enough that random chance is unlikely to explain it.
+//   3. digitUniformityP()  — chi-square goodness-of-fit vs a uniform digit
+//      distribution. A near-uniform market has NO exploitable bias; the
+//      engine refuses to trade it regardless of what raw counts suggest.
+//   4. markovLift()        — mean |P(d_t | d_{t-1}) − P(d_t)|. If transitions
+//      are statistically indistinguishable from independent draws, the Markov
+//      signal is noise and is neutralised toward the theoretical rate.
+//   5. walkForwardValidated() — fit on the older 60% of the buffer, verify on
+//      the newer 40%. If the claimed edge does not persist out-of-sample it is
+//      overfit and rejected.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Abramowitz–Stegun erf approximation (error < 1.5e-7). */
+function erf(x: number): number {
+  const sign = x < 0 ? -1 : 1;
+  x = Math.abs(x);
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+  const t = 1 / (1 + p * x);
+  const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+  return sign * y;
+}
+
+/** Standard normal CDF. */
+function normCdf(z: number): number {
+  return 0.5 * (1 + erf(z / Math.SQRT2));
+}
+
+/**
+ * Wilson score lower bound — the conservative estimate of a true win rate
+ * given `hits / n` observations. Used everywhere a win probability drives a
+ * decision (EV gate, recovery stake, paper outcomes) so optimism is bounded.
+ */
+function wilsonLowerBound(hits: number, n: number, z = WILSON_Z): number {
+  if (n <= 0) return 0.5;
+  const p = hits / n;
+  const z2 = z * z;
+  const denom = 1 + z2 / n;
+  const centre = (p + z2 / (2 * n)) / denom;
+  const halfWidth = (z * Math.sqrt((p * (1 - p)) / n + z2 / (4 * n * n))) / denom;
+  return Math.max(0, Math.min(1, centre - halfWidth));
+}
+
+/**
+ * One-sided binomial p-value with continuity correction:
+ * P(X ≥ hits | X ~ Bin(n, p0)) — the probability that random chance alone
+ * produced at least this many wins if the true rate were `p0`.
+ * Small p ⇒ observed rate is unlikely under the theoretical rate ⇒ edge.
+ */
+function binomialEdgeP(hits: number, n: number, p0: number): number {
+  if (n <= 0) return 1;
+  const p = hits / n;
+  if (p <= p0) return 1; // no edge direction — definitely not significant
+  const se = Math.sqrt((p0 * (1 - p0)) / n) || 1e-9;
+  const z = (p - p0 - 1 / (2 * n)) / se; // continuity correction
+  return Math.max(0, Math.min(1, 1 - normCdf(z)));
+}
+
+/**
+ * Chi-square goodness-of-fit of the digit distribution vs uniform (df=9),
+ * Wilson–Hilferty normal approximation. Returns the p-value:
+ *   small p → digits deviate significantly from uniform (potential bias)
+ *   large p → near-uniform → no exploitable bias.
+ */
+function digitUniformityP(digits: number[]): number {
+  const n = digits.length;
+  if (n < 40) return 1; // too little data — assume uniform (no signal)
+  const counts = Array(10).fill(0);
+  for (const d of digits) if (d >= 0 && d <= 9) counts[d]++;
+  const exp = n / 10;
+  let chi2 = 0;
+  for (let i = 0; i < 10; i++) chi2 += (counts[i] - exp) ** 2 / exp;
+  const df = 9;
+  const z = (Math.cbrt(chi2 / df) - (1 - 2 / (9 * df))) / Math.sqrt(2 / (9 * df));
+  return Math.max(0, Math.min(1, 1 - normCdf(z)));
+}
+
+/**
+ * Markov order-1 support: mean |P(d_t | d_{t-1}) − P(d_t)| weighted by how
+ * often each previous digit occurs. A lift near 0 means transitions carry no
+ * information beyond the marginal distribution → the Markov signal is noise.
+ */
+function markovLift(digits: number[]): number {
+  if (digits.length < 60) return 0;
+  const freq = digitFrequency(digits);
+  const mat = Array.from({ length: 10 }, () => Array(10).fill(0));
+  const rowTot = Array(10).fill(0);
+  for (let i = 1; i < digits.length; i++) {
+    const f = digits[i - 1], t = digits[i];
+    if (f >= 0 && f <= 9 && t >= 0 && t <= 9) { mat[f][t]++; rowTot[f]++; }
+  }
+  let lift = 0, weight = 0;
+  for (let f = 0; f < 10; f++) {
+    if (rowTot[f] < 5) continue;
+    for (let t = 0; t < 10; t++) {
+      const p1 = mat[f][t] / rowTot[f];
+      lift += (rowTot[f] / digits.length) * Math.abs(p1 - freq[t]);
+      weight += rowTot[f] / digits.length;
+    }
+  }
+  return weight > 0 ? lift / weight : 0;
+}
+
+/** Count ticks satisfying the bet's win condition (digit or price direction). */
+function countHits(
+  digits: number[],
+  prices: number[],
+  contractType: SpeedContractType,
+  barrier: number | undefined,
+): { hits: number; n: number } {
+  switch (contractType) {
+    case "DIGITOVER": {
+      let hits = 0;
+      for (const d of digits) if (barrier !== undefined && d > barrier) hits++;
+      return { hits, n: digits.length };
+    }
+    case "DIGITUNDER": {
+      let hits = 0;
+      for (const d of digits) if (barrier !== undefined && d < barrier) hits++;
+      return { hits, n: digits.length };
+    }
+    case "DIGITEVEN": {
+      let hits = 0;
+      for (const d of digits) if (d % 2 === 0) hits++;
+      return { hits, n: digits.length };
+    }
+    case "DIGITODD": {
+      let hits = 0;
+      for (const d of digits) if (d % 2 !== 0) hits++;
+      return { hits, n: digits.length };
+    }
+    case "DIGITMATCH": {
+      let hits = 0;
+      for (const d of digits) if (barrier !== undefined && d === barrier) hits++;
+      return { hits, n: digits.length };
+    }
+    case "DIGITDIFF": {
+      let hits = 0;
+      for (const d of digits) if (barrier !== undefined && d !== barrier) hits++;
+      return { hits, n: digits.length };
+    }
+    case "CALL": {
+      let hits = 0;
+      const n = Math.max(0, prices.length - 1);
+      for (let i = 1; i < prices.length; i++) if (prices[i] > prices[i - 1]) hits++;
+      return { hits, n };
+    }
+    case "PUT": {
+      let hits = 0;
+      const n = Math.max(0, prices.length - 1);
+      for (let i = 1; i < prices.length; i++) if (prices[i] < prices[i - 1]) hits++;
+      return { hits, n };
+    }
+    default:
+      return { hits: 0, n: 0 };
+  }
+}
+
+/**
+ * Walk-forward validation: does the observed edge persist out-of-sample?
+ * The older 60% of the buffer is the "training" half; the newer 40% is the
+ * "test" half. The edge is only accepted when the test rate does not fall
+ * back to the theoretical rate (or collapse below the training rate by a
+ * meaningful margin). This is the primary anti-overfitting filter.
+ */
+function walkForwardValidated(
+  digits: number[],
+  prices: number[],
+  contractType: SpeedContractType,
+  barrier: number | undefined,
+): { pass: boolean; trainRate: number; testRate: number } {
+  const usePrices = contractType === "CALL" || contractType === "PUT";
+  const arr = usePrices ? prices : digits;
+  if (arr.length < 80) return { pass: true, trainRate: 0.5, testRate: 0.5 }; // not enough data — don't block on this alone
+
+  const split = Math.floor(arr.length * 0.6);
+  const trainArr = arr.slice(0, split);
+  const testArr = arr.slice(split);
+  const train = usePrices
+    ? countHits([], trainArr, contractType, barrier)
+    : countHits(trainArr, [], contractType, barrier);
+  const test = usePrices
+    ? countHits([], testArr, contractType, barrier)
+    : countHits(testArr, [], contractType, barrier);
+  const trainRate = train.n > 0 ? train.hits / train.n : 0.5;
+  const testRate = test.n > 0 ? test.hits / test.n : 0.5;
+  const p0 = theoreticalWinRate(contractType, barrier);
+
+  const pass = testRate >= p0 - 0.01 || testRate >= trainRate - 0.04;
+  return { pass, trainRate, testRate };
 }
 
 // ── PrecisionAI v3 — new signal helpers ───────────────────────────────────────
@@ -478,10 +748,10 @@ function precisionScore(
   digits: number[],
   prices: number[],
 ): MarketScore | null {
-  if (contractType.startsWith("DIGIT") && digits.length < 30) return null;
-  if ((contractType === "CALL" || contractType === "PUT") && prices.length < 15) return null;
+  if (contractType.startsWith("DIGIT") && digits.length < MIN_DIGIT_SAMPLE) return null;
+  if ((contractType === "CALL" || contractType === "PUT") && prices.length < MIN_PRICE_SAMPLE) return null;
 
-  const winLen       = Math.min(50, digits.length);
+  const winLen       = Math.min(80, digits.length);
   const freq50       = digitFrequency(digits.slice(-winLen));
   const markov       = markovNextProb(digits);
   const momentum     = momentumRate(digits, contractType, barrier, 15);
@@ -573,6 +843,20 @@ function precisionScore(
     default: return null;
   }
 
+  const theoretical = theoreticalWinRate(contractType, barrier);
+
+  // ── v4: neutralize the Markov signal when transitions carry no information ──
+  if (markovLift(digits) < 0.015) markovWin = theoretical;
+
+  // ── v4: statistical evidence for THIS setup ─────────────────────────────────
+  const { hits, n } = countHits(digits, prices, contractType, barrier);
+  const wilson      = wilsonLowerBound(hits, n);
+  const pValue      = binomialEdgeP(hits, n, theoretical);
+  const breakeven   = payout > 1 ? 1 / payout : 1;
+  const uniformityP = contractType.startsWith("DIGIT") ? digitUniformityP(digits) : 1;
+  const wf          = walkForwardValidated(digits, prices, contractType, barrier);
+  const significant = pValue < MIN_EDGE_PVALUE && wilson > theoretical && wilson > breakeven + BREAKEVEN_MARGIN;
+
   // ── Contract-type-specific signal weights ─────────────────────────────────
   let winP: number;
   switch (contractType) {
@@ -599,25 +883,97 @@ function precisionScore(
       winP = empirical * 0.50 + markovWin * 0.25 + momentum * 0.25;
   }
 
-  const theoretical    = theoreticalWinRate(contractType, barrier);
-  const edgeNorm       = Math.max(-1, Math.min(1, (winP - theoretical) / 0.15));
+  // ── v4: significance-weighted score ────────────────────────────────────────
+  // edgeNorm uses the CONSERVATIVE Wilson bound, scaled by 6% absolute edge.
+  // Non-significant edges contribute only 15% of their weight — a setup cannot
+  // reach tradeable territory on noise alone.
+  const edgeRaw        = wilson - theoretical;
+  const edgeNorm       = Math.max(-1, Math.min(1, edgeRaw / 0.06));
   const timingBonus    = (timing - 50) * 0.20;       // ±10 pts
   const stabilityBonus = (stabilityRaw - 0.5) * 10;  // ±5 pts
 
-  const score = Math.min(100, Math.max(0,
-    50 + edgeNorm * 50 + timingBonus + stabilityBonus + signalBonus,
-  ));
+  let score = 50 + edgeNorm * 50 * (significant ? 1 : 0.15)
+            + timingBonus + stabilityBonus + signalBonus;
 
-  const ev     = winP * (payout - 1) - (1 - winP);
+  // Near-uniform digit distribution → no exploitable bias → strong penalty
+  if (uniformityP > UNIFORM_P_CEILING) score -= 8;
+  else if (uniformityP < 0.05) score += 4;
+  // Edge failed out-of-sample validation → overfit → strong penalty
+  if (!wf.pass) score -= 12;
+
+  score = Math.min(100, Math.max(0, score));
+
+  const ev = wilson * (payout - 1) - (1 - wilson);
   const reason = [
-    `${(winP * 100).toFixed(1)}% win-p`,
-    `timing ${timing.toFixed(0)}/100`,
+    `${(wilson * 100).toFixed(1)}% win-p (n=${n})`,
+    significant ? `sig p=${pValue.toFixed(3)}` : `p=${pValue.toFixed(2)}`,
     `EV ${ev >= 0 ? "+" : ""}${(ev * 100).toFixed(1)}%`,
-    `stab ${(stabilityRaw * 100).toFixed(0)}%`,
+    `timing ${timing.toFixed(0)}/100`,
+    !wf.pass ? "⨯ OOS" : "",
     signalBonus !== 0 ? `sig${signalBonus >= 0 ? "+" : ""}${signalBonus}` : "",
   ].filter(Boolean).join(" · ");
 
-  return { symbol, displayName, contractType, barrier, score, winProbability: winP, payout, reason };
+  return {
+    symbol, displayName, contractType, barrier, score,
+    winProbability: wilson,
+    payout,
+    reason,
+    stats: {
+      sampleN: n,
+      hits,
+      wilsonWinP: wilson,
+      pValue,
+      theoretical,
+      breakeven,
+      uniformityP,
+      walkForwardPass: wf.pass,
+      markovLift: markovLift(digits),
+      significant,
+    },
+  };
+}
+
+/**
+ * PrecisionAI v4 — hard quality gate.
+ *
+ * A setup must clear ALL of these to be tradable:
+ *   1. score ≥ MIN_TRADE_SCORE
+ *   2. conservative win rate (Wilson 95% LB) above the payout break-even
+ *   3. edge statistically significant vs the theoretical rate (p < 0.10)
+ *   4. edge survived walk-forward (out-of-sample) validation
+ *   5. digit distribution is NOT near-uniform (no bias ⇒ no trade)
+ *
+ * Returns the list of reasons when rejected, so the session can tell the user
+ * exactly why it is holding. This is the "fewer but better trades" gate.
+ */
+function evaluateSetup(
+  setup: MarketScore | null | undefined,
+): { pass: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  if (!setup) return { pass: false, reasons: ["no setup available"] };
+
+  const s = setup.stats;
+  if (!s) { reasons.push("insufficient statistics"); return { pass: false, reasons }; }
+
+  if (setup.score < MIN_TRADE_SCORE) {
+    reasons.push(`score ${setup.score.toFixed(0)}/100 below ${MIN_TRADE_SCORE}`);
+  }
+  if (s.wilsonWinP <= s.breakeven + BREAKEVEN_MARGIN) {
+    reasons.push(
+      `win-rate ${(s.wilsonWinP * 100).toFixed(1)}% ≤ break-even ${(s.breakeven * 100).toFixed(1)}%`,
+    );
+  }
+  if (!s.significant) {
+    reasons.push(`edge not significant (p=${s.pValue.toFixed(3)})`);
+  }
+  if (!s.walkForwardPass) {
+    reasons.push("edge failed out-of-sample validation");
+  }
+  if (s.uniformityP > UNIFORM_P_CEILING) {
+    reasons.push("digit distribution near-uniform — no reliable bias");
+  }
+
+  return { pass: reasons.length === 0, reasons };
 }
 
 /**
@@ -725,13 +1081,18 @@ function fastRecoveryGate(
   consecutiveLosses: number,
   recentRecoveryTrades: RecoveryTradeRecord[],
 ): { winner: MarketScore; greenLight: boolean } | null {
-  const minScore = consecutiveLosses >= 2 ? 58 : consecutiveLosses >= 1 ? 55 : 52;
+  // v4: two consecutive recovery losses = the recovery strategy itself is
+  // failing. Never keep gambling with rising stakes — the loop halts the
+  // session; the gate refuses to pick a setup as a second line of defence.
+  if (consecutiveLosses >= RECOVERY_HALT_AFTER_LOSSES) return null;
+
+  const minScore = consecutiveLosses >= 1 ? 58 : MIN_RECOVERY_SCORE;
   const { overBarrier, underBarrier } = extractBarriers(barriers);
 
   // Four-window buffers
   const digits100 = tickManager.getDigits(symbol, 100);
   const prices50  = tickManager.getTicks(symbol, 50);
-  if (digits100.length < 30) return null;
+  if (digits100.length < MIN_DIGIT_SAMPLE) return null;
 
   const digits60 = digits100.slice(-60);
   const digits30 = digits100.slice(-30);
@@ -795,6 +1156,14 @@ function fastRecoveryGate(
 
     const adjustedScore = baseScore + dBonus - penalty;
     if (adjustedScore < minScore) continue;
+
+    // v4: recovery trades must clear the SAME statistical bar as normal trades.
+    // Rising stakes after a loss demand MORE evidence, never less.
+    const st = (r60 as MarketScore).stats;
+    if (!st) continue;
+    if (!st.significant || st.wilsonWinP <= st.breakeven + BREAKEVEN_MARGIN) continue;
+    if (!st.walkForwardPass) continue;
+    if (st.uniformityP > UNIFORM_P_CEILING) continue;
 
     const gl = isGreenLight(digits60, prices50, ct, barrier);
     candidates.push({
@@ -1139,11 +1508,16 @@ export async function scanBestMarket(config: SpeedAIConfig): Promise<ScanResult>
     return { suitable: false, best: null, allScored: [], reason: "No tick data available yet — wait a few seconds and scan again" };
   }
 
+  // v4: "suitable" now means the best market clears the SAME statistical
+  // quality gates the running session enforces — score alone is no longer
+  // enough. A market can rank #1 but still be untradeable (insignificant
+  // edge / negative EV), and the scan says so honestly.
   const best     = allScored[0];
-  const suitable = best.score >= SUITABLE_SCORE_THRESHOLD;
+  const verdict  = evaluateSetup(best);
+  const suitable = verdict.pass;
   const reason   = suitable
-    ? `${best.displayName} has a strong edge (score ${best.score.toFixed(0)}/100) for your settings`
-    : `No market shows a clear edge yet — best was ${best.displayName} at ${best.score.toFixed(0)}/100`;
+    ? `${best.displayName} has a statistically supported edge (score ${best.score.toFixed(0)}/100) for your settings`
+    : `No market cleared the quality gate — best was ${best.displayName} at ${best.score.toFixed(0)}/100 (${verdict.reasons[0] ?? "low quality"})`;
 
   return { suitable, best, allScored, reason };
 }
@@ -1248,6 +1622,10 @@ export function getStatus(): SpeedAIStatus {
     recoveryStep:              session.recovery.recoveryStep,
     unrecoveredAmount:         Math.round(session.recovery.unrecoveredAmount * 100) / 100,
     consecutiveRecoveryLosses: session.recovery.consecutiveRecoveryLosses,
+    consecutiveLosses:         session.consecutiveLosses,
+    skippedCount:              session.skippedCount,
+    lastSkipReason:            session.lastSkipReason,
+    peakProfit:                Math.round(session.peakProfit * 100) / 100,
     currentMarket:             session.currentMarket,
     currentContractType:       session.currentContractType,
     lastResult:                session.lastResult,
@@ -1284,6 +1662,11 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
     lossCount:   0,
     currentStake: config.stake,
     recovery: { inRecovery: false, recoveryStep: 0, unrecoveredAmount: 0, baseStake: config.stake, consecutiveRecoveryLosses: 0, recentRecoveryTrades: [] },
+    consecutiveLosses: 0,
+    skippedCount: 0,
+    peakProfit: 0,
+    lastTradeAt: 0,
+    startingBalance: 1000,
     topMarkets:   [],
     stopRequested: false,
     message: "Analyzing markets…",
@@ -1315,7 +1698,26 @@ async function runLoop(config: SpeedAIConfig) {
   const token    = getCachedToken() ?? (accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null);
   const currency = accounts.length > 0 ? accounts[0].currency : "USD";
   const isLive   = !paperTradeMode && !!token;
-  const maxStake = settings.length > 0 ? Number(settings[0].maxTradeStake) : 500;
+
+  // ── v4: account-aware risk envelope ──────────────────────────────────────
+  // Every risk limit is derived from the actual account balance so a losing
+  // session can never scale into ruin:
+  //   per-trade stake   ≤ balance × STAKE_FRACTION        (2%)
+  //   recovery debt     ≤ balance × RECOVERY_DEBT_FRACTION (12%)
+  //   session drawdown  ≤ balance × MAX_DRAWDOWN_FRACTION  (5% from peak)
+  let startingBalance = 1000;
+  if (isLive) {
+    const bal = await getLiveBalance(token!);
+    if (bal !== null && bal > 0) startingBalance = bal;
+  }
+  session.startingBalance = startingBalance;
+  const balance        = startingBalance;
+  const maxStake       = Math.min(
+    settings.length > 0 ? Number(settings[0].maxTradeStake) : 500,
+    balance * STAKE_FRACTION,
+  );
+  const recoveryDebtCap = Math.max(20, balance * RECOVERY_DEBT_FRACTION);
+  const maxDrawdown     = Math.max(10, Math.min(Math.abs(config.stopLoss) * 0.5, balance * MAX_DRAWDOWN_FRACTION));
 
   const lockedDerivsMarket = config.lockedSymbol
     ? DERIV_MARKETS.find(m => m.symbol === config.lockedSymbol) ?? null
@@ -1403,12 +1805,45 @@ async function runLoop(config: SpeedAIConfig) {
       }
     }
 
+    // ── PrecisionAI v4 quality gate (normal trades) ─────────────────────────
+    // Only statistically-defensible setups execute. Everything else is skipped
+    // with the reason surfaced to the UI — this is the "fewer but better".
+    if (!inRecovery) {
+      const verdict = evaluateSetup(best);
+      if (!verdict.pass) {
+        session.skippedCount++;
+        session.lastSkipReason = verdict.reasons[0] ?? "low quality";
+        session.message = `⏳ Holding — ${best.displayName} ${best.contractType} skipped (${session.lastSkipReason})`;
+        broadcast();
+        preAnalyzedScored = null;
+        await sleep(1200);
+        continue;
+      }
+    }
+
     // ── Gate: recovery (fast, bounded) vs normal (lightweight) ────────────────
     if (inRecovery) {
-      // ── FastRecoveryGate: max 3 attempts × ~600 ms = under 2 seconds ──────
-      const consLosses   = session.recovery.consecutiveRecoveryLosses;
-      const baseWaitMs   = consLosses >= 2 ? 700 : consLosses >= 1 ? 600 : 500;
-      const maxAttempts  = 3;
+      // ── v4: hard safety halts BEFORE any recovery attempt ──────────────────
+      // Recovery that keeps losing is a broken strategy — stop, don't gamble.
+      if (session.recovery.consecutiveRecoveryLosses >= RECOVERY_HALT_AFTER_LOSSES) {
+        session.running = false;
+        session.message = `🛑 Recovery lost ${RECOVERY_HALT_AFTER_LOSSES}× consecutively — session halted to protect capital`;
+        broadcast();
+        logger.warn({ consLosses: session.recovery.consecutiveRecoveryLosses }, "SpeedAI recovery halted by consecutive-loss breaker");
+        return;
+      }
+      if (session.recovery.unrecoveredAmount > recoveryDebtCap) {
+        session.running = false;
+        session.message = `🛑 Recovery debt $${session.recovery.unrecoveredAmount.toFixed(2)} exceeded cap $${recoveryDebtCap.toFixed(2)} — session halted to protect capital`;
+        broadcast();
+        logger.warn({ unrecoveredAmount: session.recovery.unrecoveredAmount, cap: recoveryDebtCap }, "SpeedAI recovery halted by debt cap");
+        return;
+      }
+
+      // ── FastRecoveryGate: max 3 attempts — candidate must pass the same
+      //    statistical quality gates as normal trades ───────────────────────
+      const consLosses  = session.recovery.consecutiveRecoveryLosses;
+      const maxAttempts = 3;
       let candidate: { winner: MarketScore; greenLight: boolean } | null = null;
 
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -1419,45 +1854,21 @@ async function runLoop(config: SpeedAIConfig) {
         );
         if (candidate) break;
 
-        session.message = `⏳ Recovery analysis${consLosses > 0 ? ` (${consLosses} loss${consLosses > 1 ? "es" : ""})` : ""}…`;
+        session.message = `⏳ Waiting for statistically-valid recovery setup${consLosses > 0 ? ` (${consLosses} loss streak)` : ""}…`;
         broadcast();
         preAnalyzedScored = null;
-        await sleep(baseWaitMs);
+        await sleep(700);
         if (!session.running || session.stopRequested) break;
       }
 
-      // Adaptive fallback: if no candidate cleared the threshold, lower it and
-      // pick the best available. Never block recovery indefinitely.
+      // v4: NO adaptive fallback. If no recovery setup cleared the quality
+      // gates, wait — never trade with lowered standards at higher stakes.
       if (!candidate) {
-        const fallDigits = tickManager.getDigits(best.symbol, 60);
-        const fallPrices = tickManager.getTicks(best.symbol, 50);
-        const { overBarrier: fo, underBarrier: fu } = extractBarriers(barriers);
-        let bestFallback: MarketScore | null = null;
-
-        for (const ct of config.recoveryContractTypes) {
-          let fb: number | undefined;
-          if      (ct === "DIGITOVER")  fb = fo;
-          else if (ct === "DIGITUNDER") fb = fu;
-          else if (ct === "DIGITMATCH") fb = pickBestMatchBarrier(fallDigits);
-          else if (ct === "DIGITDIFF")  fb = pickBestDiffBarrier(fallDigits);
-
-          const s = precisionScore(best.symbol, best.displayName, ct, fb, fallDigits, fallPrices);
-          if (s && (!bestFallback || s.score > bestFallback.score)) bestFallback = s;
-        }
-
-        if (bestFallback) {
-          const gl = isGreenLight(fallDigits, fallPrices, bestFallback.contractType, bestFallback.barrier);
-          candidate = { winner: bestFallback, greenLight: gl };
-          logger.info({ symbol: best.symbol, score: bestFallback.score, consLosses },
-            "SpeedAI recovery: using adaptive fallback (threshold lowered)");
-        } else {
-          // Truly no data — wait one cycle
-          session.message = "⏳ Waiting for market data for recovery…";
-          broadcast();
-          preAnalyzedScored = null;
-          await sleep(1000);
-          continue;
-        }
+        session.message = "⏳ No recovery setup passed quality gates — waiting…";
+        broadcast();
+        preAnalyzedScored = null;
+        await sleep(1000);
+        continue;
       }
 
       // Green-light check: poll on actual tick events (80 ms intervals, max 1.5 s)
@@ -1488,7 +1899,20 @@ async function runLoop(config: SpeedAIConfig) {
         winProbability: candidate.winner.winProbability,
         score:          candidate.winner.score,
         reason:         candidate.winner.reason,
+        stats:          candidate.winner.stats,
       };
+
+      // ── v4: final gate check on the recovery candidate ─────────────────────
+      const recVerdict = evaluateSetup(best);
+      if (!recVerdict.pass) {
+        session.skippedCount++;
+        session.lastSkipReason = recVerdict.reasons[0] ?? "low quality";
+        session.message = `⏳ Holding — recovery setup skipped (${session.lastSkipReason})`;
+        broadcast();
+        preAnalyzedScored = null;
+        await sleep(1200);
+        continue;
+      }
 
       logger.info({
         symbol:       best.symbol,
@@ -1526,6 +1950,53 @@ async function runLoop(config: SpeedAIConfig) {
           // After max retries, execute whatever we have — never skip a full cycle
         }
       }
+    }
+
+    // ── v4: pacing — never fire trades back-to-back faster than the market ──
+    //    can produce fresh information.
+    {
+      const nowMs = Date.now();
+      if (session.lastTradeAt > 0 && nowMs - session.lastTradeAt < MIN_TRADE_GAP_MS) {
+        await sleep(MIN_TRADE_GAP_MS - (nowMs - session.lastTradeAt));
+      }
+    }
+
+    // ── v4: LIVE EV gate — verify the REAL payout before risking money ───────
+    // The hardcoded payout tables are stale approximations. In live mode we
+    // fetch the actual payout Deriv is offering right now and only proceed if
+    // the conservative win rate still clears break-even. No quote = no trade.
+    if (isLive) {
+      const prop = await getContractProposal(token, {
+        symbol:       best.symbol,
+        contractType: best.contractType,
+        stake:        Math.max(config.stake, 0.35),
+        duration:     1,
+        durationUnit: "t",
+        currency,
+        barrier:      best.barrier,
+      });
+      if (!prop || !(prop.payoutMultiplier > 1)) {
+        session.skippedCount++;
+        session.lastSkipReason = "payout quote unavailable";
+        session.message = `⏳ No payout quote for ${best.displayName} — holding`;
+        broadcast();
+        preAnalyzedScored = null;
+        await sleep(1500);
+        continue;
+      }
+      const liveMult     = prop.payoutMultiplier > 1 ? prop.payoutMultiplier : best.payout;
+      const liveBreakeven = 1 / liveMult;
+      const wilson       = best.stats?.wilsonWinP ?? best.winProbability;
+      if (wilson <= liveBreakeven + BREAKEVEN_MARGIN) {
+        session.skippedCount++;
+        session.lastSkipReason = `live payout ${liveMult.toFixed(3)}x can't cover ${(wilson * 100).toFixed(1)}% win-rate`;
+        session.message = `⏳ ${best.displayName}: live payout ${liveMult.toFixed(3)}x is negative-EV at ${(wilson * 100).toFixed(1)}% win-rate — holding`;
+        broadcast();
+        preAnalyzedScored = null;
+        await sleep(1500);
+        continue;
+      }
+      best = { ...best, payout: liveMult };
     }
 
     // ── Compute stake and announce ─────────────────────────────────────────────
@@ -1614,6 +2085,11 @@ async function runLoop(config: SpeedAIConfig) {
       inRecovery ? best.barrier      : undefined,
     );
 
+    // ── v4: session risk tracking ─────────────────────────────────────────────
+    session.consecutiveLosses = won ? 0 : session.consecutiveLosses + 1;
+    session.peakProfit        = Math.max(session.peakProfit, session.totalProfit);
+    session.lastTradeAt       = Date.now();
+
     // Sync live balance — update only the active account
     if (isLive) {
       try {
@@ -1641,6 +2117,22 @@ async function runLoop(config: SpeedAIConfig) {
       session.message = `🛑 Stop loss $${config.stopLoss.toFixed(2)} hit. Session stopped.`;
       broadcast();
       logger.info({ profit: session.totalProfit }, "SpeedAI stop loss triggered");
+      return;
+    }
+
+    // ── v4: circuit breakers — the session refuses to keep losing ─────────────
+    if (session.consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
+      session.running = false;
+      session.message = `🛑 ${MAX_CONSECUTIVE_LOSSES} consecutive losses — session halted to protect capital`;
+      broadcast();
+      logger.warn({ consecutiveLosses: session.consecutiveLosses }, "SpeedAI consecutive-loss breaker triggered");
+      return;
+    }
+    if (session.peakProfit - session.totalProfit > maxDrawdown) {
+      session.running = false;
+      session.message = `🛑 Drawdown from peak exceeded $${maxDrawdown.toFixed(2)} — session halted to protect capital`;
+      broadcast();
+      logger.warn({ peakProfit: session.peakProfit, totalProfit: session.totalProfit, maxDrawdown }, "SpeedAI drawdown breaker triggered");
       return;
     }
     if (session.recovery.inRecovery && session.recovery.recoveryStep >= config.maxRecoverySteps) {

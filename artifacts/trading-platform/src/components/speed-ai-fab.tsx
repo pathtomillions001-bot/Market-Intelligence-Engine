@@ -76,6 +76,10 @@ interface SessionStatus {
   recoveryStep: number;
   unrecoveredAmount: number;
   consecutiveRecoveryLosses: number;
+  consecutiveLosses?: number;
+  skippedCount?: number;
+  lastSkipReason?: string;
+  peakProfit?: number;
   currentMarket?: string;
   currentContractType?: string;
   lastResult?: "won" | "lost";
@@ -1088,6 +1092,20 @@ export function SpeedAIFab() {
                       "bg-secondary/30 border-border text-muted-foreground"
                     }`}>
                       {status.message}
+                    </div>
+                  )}
+
+                  {/* PrecisionAI v4 quality gate — why the engine is holding */}
+                  {(status?.skippedCount ?? 0) > 0 && (
+                    <div className="text-[10px] text-muted-foreground/80 px-3 py-2 rounded-lg border border-cyan-500/10 bg-cyan-500/5 flex items-start gap-1.5">
+                      <AlertTriangle className="w-3 h-3 text-cyan-500 mt-0.5 flex-shrink-0" />
+                      <span className="leading-snug">
+                        <span className="text-cyan-400 font-semibold">{status?.skippedCount} setup{status?.skippedCount === 1 ? "" : "s"}</span>{" "}
+                        skipped by the statistical quality gate
+                        {status?.lastSkipReason && (
+                          <span className="text-muted-foreground/60"> — {status.lastSkipReason}</span>
+                        )}
+                      </span>
                     </div>
                   )}
 

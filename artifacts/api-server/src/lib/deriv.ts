@@ -593,6 +593,13 @@ class DerivTickManager extends EventEmitter {
   private simPrices = new Map<string, number>();
   private usingSimulated = false;
 
+  /** Consecutive connect attempts that never reached OPEN. When this crosses a
+   *  threshold with no data, the manager falls back to simulated prices so the
+   *  app stays functional on networks where api.derivws.com is unreachable.
+   *  Reset on successful open / on receiving a real tick. */
+  private failedConnectAttempts = 0;
+  private static readonly SIM_FALLBACK_AFTER_FAILURES = 2;
+
   // ── Public API ─────────────────────────────────────────────────────────────
 
   start(symbols: string[]) {
@@ -677,6 +684,7 @@ class DerivTickManager extends EventEmitter {
 
     this.ws.on("open", () => {
       this.isConnected = true;
+      this.failedConnectAttempts = 0;
       this.reconnectDelay = 3_000;
       this.lastPongMs = Date.now();
       logger.info({ url: DERIV_PUBLIC_WS_URL }, "TickManager: connected to public WS");
@@ -693,11 +701,13 @@ class DerivTickManager extends EventEmitter {
     });
 
     this.ws.on("error", (err) => {
+      if (!this.isConnected) this.failedConnectAttempts++;
       logger.warn({ msg: (err as Error).message }, "TickManager: WS error");
     });
 
     this.ws.on("close", () => {
       this.isConnected = false;
+      if (!this.usingSimulated) this.failedConnectAttempts++;
       this.stopTimers();
       logger.info("TickManager: WS closed, scheduling reconnect");
       this.scheduleReconnect();
@@ -960,6 +970,23 @@ class DerivTickManager extends EventEmitter {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, 30_000);
+
+      // Reliability fallback: if the public WS cannot connect at all (e.g.
+      // api.derivws.com is unreachable from this network), switch to simulated
+      // prices so the app and the AI engines keep working. Real ticks arriving
+      // later automatically stop the simulation (see onTick).
+      if (
+        this.failedConnectAttempts >= DerivTickManager.SIM_FALLBACK_AFTER_FAILURES
+        && !this.usingSimulated
+        && this.getLiveTickCount() === 0
+      ) {
+        logger.warn(
+          { failedConnectAttempts: this.failedConnectAttempts },
+          "TickManager: WS unreachable — falling back to simulated prices",
+        );
+        this.startSimulation();
+      }
+
       logger.info({ delayMs: this.reconnectDelay }, "TickManager: reconnecting");
       this.connect();
     }, this.reconnectDelay);
