@@ -95,21 +95,35 @@ async function fetchLivePayouts(
   const now = Date.now();
   const result: Record<string, number> = {};
 
-  for (const ct of contractTypes) {
-    const cacheKey = `${symbol}:${ct}:${barrier ?? ""}`;
-    const hit = payoutCache.get(cacheKey);
-    if (hit && now - hit.ts < PAYOUT_TTL_MS) { result[ct] = hit.value; continue; }
-    try {
-      const proposal = await Promise.race([
-        getContractProposal(token, { symbol, contractType: ct, stake, duration, durationUnit: "t", currency, barrier: ct.startsWith("DIGIT") ? barrier : undefined }),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
-      ]);
-      if (proposal?.payoutMultiplier) {
-        result[ct] = proposal.payoutMultiplier;
-        payoutCache.set(cacheKey, { value: proposal.payoutMultiplier, ts: now });
+  await Promise.all(
+    contractTypes.map(async (ct) => {
+      const cacheKey = `${symbol}:${ct}:${barrier ?? ""}`;
+      const hit = payoutCache.get(cacheKey);
+      if (hit && now - hit.ts < PAYOUT_TTL_MS) {
+        result[ct] = hit.value;
+        return;
       }
-    } catch { /* fall through to defaults */ }
-  }
+      try {
+        const proposal = await Promise.race([
+          getContractProposal(token, {
+            symbol,
+            contractType: ct,
+            stake,
+            duration,
+            durationUnit: "t",
+            currency,
+            barrier: ct.startsWith("DIGIT") ? barrier : undefined,
+          }),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+        ]);
+        if (proposal?.payoutMultiplier) {
+          result[ct] = proposal.payoutMultiplier;
+          payoutCache.set(cacheKey, { value: proposal.payoutMultiplier, ts: now });
+        }
+      } catch { /* fall through to defaults */ }
+    }),
+  );
+
   return result;
 }
 
