@@ -47,7 +47,8 @@ function validateStartBody(body: any): { ok: true; data: any } | { ok: false; er
         : 1.62,
       recoveryMethod:        body.recoveryMethod === "instant" ? "instant" : "split",
       maxRecoverySteps:      typeof body.maxRecoverySteps === "number" ? Math.max(1, Math.min(10, body.maxRecoverySteps)) : 3,
-      lockedSymbol:          typeof body.lockedSymbol === "string" ? body.lockedSymbol : undefined,
+      lockedSymbol:          typeof body.lockedSymbol === "string" && body.lockedSymbol ? body.lockedSymbol : undefined,
+      marketMode:            body.marketMode === "switching" ? "switching" : "locked",
     },
   };
 }
@@ -120,6 +121,7 @@ router.post("/start", async (req, res): Promise<void> => {
     recoveryMethod:        parsed.data.recoveryMethod,
     maxRecoverySteps:      parsed.data.maxRecoverySteps,
     lockedSymbol:          parsed.data.lockedSymbol,
+    marketMode:            parsed.data.marketMode,
   };
 
   const result = await startSession(config);

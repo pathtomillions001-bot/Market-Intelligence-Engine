@@ -695,6 +695,7 @@ class DerivTickManager extends EventEmitter {
 
     this.ws.on("error", (err) => {
       logger.warn({ msg: (err as Error).message }, "TickManager: WS error");
+      if (!this.usingSimulated) this.startSimulation();
     });
 
     this.ws.on("close", () => {
