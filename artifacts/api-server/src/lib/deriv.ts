@@ -594,6 +594,26 @@ class DerivTickManager extends EventEmitter {
   private simPrices = new Map<string, number>();
   private usingSimulated = false;
 
+  // Request multiplexing & queueing over persistent public WS
+  private nextReqId = 1;
+  private pendingRequests = new Map<
+    number,
+    {
+      resolve: (msg: any) => void;
+      reject: (err: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  private requestQueue: Array<() => void> = [];
+  private queueInterval: ReturnType<typeof setInterval> | null = null;
+  private queuePausedUntil = 0;
+
+  constructor() {
+    super();
+    // Process outgoing requests at a controlled rate (20 req/sec max)
+    this.queueInterval = setInterval(() => this.processQueue(), 50);
+  }
+
   // ── Public API ─────────────────────────────────────────────────────────────
 
   start(symbols: string[]) {
@@ -663,6 +683,55 @@ class DerivTickManager extends EventEmitter {
     };
   }
 
+  // ── Outgoing request queue & multiplexing (req_id) ─────────────────────────
+
+  private processQueue() {
+    if (Date.now() < this.queuePausedUntil) return;
+    if (this.requestQueue.length === 0) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    const task = this.requestQueue.shift();
+    if (task) {
+      try {
+        task();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  async request(msg: Record<string, unknown>, timeoutMs = 8_000): Promise<any> {
+    const reqId = this.nextReqId++;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(reqId);
+        resolve(null);
+      }, timeoutMs);
+
+      this.pendingRequests.set(reqId, {
+        resolve,
+        reject: () => resolve(null),
+        timer,
+      });
+
+      this.requestQueue.push(() => {
+        if (
+          this.ws?.readyState === WebSocket.OPEN &&
+          this.pendingRequests.has(reqId)
+        ) {
+          this.ws.send(JSON.stringify({ ...msg, req_id: reqId }));
+        } else if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+          const pending = this.pendingRequests.get(reqId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            this.pendingRequests.delete(reqId);
+            resolve(null);
+          }
+        }
+      });
+    });
+  }
+
   // ── Internal connection logic ──────────────────────────────────────────────
 
   private connect() {
@@ -707,6 +776,15 @@ class DerivTickManager extends EventEmitter {
   }
 
   private handleMessage(msg: any) {
+    if (msg.req_id !== undefined && msg.req_id !== null) {
+      const reqId = Number(msg.req_id);
+      const pending = this.pendingRequests.get(reqId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingRequests.delete(reqId);
+        pending.resolve(msg);
+      }
+    }
     switch (msg.msg_type) {
       case "active_symbols":
         this.onActiveSymbols(msg.active_symbols ?? []);
@@ -815,6 +893,7 @@ class DerivTickManager extends EventEmitter {
     }
 
     if (code === "RateLimit") {
+      this.queuePausedUntil = Date.now() + 2_000;
       setTimeout(() => {
         if (this.ws?.readyState === WebSocket.OPEN && !this.invalidSymbols.has(sym)) {
           this.ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
@@ -956,6 +1035,11 @@ class DerivTickManager extends EventEmitter {
       try { this.ws.terminate(); } catch { /* ignore */ }
       this.ws = null;
     }
+    for (const [reqId, pending] of this.pendingRequests.entries()) {
+      clearTimeout(pending.timer);
+      pending.resolve(null);
+    }
+    this.pendingRequests.clear();
   }
 
   private scheduleReconnect() {
@@ -972,40 +1056,29 @@ export const tickManager = new DerivTickManager();
 
 // ── getTickHistory ────────────────────────────────────────────────────────────
 // Fetches historical tick prices. Uses the in-memory buffer if warm, otherwise
-// opens a short-lived connection to the PUBLIC WebSocket.
+// requests through the persistent PUBLIC WebSocket.
 export async function getTickHistory(symbol: string, count = 50): Promise<number[]> {
   const buffered = tickManager.getTicks(symbol, count);
   if (buffered.length >= 5) return buffered;
 
-  return new Promise((resolve) => {
-    try {
-      const ws = new WebSocket(DERIV_PUBLIC_WS_URL, { perMessageDeflate: false });
-      const timeout = setTimeout(() => { ws.close(); resolve([]); }, 8_000);
+  try {
+    const msg = await tickManager.request(
+      {
+        ticks_history: symbol,
+        count,
+        end: "latest",
+        style: "ticks",
+      },
+      8_000,
+    );
 
-      ws.on("open", () => {
-        ws.send(JSON.stringify({
-          ticks_history: symbol,
-          count,
-          end: "latest",
-          style: "ticks",
-        }));
-      });
-
-      ws.on("message", (data) => {
-        try {
-          const msg = JSON.parse(data.toString());
-          if (msg.error) { clearTimeout(timeout); ws.close(); resolve([]); return; }
-          if (msg.msg_type === "history" && msg.history?.prices) {
-            clearTimeout(timeout);
-            ws.close();
-            resolve(msg.history.prices.map(Number));
-          }
-        } catch { /* ignore */ }
-      });
-
-      ws.on("error", () => { clearTimeout(timeout); ws.close(); resolve([]); });
-    } catch { resolve([]); }
-  });
+    if (msg?.msg_type === "history" && msg.history?.prices) {
+      return msg.history.prices.map(Number);
+    }
+  } catch {
+    /* ignore */
+  }
+  return [];
 }
 
 // ── Account / auth types ──────────────────────────────────────────────────────
@@ -1482,55 +1555,41 @@ export async function getContractProposal(
     barrier?: number | string;
   },
 ): Promise<ContractProposal | null> {
-  return new Promise((resolve) => {
-    try {
-      // Proposals don't require auth — use the public WS
-      const ws = new WebSocket(DERIV_PUBLIC_WS_URL, { perMessageDeflate: false });
-      const timeout = setTimeout(() => { ws.close(); resolve(null); }, 12_000);
+  try {
+    const proposalParams: Record<string, unknown> = {
+      amount: params.stake,
+      basis: "stake",
+      contract_type: params.contractType,
+      currency: params.currency,
+      duration: params.duration,
+      duration_unit: params.durationUnit,
+      // New API uses `underlying_symbol` (not `symbol`)
+      underlying_symbol: params.symbol,
+    };
+    if (params.barrier !== undefined) proposalParams.barrier = String(params.barrier);
 
-      const sendProposal = () => {
-        const proposalParams: Record<string, unknown> = {
-          amount: params.stake,
-          basis: "stake",
-          contract_type: params.contractType,
-          currency: params.currency,
-          duration: params.duration,
-          duration_unit: params.durationUnit,
-          // New API uses `underlying_symbol` (not `symbol`)
-          underlying_symbol: params.symbol,
-        };
-        if (params.barrier !== undefined) proposalParams.barrier = String(params.barrier);
-        ws.send(JSON.stringify({ proposal: 1, ...proposalParams }));
+    const msg = await tickManager.request({ proposal: 1, ...proposalParams }, 8_000);
+
+    if (msg?.error) {
+      logger.debug({ symbol: params.symbol, ct: params.contractType, err: msg.error }, "getContractProposal: Deriv error");
+      return null;
+    }
+
+    if (msg?.msg_type === "proposal" && msg.proposal) {
+      const askPrice = Number(msg.proposal.ask_price ?? params.stake);
+      const payout = Number(msg.proposal.payout ?? askPrice * RISE_FALL_PAYOUT);
+      return {
+        payout,
+        stake: askPrice,
+        payoutMultiplier: askPrice > 0 ? payout / askPrice : RISE_FALL_PAYOUT,
+        spot: Number(msg.proposal.spot ?? 0),
+        longcode: msg.proposal.longcode ?? "",
+        proposalId: String(msg.proposal.id ?? ""),
+        askPrice,
       };
-
-      ws.on("open", () => { sendProposal(); });
-
-      ws.on("message", (data) => {
-        try {
-          const msg = JSON.parse(data.toString());
-          if (msg.error) { clearTimeout(timeout); ws.close(); resolve(null); return; }
-
-          if (msg.msg_type === "proposal" && msg.proposal) {
-            clearTimeout(timeout);
-            ws.close();
-            const askPrice = Number(msg.proposal.ask_price ?? params.stake);
-            const payout = Number(msg.proposal.payout ?? askPrice * RISE_FALL_PAYOUT);
-            resolve({
-              payout,
-              stake: askPrice,
-              payoutMultiplier: askPrice > 0 ? payout / askPrice : RISE_FALL_PAYOUT,
-              spot: Number(msg.proposal.spot ?? 0),
-              longcode: msg.proposal.longcode ?? "",
-              proposalId: String(msg.proposal.id ?? ""),
-              askPrice,
-            });
-          }
-        } catch { /* ignore */ }
-      });
-
-      ws.on("error", () => { clearTimeout(timeout); ws.close(); resolve(null); });
-    } catch { resolve(null); }
-  });
+    }
+  } catch { /* ignore */ }
+  return null;
 }
 
 // ── Live trade execution via OTP WebSocket ────────────────────────────────────
