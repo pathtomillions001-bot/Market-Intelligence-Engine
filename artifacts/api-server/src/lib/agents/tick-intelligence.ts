@@ -116,7 +116,7 @@ export function runTickIntelligenceAgent(
       directionalBias: 0, signalStrength: 0,
     };
     return {
-      agentId: "tickIntelligence", score: 50, confidence: 0, signal: "hold",
+      agentId: "tickIntelligence", score: 50, confidence: 0, signal: "neutral",
       reasoning: "Insufficient tick data for analysis.",
       data: { tickResult: empty }, executionTimeMs: Date.now() - t0, tickResult: empty,
     };

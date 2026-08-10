@@ -773,7 +773,10 @@ export const GetAiEngineStatusResponse = zod.object({
   "nextStake": zod.number().nullish().describe('The stake (USD) that will be used on this family\'s next recovery trade')
 })).optional(),
   "activeFamilies": zod.array(zod.string()).optional(),
-  "totalUnrecovered": zod.number().optional().describe('Sum of unrecovered amounts (USD) across all families currently in recovery'),
+  "totalUnrecovered": zod.number().optional().describe('Accumulated loss amount still to be recovered (USD)'),
+  "targetProfit": zod.number().optional().describe('Original expected net profit of the normal trade whose loss started recovery'),
+  "remainingTargetProfit": zod.number().optional().describe('Portion of the original target profit still outstanding after partial recovery wins'),
+  "originPayoutMultiplier": zod.number().optional().describe('Total-return payout multiplier of the normal trade whose loss started recovery'),
   "highestStep": zod.number().optional().describe('The highest recovery step among all families currently in recovery')
 }).optional()
 })
@@ -811,7 +814,10 @@ export const ToggleAutonomousEngineResponse = zod.object({
   "nextStake": zod.number().nullish().describe('The stake (USD) that will be used on this family\'s next recovery trade')
 })).optional(),
   "activeFamilies": zod.array(zod.string()).optional(),
-  "totalUnrecovered": zod.number().optional().describe('Sum of unrecovered amounts (USD) across all families currently in recovery'),
+  "totalUnrecovered": zod.number().optional().describe('Accumulated loss amount still to be recovered (USD)'),
+  "targetProfit": zod.number().optional().describe('Original expected net profit of the normal trade whose loss started recovery'),
+  "remainingTargetProfit": zod.number().optional().describe('Portion of the original target profit still outstanding after partial recovery wins'),
+  "originPayoutMultiplier": zod.number().optional().describe('Total-return payout multiplier of the normal trade whose loss started recovery'),
   "highestStep": zod.number().optional().describe('The highest recovery step among all families currently in recovery')
 }).optional()
 })
@@ -835,8 +841,8 @@ export const GetSettingsResponse = zod.object({
   "autonomousEnabled": zod.boolean(),
   "loopIntervalSec": zod.number().describe('Seconds between autonomous scan cycles'),
   "recoveryMode": zod.boolean().describe('Enable conservative stake recovery after losses'),
-  "recoveryMultiplier": zod.number().describe('Stake multiplier after a loss (e.g. 1.2 = 20% increase)'),
-  "maxRecoverySteps": zod.number().describe('Max consecutive recovery multiplications before reset'),
+  "recoveryMultiplier": zod.number().describe('User-controlled multiplier used only in Manual recovery mode'),
+  "maxRecoverySteps": zod.number().describe('Maximum loss step at which a manual multiplier keeps compounding'),
   "scanAllMarkets": zod.boolean().describe('Scan all available markets in parallel'),
   "tradeDurationSec": zod.number().describe('Trade contract duration in ticks'),
   "maxTradeStake": zod.number(),
@@ -846,7 +852,12 @@ export const GetSettingsResponse = zod.object({
   "normalOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades in normal (non-recovery) mode'),
   "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
   "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),
-  "recoveryUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades while in recovery mode')
+  "recoveryUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades while in recovery mode'),
+  "recoveryMethod": zod.enum(['split', 'instant']).optional(),
+  "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, debt, and original target profit'),
+  "allowedMarkets": zod.array(zod.string()).optional(),
+  "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
+  "riskAmountValue": zod.number().optional()
 })
 
 
@@ -901,8 +912,8 @@ export const UpdateSettingsResponse = zod.object({
   "autonomousEnabled": zod.boolean(),
   "loopIntervalSec": zod.number().describe('Seconds between autonomous scan cycles'),
   "recoveryMode": zod.boolean().describe('Enable conservative stake recovery after losses'),
-  "recoveryMultiplier": zod.number().describe('Stake multiplier after a loss (e.g. 1.2 = 20% increase)'),
-  "maxRecoverySteps": zod.number().describe('Max consecutive recovery multiplications before reset'),
+  "recoveryMultiplier": zod.number().describe('User-controlled multiplier used only in Manual recovery mode'),
+  "maxRecoverySteps": zod.number().describe('Maximum loss step at which a manual multiplier keeps compounding'),
   "scanAllMarkets": zod.boolean().describe('Scan all available markets in parallel'),
   "tradeDurationSec": zod.number().describe('Trade contract duration in ticks'),
   "maxTradeStake": zod.number(),
@@ -912,7 +923,12 @@ export const UpdateSettingsResponse = zod.object({
   "normalOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades in normal (non-recovery) mode'),
   "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
   "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),
-  "recoveryUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades while in recovery mode')
+  "recoveryUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades while in recovery mode'),
+  "recoveryMethod": zod.enum(['split', 'instant']).optional(),
+  "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, debt, and original target profit'),
+  "allowedMarkets": zod.array(zod.string()).optional(),
+  "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
+  "riskAmountValue": zod.number().optional()
 })
 
 

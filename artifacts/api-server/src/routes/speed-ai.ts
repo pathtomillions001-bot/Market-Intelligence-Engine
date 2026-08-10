@@ -19,7 +19,7 @@ function validateStartBody(body: any): { ok: true; data: any } | { ok: false; er
   if (!Array.isArray(body.recoveryContractTypes) || body.recoveryContractTypes.length === 0)
     return { ok: false, error: "recoveryContractTypes must be a non-empty array" };
   // Strategy split: Differ (cold-digit avoidance, ~96% win) is normal-only; Match
-  // (hot-digit, 9× payout) is recovery-only — it recovers a Differ loss cheaply.
+  // (hot-digit, 8.93× payout) is recovery-only — it recovers a Differ loss cheaply.
   if (body.normalContractTypes.includes("DIGITMATCH"))
     return { ok: false, error: "DIGITMATCH (Matches) is recovery-only — use DIGITDIFF in normal mode" };
   if (body.recoveryContractTypes.includes("DIGITDIFF"))
@@ -40,7 +40,11 @@ function validateStartBody(body: any): { ok: true; data: any } | { ok: false; er
       stake:                 body.stake,
       stopLoss:              body.stopLoss,
       takeProfit:            body.takeProfit,
-      recoveryMultiplier:    typeof body.recoveryMultiplier === "number" ? body.recoveryMultiplier : 1.62,
+      recoveryAutoMode:      body.recoveryAutoMode !== false,
+      // Manual mode accepts the user's finite multiplier without a hidden floor/ceiling.
+      recoveryMultiplier:    typeof body.recoveryMultiplier === "number" && Number.isFinite(body.recoveryMultiplier)
+        ? body.recoveryMultiplier
+        : 1.62,
       recoveryMethod:        body.recoveryMethod === "instant" ? "instant" : "split",
       maxRecoverySteps:      typeof body.maxRecoverySteps === "number" ? Math.max(1, Math.min(10, body.maxRecoverySteps)) : 3,
       lockedSymbol:          typeof body.lockedSymbol === "string" ? body.lockedSymbol : undefined,
@@ -111,6 +115,7 @@ router.post("/start", async (req, res): Promise<void> => {
     stake:                 parsed.data.stake,
     stopLoss:              parsed.data.stopLoss,
     takeProfit:            parsed.data.takeProfit,
+    recoveryAutoMode:      parsed.data.recoveryAutoMode,
     recoveryMultiplier:    parsed.data.recoveryMultiplier,
     recoveryMethod:        parsed.data.recoveryMethod,
     maxRecoverySteps:      parsed.data.maxRecoverySteps,

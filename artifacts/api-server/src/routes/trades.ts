@@ -10,6 +10,8 @@ import { analyzeCompletedTrade } from "../lib/agents/trade-intelligence";
 import { logger } from "../lib/logger";
 import { broadcastSSE } from "../lib/sse";
 import { getLocalTodayStart } from "../lib/tz";
+import { getFallbackPayout } from "../lib/payouts";
+import { resolveRecoveryPayout } from "../lib/recovery-payout";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 
 const router = Router();
@@ -39,7 +41,8 @@ function buildTradingSettingsForManual(s: any, preferredContractTypes: string[])
     recoveryOverDigit:      s?.recoveryOverDigit ?? 4,
     recoveryUnderDigit:     s?.recoveryUnderDigit ?? 5,
     recoveryMethod:         (s?.recoveryMethod === "instant" ? "instant" : "split") as "split" | "instant",
-    recoveryMultiplier:     s ? Math.max(1.1, Number(s.recoveryMultiplier ?? 1.5)) : 1.5,
+    // Manual mode owns this value; Auto mode ignores it completely.
+    recoveryMultiplier:     s ? Number(s.recoveryMultiplier ?? 1.5) : 1.5,
     recoveryAutoMode:       s?.recoveryAutoMode ?? true,
     maxRecoverySteps:       s?.maxRecoverySteps ?? 3,
   };
@@ -302,8 +305,8 @@ router.post("/", async (req, res): Promise<void> => {
       calibratedConfidence: 55,
       winProbability: 55,
       expectedValue: 0,
-      payoutMultiplier: 1.91,
-      breakevenWinRate: 52.4,
+      payoutMultiplier: 1.92,
+      breakevenWinRate: 52.08,
       riskScore: 50,
       reasoning: "Manual trade (coordinator unavailable)",
       digitBarrier: requestBarrier,
@@ -321,7 +324,17 @@ router.post("/", async (req, res): Promise<void> => {
     : undefined;
 
   const winProbability: number = (analysis as any).winProbability ?? 55;
-  const payoutMultiplier: number = (analysis as any).payoutMultiplier ?? 1.91;
+  const payoutQuote = await resolveRecoveryPayout({
+    symbol,
+    contractType,
+    barrier,
+    duration: tradeDuration,
+    durationUnit: durationUnit ?? "t",
+    currency,
+  });
+  const payoutMultiplier = payoutQuote.source === "live"
+    ? payoutQuote.payoutMultiplier
+    : getFallbackPayout(contractType, barrier);
   const payout = stake * payoutMultiplier;
 
   logger.info({
@@ -392,7 +405,7 @@ router.post("/", async (req, res): Promise<void> => {
     // recovery state, regardless of which contract type caused the original loss.
     {
       const maxSteps = settings.length > 0 ? (settings[0] as any).maxRecoverySteps ?? 3 : 3;
-      if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps, contractType);
+      if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps, contractType, payoutMultiplier);
     }
 
     // actualPayout = total returned to account when won (stake + net profit), 0 when lost
@@ -465,7 +478,7 @@ router.post("/", async (req, res): Promise<void> => {
   // Update recovery engine for paper/demo manual trades too (global state)
   {
     const maxSteps = settings.length > 0 ? (settings[0] as any).maxRecoverySteps ?? 3 : 3;
-    if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps, contractType);
+    if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps, contractType, payoutMultiplier);
   }
 
   const [trade] = await db.insert(tradesTable).values({

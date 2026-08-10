@@ -8,7 +8,17 @@ import { motion } from "framer-motion";
 import { useState, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Info, TrendingUp, TrendingDown, Hash, Equal, Shuffle, DollarSign, Percent } from "lucide-react";
+import { TrendingUp, TrendingDown, Hash, Equal, DollarSign, Percent } from "lucide-react";
+import {
+  OVER_PAYOUTS,
+  UNDER_PAYOUTS,
+  EVEN_ODD_PAYOUT,
+  RISE_FALL_PAYOUT,
+  MATCH_PAYOUT,
+  DIFF_PAYOUT,
+  exactRecoveryStake,
+  roundRecoveryStakeUp,
+} from "@/lib/payouts";
 
 function SettingRow({ label, description, children }: { label: string; description?: string; children: React.ReactNode }) {
   return (
@@ -197,23 +207,19 @@ export default function Settings() {
 
   if (isLoading) return <div className="p-8 text-muted-foreground text-sm animate-pulse">Loading settings…</div>;
 
-  // Auto-suggest a recovery multiplier calibrated to the selected recovery barrier's REAL
-  // Deriv payout (mirrors DIGIT_PAYOUTS in api-server/src/lib/agents/digit-probability.ts).
-  // Using a generic formula disconnected from the actual payout table silently mismatched
-  // the multiplier to the barrier — e.g. OVER 3's real payout is 1.37× (needs ~2.76× stake
-  // to cover one loss), not the 1.62× a rough approximation suggested. That mismatch was
-  // the true cause of "instant recovery uses way more than expected" reports: the stake
-  // math was correct, but the multiplier fed into it didn't match the barrier being traded.
-  const DIGITOVER_PAYOUTS: Record<number, number> = {
-    0: 1.04, 1: 1.08, 2: 1.19, 3: 1.37, 4: 1.63, 5: 1.96, 6: 2.45, 7: 3.27, 8: 4.90,
-  };
-  const suggestedMultiplier = (() => {
-    const payout = DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63;
-    const netPayout = payout - 1;
-    if (netPayout <= 0) return 9.0;
-    // Minimum multiplier so that one win at this payout exactly covers one base-stake loss.
-    return Math.round((1 / netPayout) * 1.02 * 100) / 100;
-  })();
+  // UI examples use the canonical fallback schedule. At execution time the
+  // server asks Deriv for a live $1 proposal and only falls back to these values.
+  const recoveryOverPayout = OVER_PAYOUTS[form.recoveryOverDigit] ?? OVER_PAYOUTS[3];
+  const recoveryUnderPayout = UNDER_PAYOUTS[form.recoveryUnderDigit] ?? UNDER_PAYOUTS[6];
+  const normalOverPayout = OVER_PAYOUTS[form.normalOverDigit] ?? OVER_PAYOUTS[1];
+  const normalUnderPayout = UNDER_PAYOUTS[form.normalUnderDigit] ?? UNDER_PAYOUTS[8];
+  const exampleBaseStake = form.riskAmountType === "percentage" && account
+    ? Math.max(0.35, Number(account.balance) * form.riskAmountValue / 100)
+    : Math.max(0.35, form.riskAmountValue);
+  const overExampleTarget = exampleBaseStake * (normalOverPayout - 1);
+  const underExampleTarget = exampleBaseStake * (normalUnderPayout - 1);
+  const overInstantExample = roundRecoveryStakeUp(exactRecoveryStake(exampleBaseStake, overExampleTarget, recoveryOverPayout));
+  const underInstantExample = roundRecoveryStakeUp(exactRecoveryStake(exampleBaseStake, underExampleTarget, recoveryUnderPayout));
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-8 max-w-3xl mx-auto space-y-5 pb-24">
@@ -380,14 +386,20 @@ export default function Settings() {
                   </button>
                 </div>
                 {form.recoveryAutoMode ? (
-                  <div className="mt-2 p-2.5 bg-primary/5 border border-primary/20 rounded-lg text-[11px] text-muted-foreground">
-                    <span className="text-primary font-medium">Auto mode: </span>
-                    The AI calculates the exact minimum stake needed to cover the lost amount based on your recovery barrier's real payout (OVER {form.recoveryOverDigit} / UNDER {form.recoveryUnderDigit} → {((DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63) - 1).toFixed(2)}× net). No multiplier needed — stake is always just enough, not a cent more.
+                  <div className="mt-2 p-2.5 bg-primary/5 border border-primary/20 rounded-lg text-[11px] text-muted-foreground space-y-1">
+                    <p>
+                      <span className="text-primary font-medium">Auto mode — no multiplier: </span>
+                      exact stake = (accumulated unrecovered amount + the original normal trade's expected profit) ÷ (live payout − 1).
+                    </p>
+                    <p>
+                      Payout includes the returned stake, so only payout − 1 is available as profit.
+                      Instant targets full clearance in one win; Split never stakes more than one normal base stake per attempt.
+                    </p>
                   </div>
                 ) : (
                   <div className="mt-2 p-2.5 bg-secondary/20 border border-border rounded-lg text-[11px] text-muted-foreground">
                     <span className="text-foreground font-medium">Manual mode: </span>
-                    You set the multiplier. Each step stakes Multiplier × base stake; consecutive losses add 1.0× (e.g. 2.84 → 3.84 → 4.84).
+                    Your multiplier is used as entered with no payout calibration or hidden range. It compounds after each recovery loss until Max Recovery Steps.
                   </div>
                 )}
               </div>
@@ -395,7 +407,9 @@ export default function Settings() {
               {/* Recovery Method — available in both modes */}
               <SettingRow
                 label="Recovery Method"
-                description={`Split: stake cap grows by 1× each step (Step 1 = ${form.recoveryMultiplier.toFixed(2)}×, Step 2 = ${(form.recoveryMultiplier+1).toFixed(2)}×…) — recovery spreads across multiple wins at a controlled, escalating rate. Instant: first tries Multiplier× base stake; if that covers the accumulated debt it uses it — otherwise it stakes the exact minimum to clear all debt in a single winning trade.`}
+                description={form.recoveryAutoMode
+                  ? "Auto Split caps every attempt at one normal base stake and carries remaining debt forward. Auto Instant uses the exact minimum stake to clear debt plus the original target profit in one win."
+                  : "Manual Split uses your compounded multiplier as a cap on the exact target. Manual Instant uses your compounded multiplier stake directly. No automatic payout multiplier is substituted."}
               >
                 <Select value={form.recoveryMethod} onValueChange={(v) => set("recoveryMethod", v)}>
                   <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
@@ -410,77 +424,85 @@ export default function Settings() {
               {!form.recoveryAutoMode && (
                 <SettingRow
                   label="Recovery Multiplier"
-                  description={`Step 1 stakes Multiplier × base; each consecutive loss adds 1.0 (e.g. ${form.recoveryMultiplier.toFixed(2)} → ${(form.recoveryMultiplier + 1).toFixed(2)} → ${(form.recoveryMultiplier + 2).toFixed(2)}). Calibrate to your recovery barrier payout — OVER 3/UNDER 6 needs ≈${suggestedMultiplier}×.`}
+                  description={`Used exactly as entered and compounded by recovery step: Step 1 = ×${form.recoveryMultiplier}, Step 2 = ×${Math.pow(form.recoveryMultiplier, 2).toFixed(2)}, Step 3 = ×${Math.pow(form.recoveryMultiplier, 3).toFixed(2)}. Auto mode never reads this value.`}
                 >
-                  <div className="flex items-center gap-1.5">
-                    <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", v)} min={1.1} max={10} step={0.01} suffix="×" />
-                    {Math.abs(suggestedMultiplier - form.recoveryMultiplier) > 0.01 && (
-                      <button
-                        onClick={() => set("recoveryMultiplier", suggestedMultiplier)}
-                        className="text-[10px] px-1.5 py-1 rounded bg-primary/10 text-primary border border-primary/30 hover:bg-primary/20 transition-colors font-medium whitespace-nowrap"
-                        title={`Auto-set to ${suggestedMultiplier}× (calibrated to OVER ${form.recoveryOverDigit} payout)`}
-                      >
-                        Auto {suggestedMultiplier}×
-                      </button>
-                    )}
-                  </div>
+                  <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", v)} step={0.01} suffix="×" />
                 </SettingRow>
               )}
 
               {/* Max Recovery Steps — available in both modes */}
               <SettingRow
                 label="Max Recovery Steps"
-                description="Maximum consecutive stake escalations before the engine stops escalating further."
+                description={form.recoveryAutoMode
+                  ? "Maximum recovery-loss step recorded by the engine. Auto stake still recalculates from live debt and payout; it never adds a fixed multiplier."
+                  : "Maximum exponent for your manual multiplier. Recovery continues after this step, but the multiplier stops compounding further."}
               >
                 <NumInput value={form.maxRecoverySteps} onChange={(v) => set("maxRecoverySteps", v)} min={1} max={10} />
               </SettingRow>
 
-              {/* Escalation preview */}
+              {/* Recovery calculation preview */}
               <div className="mt-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
                 {form.recoveryAutoMode ? (
                   <>
-                    <div className="text-xs font-medium text-amber-400 mb-1">Auto mode — stake per step (× base stake)</div>
-                    <div className="text-[10px] text-muted-foreground mb-2">
-                      Each step stakes exactly enough to recover the accumulated debt at OVER {form.recoveryOverDigit} / UNDER {form.recoveryUnderDigit} ({(DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63).toFixed(2)}× payout, {((DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63) - 1).toFixed(2)}× net).
+                    <div className="text-xs font-medium text-amber-400 mb-1">Auto recovery — ${exampleBaseStake.toFixed(2)} normal-loss example</div>
+                    <div className="text-[10px] text-muted-foreground mb-3">
+                      Target profit comes from the original normal trade. Live payout is used at execution; the values below use the fallback schedule.
                     </div>
-                    <div className="flex gap-2 flex-wrap">
-                      {(() => {
-                        const netPayout = (DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63) - 1;
-                        const steps: number[] = [];
-                        let debt = 1; // starting from 1× base stake loss
-                        for (let i = 0; i < form.maxRecoverySteps; i++) {
-                          const stepMult = netPayout > 0 ? (debt / netPayout) * 1.02 : debt * 3;
-                          steps.push(stepMult);
-                          if (i + 1 < form.maxRecoverySteps) debt += stepMult; // accumulate debt for next step
-                        }
-                        return steps.map((mult, i) => (
-                          <div key={i} className="text-center">
-                            <div className="text-[10px] text-muted-foreground">Step {i + 1}</div>
-                            <div className="text-xs font-mono font-bold text-amber-400">×{mult.toFixed(2)}</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {[
+                        {
+                          side: `OVER ${form.recoveryOverDigit}`,
+                          normal: `OVER ${form.normalOverDigit}`,
+                          payout: recoveryOverPayout,
+                          target: overExampleTarget,
+                          instant: overInstantExample,
+                        },
+                        {
+                          side: `UNDER ${form.recoveryUnderDigit}`,
+                          normal: `UNDER ${form.normalUnderDigit}`,
+                          payout: recoveryUnderPayout,
+                          target: underExampleTarget,
+                          instant: underInstantExample,
+                        },
+                      ].map((example) => (
+                        <div key={example.side} className="rounded-lg bg-background/50 border border-border/60 p-2.5 space-y-1">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="font-medium text-foreground">{example.side}</span>
+                            <span className="font-mono text-amber-400">{example.payout.toFixed(2)}× payout</span>
                           </div>
-                        ));
-                      })()}
-                    </div>
-                  </>
-                ) : form.recoveryMethod === "split" ? (
-                  <>
-                    <div className="text-xs font-medium text-amber-400 mb-1">Manual · Split — stake cap per step (×base stake)</div>
-                    <div className="text-[10px] text-muted-foreground mb-2">Cap grows by 1× each step; actual stake is the minimum of this cap and the exact debt-recovery amount.</div>
-                    <div className="flex gap-2 flex-wrap">
-                      {Array.from({ length: form.maxRecoverySteps }, (_, i) => i).map((i) => (
-                        <div key={i} className="text-center">
-                          <div className="text-[10px] text-muted-foreground">Step {i + 1}</div>
-                          <div className="text-xs font-mono font-bold text-amber-400">≤×{(form.recoveryMultiplier + i).toFixed(2)}</div>
+                          <p className="text-[9px] text-muted-foreground">
+                            ${exampleBaseStake.toFixed(2)} {example.normal} loss + ${example.target.toFixed(2)} original target
+                          </p>
+                          <div className="flex justify-between text-[10px] pt-1">
+                            <span>Instant exact</span>
+                            <span className="font-mono font-bold text-amber-300">${example.instant.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between text-[10px]">
+                            <span>Split next stake</span>
+                            <span className="font-mono font-bold text-amber-300">${Math.min(exampleBaseStake, example.instant).toFixed(2)} max</span>
+                          </div>
                         </div>
                       ))}
                     </div>
+                    <p className="text-[9px] text-muted-foreground/60 mt-2">
+                      Deriv's $0.35 minimum and your Max Stake Per Trade remain hard execution limits.
+                    </p>
                   </>
                 ) : (
                   <>
-                    <div className="text-xs font-medium text-amber-400 mb-1">Manual · Instant — single-win targeting</div>
-                    <div className="text-[10px] text-muted-foreground mb-2 space-y-1">
-                      <p>Each trade first tries <span className="font-mono text-amber-300">×{form.recoveryMultiplier.toFixed(2)} base stake</span>. If that covers the full accumulated debt at the recovery barrier payout → uses it. If not → jumps to the exact minimum stake to clear all debt in one win.</p>
-                      <p className="text-muted-foreground/60">No step escalation — every trade is an attempt to close all debt immediately.</p>
+                    <div className="text-xs font-medium text-amber-400 mb-1">Manual multiplier ladder (× base stake)</div>
+                    <div className="text-[10px] text-muted-foreground mb-2">
+                      No auto-calibration. The multiplier compounds after a recovery loss and freezes at Max Recovery Steps.
+                    </div>
+                    <div className="flex gap-3 flex-wrap">
+                      {Array.from({ length: form.maxRecoverySteps }, (_, i) => i + 1).map((step) => (
+                        <div key={step} className="text-center">
+                          <div className="text-[10px] text-muted-foreground">Step {step}</div>
+                          <div className="text-xs font-mono font-bold text-amber-400">
+                            {form.recoveryMethod === "split" ? "≤" : ""}×{Math.pow(form.recoveryMultiplier, step).toFixed(2)}
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </>
                 )}
@@ -495,7 +517,7 @@ export default function Settings() {
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Over/Under Digit Barriers</CardTitle>
           <CardDescription className="text-xs">
-            The AI only ever trades these exact digit barriers — one pair for normal trading, one pair while recovery is active. Changing the recovery digit automatically recalculates the suggested recovery multiplier above.
+            The AI only trades these exact digit barriers — one pair for normal trading and one pair during recovery. Auto recovery recalculates the exact stake from the selected contract's live payout; no multiplier is needed.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -507,19 +529,30 @@ export default function Settings() {
           </SettingRow>
           <SettingRow
             label="Recovery — OVER digit"
-            description={`Barrier for DIGITOVER while recovering. Real payout ≈${(DIGITOVER_PAYOUTS[form.recoveryOverDigit] ?? 1.63).toFixed(2)}× — use the Auto button above to keep Recovery Multiplier calibrated to it.`}
+            description={`Barrier for DIGITOVER while recovering. Fallback payout ${recoveryOverPayout.toFixed(2)}× total return; a live proposal is used for the actual Auto stake.`}
           >
             <NumInput value={form.recoveryOverDigit} onChange={(v) => { set("recoveryOverDigit", v); }} min={0} max={8} />
           </SettingRow>
           <SettingRow
             label="Recovery — UNDER digit"
-            description={`Barrier for DIGITUNDER while recovering. Real payout ≈${(DIGITOVER_PAYOUTS[9 - form.recoveryUnderDigit] ?? 1.63).toFixed(2)}× — use the Auto button above to keep Recovery Multiplier calibrated to it.`}
+            description={`Barrier for DIGITUNDER while recovering. Fallback payout ${recoveryUnderPayout.toFixed(2)}× total return; a live proposal is used for the actual Auto stake.`}
           >
             <NumInput value={form.recoveryUnderDigit} onChange={(v) => { set("recoveryUnderDigit", v); }} min={1} max={9} />
           </SettingRow>
+          <div className="mt-3 rounded-lg border border-border/60 bg-secondary/10 p-2.5">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">$1 fallback payout reference</p>
+            <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
+              {Object.entries(OVER_PAYOUTS).map(([digit, payout]) => (
+                <div key={digit} className="rounded bg-background/60 px-1.5 py-1 text-center">
+                  <div className="text-[9px] text-muted-foreground">O{digit} / U{9 - Number(digit)}</div>
+                  <div className="text-[10px] font-mono text-foreground">{payout.toFixed(2)}×</div>
+                </div>
+              ))}
+            </div>
+          </div>
           <div className="mt-2 p-2.5 bg-secondary/20 rounded-lg text-[11px] text-muted-foreground space-y-1">
-            <p><strong className="text-foreground">Tip:</strong> Normal digits OVER 1 / UNDER 8 give ~80% win rate with smaller payout — high frequency, steady income.</p>
-            <p>Lower recovery barriers pay out less per win, so they need a <em>bigger</em> multiplier to cover one loss. The Recovery Multiplier must match whichever barrier you pick — use the <strong className="text-foreground">Auto</strong> button above any time you change the barrier.</p>
+            <p><strong className="text-foreground">Payout meaning:</strong> values are the total returned after a win, including the initial stake. Auto recovery uses only the net portion (payout − 1).</p>
+            <p>Other fallback payouts: Even/Odd <strong className="text-foreground">{EVEN_ODD_PAYOUT.toFixed(2)}×</strong> · Rise/Fall <strong className="text-foreground">{RISE_FALL_PAYOUT.toFixed(2)}×</strong> · Matches <strong className="text-foreground">{MATCH_PAYOUT.toFixed(2)}×</strong> · Differs <strong className="text-foreground">{DIFF_PAYOUT.toFixed(2)}×</strong>.</p>
           </div>
         </CardContent>
       </Card>

@@ -1,33 +1,15 @@
 // ── Risk Calculator Math ──────────────────────────────────────────────────────
 // Pure functions — no React, no side effects.
-// Sources: digit-probability.ts (payout tables), ev-calculator.ts (EV formulas)
+// Sources: canonical payout schedule + EV formulas.
 
-export type ContractType =
-  | "CALL" | "PUT"
-  | "DIGITOVER" | "DIGITUNDER"
-  | "DIGITEVEN" | "DIGITODD"
-  | "DIGITMATCH" | "DIGITDIFF";
+import { getFallbackPayout, type PayoutContractType } from "./payouts";
 
-// Barrier-specific payouts — from api-server/lib/agents/digit-probability.ts
-export const OVER_PAYOUTS: Record<number, number> = {
-  0: 1.04, 1: 1.08, 2: 1.19, 3: 1.37, 4: 1.63,
-  5: 1.96, 6: 2.45, 7: 3.27, 8: 4.90,
-};
-export const UNDER_PAYOUTS: Record<number, number> = {
-  9: 1.04, 8: 1.08, 7: 1.19, 6: 1.37, 5: 1.63,
-  4: 1.96, 3: 2.45, 2: 3.27, 1: 4.90,
-};
+export { OVER_PAYOUTS, UNDER_PAYOUTS } from "./payouts";
+
+export type ContractType = Exclude<PayoutContractType, "RISE" | "FALL">;
 
 export function getPayout(type: ContractType, barrier?: number): number {
-  switch (type) {
-    case "CALL": case "PUT":            return 1.91;
-    case "DIGITEVEN": case "DIGITODD":  return 1.95;
-    case "DIGITMATCH":                  return 9.00;
-    case "DIGITDIFF":                   return 1.04;
-    case "DIGITOVER":   return OVER_PAYOUTS[barrier ?? 5]  ?? 1.96;
-    case "DIGITUNDER":  return UNDER_PAYOUTS[barrier ?? 4] ?? 1.96;
-    default:                            return 1.91;
-  }
+  return getFallbackPayout(type, barrier);
 }
 
 // Theoretical win probability assuming uniform digit distribution [0–9]
@@ -44,19 +26,23 @@ export function getWinProb(type: ContractType, barrier?: number): number {
 }
 
 // ── Instant Recovery Ladder ───────────────────────────────────────────────────
-// Each recovery stake = totalDebt / (recoveryPayout - 1)
-// so that a single win recoups all losses and earns +baseStake profit.
+// Each recovery stake = (totalDebt + original normal-trade target profit)
+//                       / (recoveryPayout - 1).
+// Payout includes the returned stake, so payout - 1 is the usable profit rate.
 export function buildInstantLadder(
   base: number,
   recoveryPayout: number,
   maxLosses: number,
+  normalPayout = 1,
 ): number[] {
   const edge = recoveryPayout - 1;
   if (edge <= 0) return Array(maxLosses).fill(base);
+  const targetProfit = base * Math.max(0, normalPayout - 1);
   const ladder: number[] = [base];
   for (let i = 1; i < maxLosses; i++) {
     const debt = ladder.reduce((a, b) => a + b, 0);
-    ladder.push(Math.max(debt / edge, 0.35)); // Deriv minimum stake $0.35
+    const exact = (debt + targetProfit) / edge;
+    ladder.push(Math.max(Math.ceil((exact - 1e-9) * 100) / 100, 0.35));
   }
   return ladder;
 }
@@ -125,13 +111,14 @@ function maxStakeForLadderCost(
   recoveryPayout: number,
   recoveryMultiplier: number,
   maxLosses: number,
+  primaryPayout: number,
 ): number {
   let lo = 0.35, hi = Math.max(targetCost * 2, 1);
   for (let i = 0; i < 64; i++) {
     const mid = (lo + hi) / 2;
     const ladder =
       recoveryMethod === "instant"
-        ? buildInstantLadder(mid, recoveryPayout, maxLosses)
+        ? buildInstantLadder(mid, recoveryPayout, maxLosses, primaryPayout)
         : buildSplitLadder(mid, recoveryMultiplier, maxLosses);
     const cost = ladder.reduce((a, b) => a + b, 0);
     if (cost <= targetCost) lo = mid;
@@ -147,7 +134,7 @@ export function calcSuggestedStake(
   recoveryPayout: number,
   recoveryMultiplier: number,
   maxLosses: number,
-  primaryPayout: number,          // e.g. 1.04 for DIGITDIFF
+  primaryPayout: number,          // e.g. 1.09 for DIGITDIFF
   primaryWinProb: number,         // e.g. 0.90 for DIGITDIFF
   targetTPFraction: number,       // e.g. 0.10
 ): number {
@@ -157,7 +144,7 @@ export function calcSuggestedStake(
   // Use 60 % of SL budget so there is headroom for multiple recovery failures.
   const slCostTarget = (targetSLFraction * balance * 0.6) / 1.1;
   const maxFromSL = maxStakeForLadderCost(
-    slCostTarget, recoveryMethod, recoveryPayout, recoveryMultiplier, maxLosses,
+    slCostTarget, recoveryMethod, recoveryPayout, recoveryMultiplier, maxLosses, primaryPayout,
   );
 
   // ── Constraint 2: TP-driven stake ─────────────────────────────────────────
@@ -214,7 +201,7 @@ export function calcRisk(p: {
 
   const ladder =
     recoveryMethod === "instant"
-      ? buildInstantLadder(baseStake, recoveryPayout, maxLosses)
+      ? buildInstantLadder(baseStake, recoveryPayout, maxLosses, primaryPayout)
       : buildSplitLadder(baseStake, recoveryMultiplier, maxLosses);
 
   const totalLadderCost = ladder.reduce((a, b) => a + b, 0);
@@ -240,11 +227,11 @@ export function calcRisk(p: {
   const breakevenWinRate = 1 / primaryPayout;
 
   // ─ Net profit after one complete recovery cycle ─
-  // Instant: by design, winning the Nth+1 trade covers all losses → net = +baseStake
-  // Split: each recovery trade targets base × multiplier profit after covering loss
+  // Instant preserves the expected net profit of the original normal trade.
+  // Split remains a manual multiplier model in this standalone risk calculator.
   const netAfterRecovery =
     recoveryMethod === "instant"
-      ? baseStake
+      ? baseStake * Math.max(0, primaryPayout - 1)
       : baseStake * (recoveryMultiplier - 1);
 
   // ─ Risk Score (0–100) ─

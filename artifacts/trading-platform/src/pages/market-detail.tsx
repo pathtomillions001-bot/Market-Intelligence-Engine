@@ -12,6 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useQueryClient } from "@tanstack/react-query";
+import { MATCH_PAYOUT, DIFF_PAYOUT } from "@/lib/payouts";
 
 // ── AI Trade Panel ────────────────────────────────────────────────────────────
 // Unified recommendation panel synced to all 3 contract types + agent intelligence
@@ -911,11 +912,11 @@ export default function MarketDetail() {
               const matchDigit = best[0];       // hottest digit → best to match
               const diffDigit  = best[best.length - 1]; // coldest → best to differ from
 
-              // EV estimates: MATCH pays ~9x, DIFF pays ~1.04x
+              // EV uses canonical total-return payouts; subtract 1 for net profit.
               const matchWinP = matchDigit.pct / 100;
               const diffWinP  = 1 - diffDigit.pct / 100;
-              const matchEV   = matchWinP * 8.0 - (1 - matchWinP);
-              const diffEV    = diffWinP * 0.04 - (1 - diffWinP);
+              const matchEV   = matchWinP * (MATCH_PAYOUT - 1) - (1 - matchWinP);
+              const diffEV    = diffWinP * (DIFF_PAYOUT - 1) - (1 - diffWinP);
 
               return (
                 <div className="grid grid-cols-2 gap-3">

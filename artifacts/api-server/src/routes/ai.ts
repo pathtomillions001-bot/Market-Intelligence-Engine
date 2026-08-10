@@ -4,7 +4,7 @@ import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@wor
 import { sql, desc, eq } from "drizzle-orm";
 import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, journalManager } from "../lib/deriv";
 import { runRecoveryConsensus, getBestConsensus } from "../lib/agents/recovery-consensus";
-import { DIGIT_PAYOUTS } from "../lib/agents/digit-probability";
+import { resolveRecoveryPayout } from "../lib/recovery-payout";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
@@ -185,17 +185,6 @@ const SAME_SYMBOL_COOLDOWN_MS = 8 * 60 * 1000; // 8 minutes
 // Stale open-trade threshold — shared between normal path and recovery fast path
 const STALE_OPEN_MS = 2 * 60 * 1000; // 2 minutes
 
-// ── Recovery payout lookup ─────────────────────────────────────────────────────
-function getRecoveryPayout(contractType: string, barrier: number | null): number {
-  if (contractType === "DIGITOVER" || contractType === "DIGITUNDER") {
-    return (DIGIT_PAYOUTS[contractType] as Record<number, number>)?.[barrier ?? 5] ?? 1.96;
-  }
-  if (contractType === "DIGITMATCH") return 9.0;
-  if (contractType === "DIGITDIFF")  return 1.04;
-  // DIGITEVEN, DIGITODD, CALL, PUT — standard ~1.95×
-  return 1.95;
-}
-
 // ── Last completed trade timestamp ───────────────────────────────────────────
 // Prevents the engine from immediately firing a second scan while a trade is
 // still being journalled in Deriv. Set immediately after the trade settles.
@@ -271,7 +260,8 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     recoveryOverDigit:      Math.min(8, Math.max(0, s?.recoveryOverDigit ?? 4)),
     recoveryUnderDigit:     Math.min(9, Math.max(1, s?.recoveryUnderDigit ?? 5)),
     recoveryMethod:         (s?.recoveryMethod === "instant" ? "instant" : "split") as "split" | "instant",
-    recoveryMultiplier:     s ? Math.max(1.1, Number(s.recoveryMultiplier ?? 1.5)) : 1.5,
+    // Manual mode owns this value; Auto mode ignores it completely.
+    recoveryMultiplier:     s ? Number(s.recoveryMultiplier ?? 1.5) : 1.5,
     recoveryAutoMode:       s?.recoveryAutoMode ?? true,
     maxRecoverySteps:       s?.maxRecoverySteps ?? 3,
   };
@@ -681,12 +671,30 @@ async function runAutonomousLoop() {
 
         const recovContractType = cons.contractType;
         const recovBarrier      = cons.barrier;
-        const recovPayoutMult   = getRecoveryPayout(recovContractType, recovBarrier);
         const recovWinP         = cons.avgWinProbability;
         const recovDirection    = recovContractType === "CALL" ? "up"
           : recovContractType === "PUT" ? "down" : "hold";
+        const rawDur = tradingSettings.tradeDurationSec ?? 5;
+        const recovDuration = (recovContractType === "DIGITEVEN" || recovContractType === "DIGITODD")
+          ? Math.max(5, rawDur)
+          : (recovContractType === "DIGITMATCH" || recovContractType === "DIGITDIFF")
+            ? Math.max(1, Math.min(5, rawDur))
+            : rawDur;
 
-        // Recovery stake — uses the engine's accumulated debt + this contract's payout
+        // Price the exact candidate immediately before sizing it. Live proposal
+        // wins; the canonical user-provided payout schedule is the fallback.
+        const recovPayoutQuote = await resolveRecoveryPayout({
+          symbol: recovSymbol,
+          contractType: recovContractType,
+          barrier: recovBarrier,
+          duration: recovDuration,
+          durationUnit: "t",
+          currency: account?.currency ?? "USD",
+        });
+        const recovPayoutMult = recovPayoutQuote.payoutMultiplier;
+
+        // Recovery stake — uses debt + original normal target profit and this
+        // candidate's net live payout (total payout minus returned stake).
         const riskBaseAmount = tradingSettings.riskAmountType === "percentage"
           ? balance * tradingSettings.riskAmountValue / 100
           : tradingSettings.riskAmountValue;
@@ -697,21 +705,16 @@ async function runAutonomousLoop() {
           tradingSettings.recoveryMethod, tradingSettings.maxRecoverySteps,
           tradingSettings.recoveryAutoMode,
         );
-        const recovStake = Math.max(0.35, Math.min(Math.round(recovStakeRaw * 100) / 100, tradingSettings.maxTradeStake));
-
-        const rawDur = tradingSettings.tradeDurationSec ?? 5;
-        const recovDuration = (recovContractType === "DIGITEVEN" || recovContractType === "DIGITODD")
-          ? Math.max(5, rawDur)
-          : (recovContractType === "DIGITMATCH" || recovContractType === "DIGITDIFF")
-            ? Math.max(1, Math.min(5, rawDur))
-            : rawDur;
+        // The recovery engine already rounds upward to cents; do not round back
+        // down here or an "exact" instant stake can finish a cent short.
+        const recovStake = Math.max(0.35, Math.min(recovStakeRaw, tradingSettings.maxTradeStake));
 
         const recovBarrierToStore = recovContractType.includes("DIGIT") ? (recovBarrier ?? null) : null;
 
         logger.info({
           symbol: recovSymbol, contractType: recovContractType, barrier: recovBarrier,
           stake: recovStake, winP: (recovWinP * 100).toFixed(1) + "%",
-          payout: recovPayoutMult, reason: cons.reason,
+          payout: recovPayoutMult, payoutSource: recovPayoutQuote.source, reason: cons.reason,
         }, "Recovery: 3-window consensus reached — executing recovery trade");
 
         broadcastSSE("scan_complete", {
@@ -737,7 +740,10 @@ async function runAutonomousLoop() {
           rEntryPrice = rExitPrice = tickManager.getLatestPrice(recovSymbol) ?? 100;
 
           recordTradeOutcome(recovSymbol, recovContractType, recovBarrier ?? null, rWon, rProfit, recovStake);
-          recoveryEngine.recordOutcome(rWon, rProfit, recovStake, settings?.maxRecoverySteps ?? 3, recovContractType);
+          recoveryEngine.recordOutcome(
+            rWon, rProfit, recovStake, settings?.maxRecoverySteps ?? 3,
+            recovContractType, recovPayoutMult,
+          );
           if (rWon) clearLossPattern(recovSymbol); else recordLossForPattern(recovSymbol, recovContractType, "");
 
           await db.insert(tradesTable).values({
@@ -775,7 +781,7 @@ async function runAutonomousLoop() {
               stake: Math.round(recovStake * 100) / 100,
               duration: recovDuration, durationUnit: "t",
               currency: account?.currency ?? "USD",
-              barrier: recovContractType.includes("DIGIT") ? recovBarrier : undefined,
+              barrier: recovContractType.includes("DIGIT") ? (recovBarrier ?? undefined) : undefined,
             });
             rEntryPrice = liveRes.buyPrice;
             const contractRes = await waitForContractResult(token, liveRes.contractId, (recovDuration + 30) * 1000);
@@ -807,7 +813,10 @@ async function runAutonomousLoop() {
           }
 
           recordTradeOutcome(recovSymbol, recovContractType, recovBarrier ?? null, rWon, rProfit, recovStake);
-          recoveryEngine.recordOutcome(rWon, rProfit, recovStake, settings?.maxRecoverySteps ?? 3, recovContractType);
+          recoveryEngine.recordOutcome(
+            rWon, rProfit, recovStake, settings?.maxRecoverySteps ?? 3,
+            recovContractType, recovPayoutMult,
+          );
           if (rWon) clearLossPattern(recovSymbol); else recordLossForPattern(recovSymbol, recovContractType, "");
 
           await db.update(tradesTable).set({
@@ -911,8 +920,8 @@ async function runAutonomousLoop() {
               if (m.digitEnabled && eoTypes.length > 0)  families.push({ name: "evenodd",   types: eoTypes });
               if (m.digitEnabled && mdTypes.length > 0) {
                 // Strategy:
-                //   Normal mode  → DIGITDIFF (coldest digit, ~96% win rate, 1.04× payout)
-                //   Recovery 1–2 → DIGITMATCH (hottest digit, 9× payout — tiny stake covers full DIFF loss)
+                //   Normal mode  → DIGITDIFF (coldest digit, high win rate, 1.09× fallback payout)
+                //   Recovery 1–2 → DIGITMATCH (hottest digit, 8.93× payout — tiny stake covers full DIFF loss)
                 //   Recovery 3+  → DIGITDIFF  (2 consecutive MATCH losses means MATCH isn't hitting;
                 //                              fall back to DIFF so the debt can still be recovered)
                 // If the user only enabled one of the two, use whichever is enabled.
@@ -954,7 +963,7 @@ async function runAutonomousLoop() {
                       minConfidenceThreshold:
                         fam.name === "evenodd"
                           ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 48)
-                          // DIGITMATCH: 9× payout but only ~10-15% win rate → agent scores are
+                          // DIGITMATCH: 8.93× payout but only ~10-15% win rate → agent scores are
                           // naturally lower. Lower the threshold so the EV gate (not confidence)
                           // does the real filtering; master-decision already requires positive EV.
                           // DIGITDIFF: ~96% win rate but low payout → scores may vary; keep same floor.
@@ -1273,13 +1282,30 @@ async function runAutonomousLoop() {
     // same dynamic-stake formula (minimum stake needed to recover the accumulated
     // loss, adjusted for this trade's own payout and win probability).
     const isTracked = recoveryEngine.isTrackedContract(effectiveContractType);
+    let effectivePayoutMultiplier = rec.payoutMultiplier;
+    if (isTracked) {
+      const payoutQuote = await resolveRecoveryPayout({
+        symbol: bestMarket.symbol,
+        contractType: effectiveContractType,
+        barrier: effectiveBarrier,
+        duration,
+        durationUnit: "t",
+        currency: account?.currency ?? "USD",
+      });
+      // Preserve an already-live coordinator quote if the dedicated quote timed
+      // out; otherwise prefer the freshest proposal obtained immediately here.
+      if (payoutQuote.source === "live" || !Number.isFinite(effectivePayoutMultiplier) || effectivePayoutMultiplier <= 1) {
+        effectivePayoutMultiplier = payoutQuote.payoutMultiplier;
+      }
+    }
+
     let stake = rec.stake;
     if (isTracked && recoveryEngine.isInRecovery()) {
       stake = recoveryEngine.getDynamicRecoveryStake(
         rec.stake,
         tradingSettings.maxTradeStake,
         balance,
-        rec.payoutMultiplier,
+        effectivePayoutMultiplier,
         rec.winProbability / 100,
         tradingSettings.riskProfile,
         tradingSettings.recoveryMultiplier,
@@ -1290,7 +1316,7 @@ async function runAutonomousLoop() {
     }
 
     // Estimated payout for paper trades (live payout comes from Deriv result)
-    const estimatedPayout = stake * rec.payoutMultiplier;
+    const estimatedPayout = stake * effectivePayoutMultiplier;
     const barrierToStore = effectiveContractType.includes("DIGIT") ? (effectiveBarrier ?? null) : null;
 
     let won: boolean, profit: number, entryPrice: number, exitPrice: number;
@@ -1309,7 +1335,10 @@ async function runAutonomousLoop() {
       // Paper trades: insert completed record immediately
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
       if (isTracked) {
-        recoveryEngine.recordOutcome(won, profit, stake, settings?.maxRecoverySteps ?? 3, effectiveContractType);
+        recoveryEngine.recordOutcome(
+          won, profit, stake, settings?.maxRecoverySteps ?? 3,
+          effectiveContractType, effectivePayoutMultiplier,
+        );
       }
       // Update structural loss pattern detector so the next scan avoids repeating
       // the exact same losing contractType+regime combination.
@@ -1450,7 +1479,10 @@ async function runAutonomousLoop() {
       // Update the open record to Deriv-confirmed final status
       recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
       if (isTracked) {
-        recoveryEngine.recordOutcome(won, profit, stake, settings?.maxRecoverySteps ?? 3, effectiveContractType);
+        recoveryEngine.recordOutcome(
+          won, profit, stake, settings?.maxRecoverySteps ?? 3,
+          effectiveContractType, effectivePayoutMultiplier,
+        );
       }
       // Update structural loss pattern detector — prevents re-entering the same
       // losing contractType+regime combo back-to-back without a regime change.
@@ -1810,6 +1842,9 @@ function buildRecoveryPayload() {
     inRecovery: state.inRecovery,
     recoveryStep: state.recoveryStep,
     baseStake: Math.round(state.baseStake * 100) / 100,
+    targetProfit: Math.round(state.targetProfit * 100) / 100,
+    remainingTargetProfit: Math.round(state.remainingTargetProfit * 100) / 100,
+    originPayoutMultiplier: Math.round(state.originPayoutMultiplier * 1000) / 1000,
     unrecoveredAmount: Math.round(state.unrecoveredAmount * 100) / 100,
     totalUnrecovered: Math.round(state.unrecoveredAmount * 100) / 100,
     totalStreakLosses: state.streakLossCount,

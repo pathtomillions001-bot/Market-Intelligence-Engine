@@ -59,6 +59,7 @@ import { makeFinalDecision } from "./agents/master-decision";
 // ── Utilities ─────────────────────────────────────────────────────────────────
 import { analyzeDigits, getContractProposal } from "./deriv";
 import { logger } from "./logger";
+import { MATCH_PAYOUT, DIFF_PAYOUT, RISE_FALL_PAYOUT } from "./payouts";
 
 // ── Re-exports for backward compatibility ─────────────────────────────────────
 export type { CoordinatorOutput } from "./agents/types";
@@ -161,7 +162,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
       ? bestBarrier.contractType
       : preferredDigitProduct)
     : wantMatchDiff
-      // Normal mode → DIGITDIFF (coldest digit, ~96% win); recovery → DIGITMATCH (9× payout).
+      // Normal mode → DIGITDIFF (coldest digit, ~96% win); recovery → DIGITMATCH (8.93× payout).
       // Use whichever type is actually in the preferred list for this family scan.
       ? (preferred.includes("DIGITDIFF") ? "DIGITDIFF" : "DIGITMATCH")
       : wantDirection
@@ -197,9 +198,9 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
 
   // Extend barrier options with DIGITMATCH/DIGITDIFF when preferred.
   // The matchRecommended/diffRecommended flags required positive EV which is extremely
-  // rare for these contracts (DIFF needs >96% win rate; MATCH needs >11% frequency).
+  // rare for these contracts (DIFF needs >91.7% win rate; MATCH needs >11% frequency).
   // Remove those gates — always include the options and let the EV calculator + confidence
-  // fusion decide. DIGITMATCH is added in recovery mode (9× payout covers losses cheaply);
+  // fusion decide. DIGITMATCH is added in recovery mode (8.93× payout covers losses cheaply);
   // DIGITDIFF is added in normal mode (coldest digit gives ~96% win rate, near-certain win).
   //
   // IMPORTANT: only seed the list with OVER/UNDER barrier options when the user actually
@@ -221,7 +222,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
         contractType: "DIGITMATCH" as import("./agents/types").ProductType,
         barrier: md.matchDigit,
         winProbability: md.matchWinProbability,
-        payout: 9.00,
+        payout: livePayouts?.["DIGITMATCH"] ?? MATCH_PAYOUT,
         expectedValue: md.matchExpectedValue,
         edge: md.matchEdge,
         tier: 2,
@@ -233,11 +234,11 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
         contractType: "DIGITDIFF" as import("./agents/types").ProductType,
         barrier: md.diffDigit,
         winProbability: md.diffWinProbability,
-        payout: 1.04,
+        payout: livePayouts?.["DIGITDIFF"] ?? DIFF_PAYOUT,
         expectedValue: md.diffExpectedValue,
         edge: md.diffEdge,
         tier: 1,
-        // DIGITDIFF EV is typically slightly negative (needs >96% win to be +EV) but the
+        // DIGITDIFF EV is typically slightly negative (needs >91.7% win to be +EV) but the
         // near-certain win rate provides a different kind of edge. Boost the adjustedEvScore
         // so it competes fairly against other options in the EV tournament.
         adjustedEvScore: md.diffWinProbability > 0.9 ? md.diffExpectedValue + 0.08 : md.diffExpectedValue,
@@ -271,7 +272,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
     Promise.resolve(runRiskIntelligenceAgent(
       ctx,
       bestEV?.winProbability ?? 0.5,
-      bestEV?.payoutMultiplier ?? 1.91,
+      bestEV?.payoutMultiplier ?? RISE_FALL_PAYOUT,
       currentDrawdown,
     )),
     Promise.resolve(runExecutionTimingAgent(ctx, features, regime, effectiveContractType)),
@@ -308,6 +309,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
     preferredTypes:           preferred as any,
     contractType:             (effectiveContractType as any) ?? null,
     barrier:                  effectiveBarrier ?? null,
+    regime,
   };
 
   const [patternAgent, fusionAgentPrelim] = await Promise.all([

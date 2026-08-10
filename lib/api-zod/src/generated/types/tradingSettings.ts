@@ -30,9 +30,9 @@ export interface TradingSettings {
   loopIntervalSec: number;
   /** Enable conservative stake recovery after losses */
   recoveryMode: boolean;
-  /** Stake multiplier after a loss (e.g. 1.2 = 20% increase) */
+  /** User-controlled multiplier used only in Manual recovery mode */
   recoveryMultiplier: number;
-  /** Max consecutive recovery multiplications before reset */
+  /** Maximum loss step at which a manual multiplier keeps compounding */
   maxRecoverySteps: number;
   /** Scan all available markets in parallel */
   scanAllMarkets: boolean;
@@ -55,4 +55,9 @@ export interface TradingSettings {
   recoveryUnderDigit?: number;
   /** Recovery method: split (gradual across wins) or instant (full recovery in one trade) */
   recoveryMethod?: string;
+  /** Compute recovery stake from live payout, debt, and original target profit */
+  recoveryAutoMode?: boolean;
+  allowedMarkets?: string[];
+  riskAmountType?: "fixed" | "percentage";
+  riskAmountValue?: number;
 }

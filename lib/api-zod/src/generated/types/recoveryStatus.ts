@@ -12,8 +12,14 @@ export interface RecoveryStatus {
   active?: boolean;
   families?: RecoveryFamilyState[];
   activeFamilies?: string[];
-  /** Sum of unrecovered amounts (USD) across all families currently in recovery */
+  /** Accumulated loss amount still to be recovered (USD) */
   totalUnrecovered?: number;
+  /** Original expected net profit of the normal trade whose loss started recovery */
+  targetProfit?: number;
+  /** Portion of the original target profit still outstanding after partial recovery wins */
+  remainingTargetProfit?: number;
+  /** Total-return payout multiplier of the normal trade whose loss started recovery */
+  originPayoutMultiplier?: number;
   /** The highest recovery step among all families currently in recovery */
   highestStep?: number;
 }

@@ -18,7 +18,8 @@ export const settingsTable = pgTable("settings", {
   autonomousEnabled: boolean("autonomous_enabled").notNull().default(false),
   loopIntervalSec: integer("loop_interval_sec").notNull().default(1),
   recoveryMode: boolean("recovery_mode").notNull().default(true),
-  recoveryMultiplier: numeric("recovery_multiplier", { precision: 4, scale: 2 }).notNull().default("1.62"),
+  // Wide precision: Manual recovery mode must not impose a hidden multiplier ceiling.
+  recoveryMultiplier: numeric("recovery_multiplier", { precision: 20, scale: 4 }).notNull().default("1.62"),
   maxRecoverySteps: integer("max_recovery_steps").notNull().default(3),
   scanAllMarkets: boolean("scan_all_markets").notNull().default(true),
   tradeDurationSec: integer("trade_duration_sec").notNull().default(5),

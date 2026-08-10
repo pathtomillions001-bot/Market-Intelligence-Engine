@@ -22,14 +22,20 @@ async function bootstrapDb() {
       `SELECT
         (SELECT COUNT(*) FROM information_schema.tables   WHERE table_schema = 'public' AND table_name = 'settings')           AS settings_exists,
         (SELECT COUNT(*) FROM information_schema.tables   WHERE table_schema = 'public' AND table_name = 'adaptive_thresholds') AS adaptive_exists,
-        (SELECT COUNT(*) FROM information_schema.columns  WHERE table_schema = 'public' AND table_name = 'accounts' AND column_name = 'bearer_token') AS bearer_col_exists`
+        (SELECT COUNT(*) FROM information_schema.columns  WHERE table_schema = 'public' AND table_name = 'accounts' AND column_name = 'bearer_token') AS bearer_col_exists,
+        (SELECT numeric_precision FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'settings' AND column_name = 'recovery_multiplier') AS recovery_multiplier_precision,
+        (SELECT numeric_scale FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'settings' AND column_name = 'recovery_multiplier') AS recovery_multiplier_scale`
     );
     const settingsExists   = Number(rows[0].settings_exists) > 0;
     const adaptiveExists   = Number(rows[0].adaptive_exists) > 0;
     const bearerColExists  = Number(rows[0].bearer_col_exists) > 0;
+    const recoveryMultiplierWideEnough =
+      Number(rows[0].recovery_multiplier_precision) >= 20 &&
+      Number(rows[0].recovery_multiplier_scale) >= 4;
 
-    // Push whenever any required table or column is missing
-    if (settingsExists && adaptiveExists && bearerColExists) return;
+    // Push whenever a required table/column is missing or the legacy NUMERIC(4,2)
+    // multiplier column would still reject an unrestricted Manual value.
+    if (settingsExists && adaptiveExists && bearerColExists && recoveryMultiplierWideEnough) return;
 
     logger.warn("DB schema out of date — running schema push");
     const root = resolve(import.meta.dirname, "../../../../");

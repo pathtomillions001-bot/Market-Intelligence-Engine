@@ -33,4 +33,9 @@ export interface TradingSettingsInput {
   normalUnderDigit?: number;
   recoveryOverDigit?: number;
   recoveryUnderDigit?: number;
+  recoveryMethod?: "split" | "instant";
+  recoveryAutoMode?: boolean;
+  allowedMarkets?: string[];
+  riskAmountType?: "fixed" | "percentage";
+  riskAmountValue?: number;
 }
