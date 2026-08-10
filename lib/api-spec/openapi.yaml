@@ -94,6 +94,46 @@ paths:
               schema:
                 $ref: "#/components/schemas/SuccessResponse"
 
+  /auth/accounts:
+    get:
+      operationId: getAccounts
+      tags: [auth]
+      summary: List all linked Deriv accounts
+      responses:
+        "200":
+          description: All linked accounts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DerivAccount"
+
+  /auth/switch-account:
+    post:
+      operationId: switchAccount
+      tags: [auth]
+      summary: Switch the active Deriv account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SwitchAccountInput"
+      responses:
+        "200":
+          description: Activated account info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DerivAccount"
+        "404":
+          description: Account not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
   # Markets
   /markets:
     get:
@@ -490,6 +530,14 @@ components:
             (e.g. pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx). Create one at
             app.deriv.com/account/api-token with Read and Trade permissions.
 
+    SwitchAccountInput:
+      type: object
+      required: [loginId]
+      properties:
+        loginId:
+          type: string
+          description: The Deriv login ID (account_id) to activate.
+
     DerivAccount:
       type: object
       required: [id, loginId, currency, balance, isVirtual]
@@ -504,6 +552,16 @@ components:
           type: number
         isVirtual:
           type: boolean
+        isActive:
+          type: boolean
+          description: True when this is the currently selected account for live trading
+        verificationPending:
+          type: boolean
+          description: >
+            True when the token was saved locally but could not yet be verified
+            against Deriv (e.g. Deriv's API is unreachable). The account is
+            stored and the app runs in offline/paper mode until verification
+            succeeds; the account upgrades automatically once Deriv is reachable.
         email:
           type: ["string", "null"]
         fullName:

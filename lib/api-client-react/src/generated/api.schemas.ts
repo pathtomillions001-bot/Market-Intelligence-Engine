@@ -20,8 +20,17 @@ export interface SuccessResponse {
 }
 
 export interface DerivTokenInput {
-  /** @minLength 1 */
+  /**
+     * Deriv Personal Access Token (PAT). New tokens start with "pat_" (e.g. pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx). Create one at app.deriv.com/account/api-token with Read and Trade permissions.
+
+     * @minLength 1
+     */
   token: string;
+}
+
+export interface SwitchAccountInput {
+  /** The Deriv login ID (account_id) to activate. */
+  loginId: string;
 }
 
 export interface DerivAccount {
@@ -32,6 +41,9 @@ export interface DerivAccount {
   isVirtual: boolean;
   /** True when this is the currently selected account for live trading */
   isActive?: boolean;
+  /** True when the token was saved locally but could not yet be verified against Deriv (e.g. Deriv's API is unreachable). The account is stored and the app runs in offline/paper mode until verification succeeds; the account upgrades automatically once Deriv is reachable.
+   */
+  verificationPending?: boolean;
   /** @nullable */
   email?: string | null;
   /** @nullable */
@@ -39,10 +51,6 @@ export interface DerivAccount {
   /** @nullable */
   country?: string | null;
   connectedAt?: string;
-}
-
-export interface SwitchAccountInput {
-  loginId: string;
 }
 
 export type RankedMarketCategory = typeof RankedMarketCategory[keyof typeof RankedMarketCategory];
@@ -495,8 +503,6 @@ export interface TradingSettings {
   recoveryOverDigit?: number;
   /** Digit barrier used for DIGITUNDER trades while in recovery mode */
   recoveryUnderDigit?: number;
-  /** Recovery method: split (gradual across wins) or instant (full recovery in one trade) */
-  recoveryMethod?: string;
 }
 
 export type TradingSettingsInputRiskProfile = typeof TradingSettingsInputRiskProfile[keyof typeof TradingSettingsInputRiskProfile];
@@ -534,7 +540,6 @@ export interface TradingSettingsInput {
   normalUnderDigit?: number;
   recoveryOverDigit?: number;
   recoveryUnderDigit?: number;
-  recoveryMethod?: string;
 }
 
 export type GetMarketsParams = {

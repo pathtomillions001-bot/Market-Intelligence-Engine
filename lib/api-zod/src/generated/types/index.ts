@@ -45,6 +45,7 @@ export * from './recoveryFamilyStateFamily';
 export * from './recoveryStatus';
 export * from './scanStatus';
 export * from './successResponse';
+export * from './switchAccountInput';
 export * from './trade';
 export * from './tradeDirection';
 export * from './tradeInput';

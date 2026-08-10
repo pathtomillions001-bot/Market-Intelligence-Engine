@@ -187,8 +187,17 @@ export default function Connect() {
     e.preventDefault();
     if (!token) return;
     connect.mutate({ data: { token } }, {
-      onSuccess: () => {
-        toast.success("Account connected — live trading on Deriv");
+      onSuccess: (connected) => {
+        if ((connected as any).verificationPending) {
+          toast.success("Token saved — awaiting Deriv verification (offline mode)");
+          toast.info(
+            (connected as any).warning ??
+              "Live prices/trading will activate automatically once Deriv is reachable.",
+            { duration: 6000 },
+          );
+        } else {
+          toast.success("Account connected — live trading on Deriv");
+        }
         setToken("");
         queryClient.invalidateQueries();
         setTimeout(() => setLocation("/"), 1200);
@@ -257,30 +266,68 @@ export default function Connect() {
   };
 
   if (account) {
+    const pending = !!(account as any).verificationPending;
     return (
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 md:p-8 max-w-2xl mx-auto space-y-6">
         <div>
           <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Account Connected</h1>
-          <p className="text-muted-foreground mt-1 text-sm">Your Deriv account is linked and trading is live.</p>
+          <p className="text-muted-foreground mt-1 text-sm">
+            {pending
+              ? "Your token was saved. Verification with Deriv is pending."
+              : "Your Deriv account is linked and trading is live."}
+          </p>
         </div>
 
+        {/* ── Pending verification notice ── */}
+        {pending && (
+          <Card className="bg-card border-amber-500/40">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm text-amber-400">
+                <ShieldCheck className="w-4 h-4" /> Verification pending
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="text-sm text-muted-foreground space-y-2">
+              <p>
+                Your token is saved locally, but Deriv's API could not be reached to
+                verify it. The engine is running in offline / paper mode and will
+                automatically switch to live trading once Deriv is reachable.
+              </p>
+              <p className="text-xs">
+                Re-connect with the same token, or simply wait — the app retries verification
+                automatically every minute.
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
         {/* ── Active account card ── */}
-        <Card className="bg-card border-green-500/30">
+        <Card className={`bg-card ${pending ? "border-amber-500/30" : "border-green-500/30"}`}>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-green-500">
+            <CardTitle className={`flex items-center gap-2 ${pending ? "text-amber-400" : "text-green-500"}`}>
               <CheckCircle className="w-5 h-5" /> Active Account
             </CardTitle>
-            <CardDescription>The AI engine is executing trades on this account.</CardDescription>
+            <CardDescription>
+              {pending
+                ? "This token is saved. It will upgrade to your Deriv accounts once verified."
+                : "The AI engine is executing trades on this account."}
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid grid-cols-2 gap-3 bg-secondary/30 p-4 rounded-lg">
               <div>
-                <Label className="text-muted-foreground text-xs uppercase">Account ID</Label>
+                <Label className="text-muted-foreground text-xs uppercase">{pending ? "Token" : "Account ID"}</Label>
                 <div className="font-mono text-base md:text-lg mt-1 flex items-center gap-2">
-                  {account.loginId}
-                  <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${account.isVirtual ? "bg-amber-500/20 text-amber-400" : "bg-green-500/20 text-green-400"}`}>
-                    {account.isVirtual ? "Demo" : "Real"}
-                  </span>
+                  {pending ? "Unverified token (saved)" : account.loginId}
+                  {!pending && (
+                    <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${account.isVirtual ? "bg-amber-500/20 text-amber-400" : "bg-green-500/20 text-green-400"}`}>
+                      {account.isVirtual ? "Demo" : "Real"}
+                    </span>
+                  )}
+                  {pending && (
+                    <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400">
+                      Unverified
+                    </span>
+                  )}
                 </div>
               </div>
               <div>
