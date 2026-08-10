@@ -175,6 +175,54 @@ export function calcSuggestedStake(
   return Math.max(0.35, parseFloat(result.toFixed(2)));
 }
 
+// ── Suggested-stake breakdown (which constraint binds) ───────────────────────
+// Exposes the three independent constraints that feed calcSuggestedStake so the
+// UI can tell the user WHY a stake was chosen — the binding constraint drives
+// the recommendation.
+export interface StakeBreakdown {
+  slCap: number;        // max stake the stop-loss budget allows
+  tpDriven: number;     // stake needed to reach TP in a realistic session
+  balanceCap: number;   // 1 % of balance ceiling
+  suggested: number;
+  binding: "stop-loss" | "take-profit" | "balance-cap" | "minimum";
+}
+
+export function suggestedStakeBreakdown(
+  balance: number,
+  targetSLFraction: number,
+  recoveryMethod: "instant" | "split",
+  recoveryPayout: number,
+  recoveryMultiplier: number,
+  maxLosses: number,
+  primaryPayout: number,
+  primaryWinProb: number,
+  targetTPFraction: number,
+): StakeBreakdown {
+  if (balance <= 0) {
+    return { slCap: 0.35, tpDriven: 0.35, balanceCap: 0.35, suggested: 0.35, binding: "minimum" };
+  }
+  const slCostTarget = (targetSLFraction * balance * 0.6) / 1.1;
+  const slCap = maxStakeForLadderCost(slCostTarget, recoveryMethod, recoveryPayout, recoveryMultiplier, maxLosses);
+  const sessionTrades = Math.max(30, maxLosses * 4);
+  const expectedWins = sessionTrades * primaryWinProb;
+  const profitPerUnit = Math.max(primaryPayout - 1, 0.001);
+  const tpDriven = (balance * targetTPFraction) / (expectedWins * profitPerUnit);
+  const balanceCap = balance * 0.01;
+
+  const candidates: Array<[number, StakeBreakdown["binding"]]> = [
+    [slCap, "stop-loss"],
+    [tpDriven, "take-profit"],
+    [balanceCap, "balance-cap"],
+  ];
+  candidates.sort((a, b) => a[0] - b[0]);
+  const raw = candidates[0][0];
+  const suggested = Math.max(0.35, parseFloat(raw.toFixed(2)));
+  const binding: StakeBreakdown["binding"] =
+    suggested <= 0.35 + 1e-9 ? "minimum" : candidates[0][1];
+
+  return { slCap, tpDriven, balanceCap, suggested, binding };
+}
+
 // ── Main Calculation ──────────────────────────────────────────────────────────
 export interface RiskResult {
   ladder: number[];
