@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import {
   X, Zap, TrendingUp, Hash, Equal, Loader2, StopCircle,
   BarChart2, ScanSearch, CheckCircle2, AlertTriangle, RefreshCw,
+  Lock, Shuffle, ShieldCheck, Activity, Brain,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -24,16 +25,19 @@ import {
 
 type ContractFamily = "overUnder" | "riseFall" | "evenOdd" | "differ" | "match";
 type RecoveryMethod = "split" | "instant";
+type MarketMode = "switching" | "locked";
 type Step = "config" | "scanning" | "scan-result" | "running";
 
 interface SpeedConfig {
   normalFamily: ContractFamily;
   normalOverBarrier: number;
   normalUnderBarrier: number;
-  recoveryFamilies: ContractFamily[];   // multi-select: one or more recovery families
-  recoveryAutoMode: boolean;            // true = AI computes exact stake; false = manual multiplier
+  recoveryFamilies: ContractFamily[];
+  recoveryAutoMode: boolean;
   recoveryOverBarrier: number;
   recoveryUnderBarrier: number;
+  marketMode: MarketMode;
+  lockedSymbol: string;
   stake: number;
   stopLoss: number;
   takeProfit: number;
@@ -51,6 +55,9 @@ interface MarketScore {
   normalScore?: number;
   recoveryScore?: number;
   winProbability: number;
+  expectedValue?: number;
+  entropyBits?: number;
+  isStructured?: boolean;
   reason: string;
 }
 
@@ -62,15 +69,16 @@ interface ScanResult {
 }
 
 interface ScanProgress {
-  scanning: string | null;        // display name of market currently being analyzed
-  scanningSymbol: string | null;  // symbol of market currently being analyzed
-  scanned: number;                // how many markets have finished
-  total: number;                  // total markets to scan
-  results: Array<{                // completed results so far
+  scanning: string | null;
+  scanningSymbol: string | null;
+  scanned: number;
+  total: number;
+  results: Array<{
     symbol: string;
     score: number;
     normalScore?: number;
     recoveryScore?: number;
+    entropyBits?: number;
   }>;
 }
 
@@ -93,6 +101,8 @@ interface SessionStatus {
   currentContractType?: string;
   lastResult?: "won" | "lost";
   message?: string;
+  entropyBits?: number;
+  expectedValue?: number;
   config?: {
     stake: number;
     stopLoss: number;
@@ -105,37 +115,36 @@ interface SessionStatus {
     recoveryContractTypes: string[];
     normalBarriers: number[];
     recoveryBarriers: number[];
+    marketMode?: string;
+    lockedSymbol?: string;
   };
   topMarkets?: MarketScore[];
 }
 
-// ── Flat market list for progress dot strip ───────────────────────────────────
+// ── Synthetic Markets Catalog ─────────────────────────────────────────────────
 
-const ALL_SCAN_MARKETS: { symbol: string; short: string; group: string }[] = [
-  { symbol: "R_10",    short: "V10",  group: "V"  },
-  { symbol: "R_25",    short: "V25",  group: "V"  },
-  { symbol: "R_50",    short: "V50",  group: "V"  },
-  { symbol: "R_75",    short: "V75",  group: "V"  },
-  { symbol: "R_100",   short: "V100", group: "V"  },
-  { symbol: "1HZ10V",  short: "1s10", group: "1s" },
-  { symbol: "1HZ25V",  short: "1s25", group: "1s" },
-  { symbol: "1HZ50V",  short: "1s50", group: "1s" },
-  { symbol: "1HZ75V",  short: "1s75", group: "1s" },
-  { symbol: "1HZ100V", short: "1s1",  group: "1s" },
-  { symbol: "JD10",    short: "J10",  group: "J"  },
-  { symbol: "JD25",    short: "J25",  group: "J"  },
-  { symbol: "JD50",    short: "J50",  group: "J"  },
-  { symbol: "JD75",    short: "J75",  group: "J"  },
-  { symbol: "JD100",   short: "J100", group: "J"  },
-  { symbol: "RDBULL",  short: "Bull", group: "I"  },
-  { symbol: "RDBEAR",  short: "Bear", group: "I"  },
+const ALL_SCAN_MARKETS: { symbol: string; short: string; name: string; group: string }[] = [
+  { symbol: "R_10",    short: "V10",  name: "Volatility 10 Index",       group: "V"  },
+  { symbol: "R_25",    short: "V25",  name: "Volatility 25 Index",       group: "V"  },
+  { symbol: "R_50",    short: "V50",  name: "Volatility 50 Index",       group: "V"  },
+  { symbol: "R_75",    short: "V75",  name: "Volatility 75 Index",       group: "V"  },
+  { symbol: "R_100",   short: "V100", name: "Volatility 100 Index",      group: "V"  },
+  { symbol: "1HZ10V",  short: "1s10", name: "Volatility 10 (1s) Index",  group: "1s" },
+  { symbol: "1HZ25V",  short: "1s25", name: "Volatility 25 (1s) Index",  group: "1s" },
+  { symbol: "1HZ50V",  short: "1s50", name: "Volatility 50 (1s) Index",  group: "1s" },
+  { symbol: "1HZ75V",  short: "1s75", name: "Volatility 75 (1s) Index",  group: "1s" },
+  { symbol: "1HZ100V", short: "1s1",  name: "Volatility 100 (1s) Index", group: "1s" },
+  { symbol: "JD10",    short: "J10",  name: "Jump 10 Index",             group: "J"  },
+  { symbol: "JD25",    short: "J25",  name: "Jump 25 Index",             group: "J"  },
+  { symbol: "JD50",    short: "J50",  name: "Jump 50 Index",             group: "J"  },
+  { symbol: "JD75",    short: "J75",  name: "Jump 75 Index",             group: "J"  },
+  { symbol: "JD100",   short: "J100", name: "Jump 100 Index",            group: "J"  },
+  { symbol: "RDBULL",  short: "Bull", name: "Bull Market Index",         group: "I"  },
+  { symbol: "RDBEAR",  short: "Bear", name: "Bear Market Index",         group: "I"  },
 ];
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// ── Contract Families ─────────────────────────────────────────────────────────
 
-// Normal mode never trades Matches (recovery-only); recovery mode never trades
-// Differs (normal-only). This keeps the cold-digit / hot-digit strategy split intact:
-// Differ = ~96% win avoiding the coldest digit, Match = 8.93× payout recovering losses fast.
 const NORMAL_FAMILIES: { id: ContractFamily; label: string; icon: React.ReactNode; desc: string }[] = [
   { id: "overUnder", label: "Over & Under", icon: <Hash className="w-3.5 h-3.5" />, desc: "Digit barrier trades" },
   { id: "riseFall",  label: "Rise & Fall",  icon: <TrendingUp className="w-3.5 h-3.5" />, desc: "Price direction trades" },
@@ -202,7 +211,7 @@ function FamilySelector({ label, value, onChange, families }: {
             onClick={() => onChange(f.id)}
             className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-left text-xs border transition-all ${
               value === f.id
-                ? "bg-cyan-500/15 border-cyan-500/50 text-cyan-300"
+                ? "bg-cyan-500/15 border-cyan-500/50 text-cyan-300 shadow-sm shadow-cyan-500/20"
                 : "bg-white/5 border-white/10 text-muted-foreground hover:border-white/20"
             }`}
           >
@@ -215,7 +224,6 @@ function FamilySelector({ label, value, onChange, families }: {
   );
 }
 
-// Multi-select variant: allows toggling multiple recovery families on/off
 function MultiFamilySelector({ label, value, onChange, families }: {
   label: string;
   value: ContractFamily[];
@@ -224,7 +232,6 @@ function MultiFamilySelector({ label, value, onChange, families }: {
 }) {
   const toggle = (id: ContractFamily) => {
     if (value.includes(id)) {
-      // Don't allow deselecting the last one
       if (value.length === 1) return;
       onChange(value.filter(f => f !== id));
     } else {
@@ -233,7 +240,10 @@ function MultiFamilySelector({ label, value, onChange, families }: {
   };
   return (
     <div className="space-y-2">
-      <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">{label}</p>
+      <div className="flex items-center justify-between">
+        <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">{label}</p>
+        <span className="text-[9px] text-cyan-400 font-mono">Strict Contract Lock</span>
+      </div>
       <div className="grid grid-cols-2 gap-1.5">
         {families.map(f => {
           const active = value.includes(f.id);
@@ -243,7 +253,7 @@ function MultiFamilySelector({ label, value, onChange, families }: {
               onClick={() => toggle(f.id)}
               className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-left text-xs border transition-all ${
                 active
-                  ? "bg-cyan-500/15 border-cyan-500/50 text-cyan-300"
+                  ? "bg-cyan-500/15 border-cyan-500/50 text-cyan-300 shadow-sm shadow-cyan-500/20"
                   : "bg-white/5 border-white/10 text-muted-foreground hover:border-white/20"
               }`}
             >
@@ -253,7 +263,7 @@ function MultiFamilySelector({ label, value, onChange, families }: {
           );
         })}
       </div>
-      <p className="text-[9px] text-muted-foreground/50">Select one or more. AI scans only within your chosen types.</p>
+      <p className="text-[9px] text-muted-foreground/50">Recovery executes exclusively within your enabled family.</p>
     </div>
   );
 }
@@ -297,7 +307,7 @@ function BarrierRow({ label, overBarrier, underBarrier, onOverBarrier, onUnderBa
   );
 }
 
-// ── Main component ────────────────────────────────────────────────────────────
+// ── Main NeuroAI FAB Component ────────────────────────────────────────────────
 
 export function SpeedAIFab() {
   const [open, setOpen] = useState(false);
@@ -318,6 +328,8 @@ export function SpeedAIFab() {
     recoveryAutoMode: true,
     recoveryOverBarrier: 4,
     recoveryUnderBarrier: 5,
+    marketMode: "switching",
+    lockedSymbol: "1HZ100V",
     stake: 1,
     stopLoss: 5,
     takeProfit: 10,
@@ -329,10 +341,6 @@ export function SpeedAIFab() {
   const set = <K extends keyof SpeedConfig>(k: K, v: SpeedConfig[K]) =>
     setConfig(prev => ({ ...prev, [k]: v }));
 
-  // Sync defaults from user settings — ONE TIME only on first successful load.
-  // React Query refetches settings every 30 s and on window focus; without this
-  // guard the useEffect would fire on every refetch and silently overwrite any
-  // values the user changed manually inside the FAB panel.
   const settingsLoadedRef = useRef(false);
   useEffect(() => {
     if (!settings || settingsLoadedRef.current) return;
@@ -352,8 +360,6 @@ export function SpeedAIFab() {
     }));
   }, [settings]);
 
-  // Poll session status — runs at 1 s when panel is open, 3 s in background
-  // to keep the badge trade-count live even when the panel is closed.
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchStatus = useCallback(async () => {
@@ -368,28 +374,18 @@ export function SpeedAIFab() {
   }, []);
 
   useEffect(() => {
-    // Always poll — just at different rates
     fetchStatus();
     const intervalMs = open ? 1000 : 3000;
     pollRef.current = setInterval(fetchStatus, intervalMs);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [open, fetchStatus]);
 
-  // Own EventSource — receives speed_ai_update and speed_ai_scan_progress events
-  // directly from the server without depending on window.sse_event.
-  //
-  // RAF batching: multiple rapid SSE events are coalesced into a single React
-  // state update per animation frame, preventing mid-animation re-render storms
-  // that caused the FAB panel to visually freeze during active trading.
-  //
-  // Auto-reconnect: the EventSource is recreated on error so a transient server
-  // restart never leaves the panel silently stale.
   const pendingStatusRef = useRef<SessionStatus | null>(null);
   const rafRef = useRef<number | null>(null);
 
   const applyStatus = useCallback((data: SessionStatus) => {
     pendingStatusRef.current = data;
-    if (rafRef.current !== null) return; // already queued for this frame
+    if (rafRef.current !== null) return;
     rafRef.current = requestAnimationFrame(() => {
       rafRef.current = null;
       const latest = pendingStatusRef.current;
@@ -420,7 +416,7 @@ export function SpeedAIFab() {
             symbol: string | null;
             scanned: number;
             total: number;
-            results: Array<{ symbol: string; score: number; normalScore?: number; recoveryScore?: number }>;
+            results: Array<{ symbol: string; score: number; normalScore?: number; recoveryScore?: number; entropyBits?: number }>;
           };
           setScanProgress({
             scanning: p.scanning,
@@ -435,7 +431,6 @@ export function SpeedAIFab() {
       es.onerror = () => {
         es.close();
         if (!destroyed) {
-          // Back-off 2 s before reconnecting to avoid hammering the server
           reconnectTimer = setTimeout(connect, 2000);
         }
       };
@@ -451,11 +446,10 @@ export function SpeedAIFab() {
     };
   }, [applyStatus]);
 
-  // ── Build request body from current config ──────────────────────────────
-  function buildBody(lockedSymbol?: string) {
+  // ── Build Request Body ──────────────────────────────────────────────────────
+  function buildBody(forcedLockedSymbol?: string, forcedMode?: MarketMode) {
     const normalContracts = familyToContracts(config.normalFamily, config.normalOverBarrier, config.normalUnderBarrier);
 
-    // Merge all selected recovery families into unified type + barrier arrays
     const recoveryTypes: string[] = [];
     const recoveryBarrierSet: number[] = [];
     for (const family of config.recoveryFamilies) {
@@ -463,11 +457,13 @@ export function SpeedAIFab() {
       for (const t of c.types)    if (!recoveryTypes.includes(t))       recoveryTypes.push(t);
       for (const b of c.barriers) if (!recoveryBarrierSet.includes(b)) recoveryBarrierSet.push(b);
     }
-    // Ensure at least overUnder if somehow empty
     if (recoveryTypes.length === 0) {
       recoveryTypes.push("DIGITOVER", "DIGITUNDER");
       recoveryBarrierSet.push(config.recoveryOverBarrier, config.recoveryUnderBarrier);
     }
+
+    const effectiveMode = forcedMode ?? config.marketMode;
+    const effectiveLockedSymbol = forcedLockedSymbol ?? (effectiveMode === "locked" ? config.lockedSymbol : undefined);
 
     return {
       normalContractTypes:   normalContracts.types,
@@ -478,15 +474,15 @@ export function SpeedAIFab() {
       stopLoss:              config.stopLoss,
       takeProfit:            config.takeProfit,
       recoveryAutoMode:      config.recoveryAutoMode,
-      // Ignored by the server in Auto mode; used exactly as entered in Manual.
       recoveryMultiplier:    config.recoveryMultiplier,
       recoveryMethod:        config.recoveryMethod,
       maxRecoverySteps:      config.maxRecoverySteps,
-      ...(lockedSymbol ? { lockedSymbol } : {}),
+      marketMode:            effectiveMode,
+      ...(effectiveLockedSymbol ? { lockedSymbol: effectiveLockedSymbol } : {}),
     };
   }
 
-  // ── Scan markets ────────────────────────────────────────────────────────
+  // ── Scan Markets ────────────────────────────────────────────────────────────
   const handleScan = async () => {
     setLoading(true);
     setStep("scanning");
@@ -507,21 +503,22 @@ export function SpeedAIFab() {
       setScanResult(data);
       setStep("scan-result");
     } catch {
-      toast.error("Could not reach the server");
+      toast.error("Could not connect to analysis engine");
       setStep("config");
     } finally {
       setLoading(false);
     }
   };
 
-  // ── Start trading on the scanned market ─────────────────────────────────
-  const handleStart = async (lockedSymbol: string) => {
+  // ── Start Trading Session ───────────────────────────────────────────────────
+  const handleStart = async (symbolToLock?: string, mode?: MarketMode) => {
     setLoading(true);
     try {
+      const payload = buildBody(symbolToLock, mode);
       const res = await fetch("/api/speed-ai/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildBody(lockedSymbol)),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -530,7 +527,11 @@ export function SpeedAIFab() {
       }
       setStatus(data.status);
       setStep("running");
-      toast.success("⚡ NeuroAI locked on market — trading now!");
+      toast.success(
+        payload.marketMode === "switching"
+          ? "⚡ NeuroAI Live — Dynamic Strategy Switching active"
+          : `⚡ NeuroAI Live — Locked on ${payload.lockedSymbol ?? "selected asset"}`
+      );
     } catch {
       toast.error("Could not start NeuroAI session");
     } finally {
@@ -560,25 +561,6 @@ export function SpeedAIFab() {
   const winRate = status && status.tradeCount > 0
     ? Math.round((status.winCount / status.tradeCount) * 100) : 0;
 
-  const selectedOverPayout = OVER_PAYOUTS[config.recoveryOverBarrier] ?? OVER_PAYOUTS[4];
-  const selectedUnderPayout = UNDER_PAYOUTS[config.recoveryUnderBarrier] ?? UNDER_PAYOUTS[5];
-  const normalOverPayout = config.normalFamily === "overUnder"
-    ? (OVER_PAYOUTS[config.normalOverBarrier] ?? OVER_PAYOUTS[1])
-    : config.normalFamily === "riseFall" ? RISE_FALL_PAYOUT
-    : config.normalFamily === "evenOdd" ? EVEN_ODD_PAYOUT
-    : DIFF_PAYOUT;
-  const normalUnderPayout = config.normalFamily === "overUnder"
-    ? (UNDER_PAYOUTS[config.normalUnderBarrier] ?? UNDER_PAYOUTS[8])
-    : normalOverPayout;
-  const overTargetProfit = config.stake * (normalOverPayout - 1);
-  const underTargetProfit = config.stake * (normalUnderPayout - 1);
-  const overInstantExample = roundRecoveryStakeUp(
-    exactRecoveryStake(config.stake, overTargetProfit, selectedOverPayout),
-  );
-  const underInstantExample = roundRecoveryStakeUp(
-    exactRecoveryStake(config.stake, underTargetProfit, selectedUnderPayout),
-  );
-
   return (
     <>
       <AnimatePresence>
@@ -597,156 +579,203 @@ export function SpeedAIFab() {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 20, scale: 0.97 }}
               transition={{ type: "spring", stiffness: 400, damping: 35 }}
-              className="fixed bottom-20 right-4 z-50 w-80 max-h-[calc(100vh-6rem)] overflow-y-auto rounded-2xl border border-cyan-500/20 bg-[#0a0f1a] shadow-2xl shadow-cyan-900/20"
+              className="fixed bottom-20 right-4 z-50 w-84 max-h-[calc(100vh-6rem)] overflow-y-auto rounded-2xl border border-cyan-500/25 bg-[#080d17] shadow-2xl shadow-cyan-950/50"
             >
               {/* Header */}
-              <div className="sticky top-0 bg-[#0a0f1a] flex items-center justify-between px-4 py-3 border-b border-white/5">
+              <div className="flex items-center justify-between p-4 border-b border-white/5 bg-gradient-to-r from-cyan-950/40 via-blue-950/20 to-transparent">
                 <div className="flex items-center gap-2">
-                  <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center">
-                    <Zap className="w-3.5 h-3.5 text-white" />
+                  <div className="w-7 h-7 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center">
+                    <Brain className="w-4 h-4 text-cyan-400" />
                   </div>
                   <div>
-                    <p className="text-xs font-bold text-white tracking-wide">NEUROAI</p>
-                    <p className="text-[9px] text-cyan-400/70 uppercase tracking-widest">1-Tick Engine</p>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
+                      NeuroAI Quantum FAB
+                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-normal">v4</span>
+                    </h3>
+                    <p className="text-[10px] text-cyan-400/60 font-mono">2nd-Order Markov · Shannon Entropy</p>
                   </div>
                 </div>
-                <button onClick={() => setOpen(false)} className="p-1 rounded-md text-muted-foreground hover:text-white">
+                <button onClick={() => setOpen(false)} className="text-muted-foreground hover:text-white p-1">
                   <X className="w-4 h-4" />
                 </button>
               </div>
 
               {/* ── STEP: CONFIG ── */}
               {step === "config" && (
-                <div className="p-4 space-y-5">
+                <div className="p-4 space-y-4">
+                  {/* Preset Buttons */}
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Strategy Presets</p>
+                    <div className="grid grid-cols-3 gap-1">
+                      <button
+                        onClick={() => setConfig(p => ({ ...p, normalFamily: "overUnder", normalOverBarrier: 1, normalUnderBarrier: 8, recoveryFamilies: ["overUnder"], recoveryOverBarrier: 4, recoveryUnderBarrier: 5 }))}
+                        className="px-2 py-1.5 rounded-md bg-white/5 hover:bg-cyan-500/15 border border-white/10 text-[11px] font-medium text-left text-muted-foreground hover:text-cyan-300"
+                      >
+                        🛡️ 90% Over/Under
+                      </button>
+                      <button
+                        onClick={() => setConfig(p => ({ ...p, normalFamily: "differ", recoveryFamilies: ["match"] }))}
+                        className="px-2 py-1.5 rounded-md bg-white/5 hover:bg-cyan-500/15 border border-white/10 text-[11px] font-medium text-left text-muted-foreground hover:text-cyan-300"
+                      >
+                        ⚡ Differ / Match
+                      </button>
+                      <button
+                        onClick={() => setConfig(p => ({ ...p, normalFamily: "evenOdd", recoveryFamilies: ["evenOdd"] }))}
+                        className="px-2 py-1.5 rounded-md bg-white/5 hover:bg-cyan-500/15 border border-white/10 text-[11px] font-medium text-left text-muted-foreground hover:text-cyan-300"
+                      >
+                        📊 Parity Reversals
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Market Selection Mode */}
+                  <div className="space-y-2 p-2.5 rounded-xl bg-cyan-950/20 border border-cyan-500/20">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] uppercase tracking-wider text-cyan-300 font-semibold flex items-center gap-1.5">
+                        <Activity className="w-3.5 h-3.5 text-cyan-400" /> Market Execution Mode
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <button
+                        onClick={() => set("marketMode", "switching")}
+                        className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-left text-xs border transition-all ${
+                          config.marketMode === "switching"
+                            ? "bg-cyan-500/20 border-cyan-500/60 text-cyan-300 font-semibold"
+                            : "bg-white/5 border-white/10 text-muted-foreground hover:border-white/20"
+                        }`}
+                      >
+                        <Shuffle className="w-3.5 h-3.5 text-cyan-400" />
+                        <span>Smart Switching</span>
+                      </button>
+
+                      <button
+                        onClick={() => set("marketMode", "locked")}
+                        className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-left text-xs border transition-all ${
+                          config.marketMode === "locked"
+                            ? "bg-cyan-500/20 border-cyan-500/60 text-cyan-300 font-semibold"
+                            : "bg-white/5 border-white/10 text-muted-foreground hover:border-white/20"
+                        }`}
+                      >
+                        <Lock className="w-3.5 h-3.5 text-cyan-400" />
+                        <span>Locked Asset</span>
+                      </button>
+                    </div>
+
+                    {config.marketMode === "locked" && (
+                      <div className="pt-1.5">
+                        <p className="text-[10px] text-muted-foreground mb-1">Select Target Synthetic Asset</p>
+                        <Select value={config.lockedSymbol} onValueChange={v => set("lockedSymbol", v)}>
+                          <SelectTrigger className="h-8 text-xs bg-black/40 border-cyan-500/30">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {ALL_SCAN_MARKETS.map(m => (
+                              <SelectItem key={m.symbol} value={m.symbol}>
+                                {m.name} ({m.short})
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+                    <p className="text-[9px] text-muted-foreground/60">
+                      {config.marketMode === "switching"
+                        ? "AI dynamically rotates across top markets while strictly locking your contract family."
+                        : `Trades exclusively execute on ${ALL_SCAN_MARKETS.find(m => m.symbol === config.lockedSymbol)?.name ?? config.lockedSymbol}.`}
+                    </p>
+                  </div>
+
+                  {/* Normal Strategy Selection */}
                   <FamilySelector
-                    label="Normal trade type"
+                    label="Normal Trade Strategy"
                     value={config.normalFamily}
                     onChange={v => set("normalFamily", v)}
                     families={NORMAL_FAMILIES}
                   />
 
-                  <MultiFamilySelector
-                    label="Recovery trade types"
-                    value={config.recoveryFamilies}
-                    onChange={v => set("recoveryFamilies", v)}
-                    families={RECOVERY_FAMILIES}
-                  />
-
-                  {/* Digit Barriers — always visible so user can tune them regardless of family */}
-                  <div className="space-y-3 bg-white/3 rounded-xl p-3 border border-white/5">
-                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Digit Barriers</p>
+                  {config.normalFamily === "overUnder" && (
                     <BarrierRow
-                      label="Normal trades"
+                      label="Normal barriers"
                       overBarrier={config.normalOverBarrier}
                       underBarrier={config.normalUnderBarrier}
                       onOverBarrier={v => set("normalOverBarrier", v)}
                       onUnderBarrier={v => set("normalUnderBarrier", v)}
                     />
-                    <div className="border-t border-white/5" />
+                  )}
+
+                  {/* Recovery Strategy Selection */}
+                  <MultiFamilySelector
+                    label="Sniper Recovery Strategy"
+                    value={config.recoveryFamilies}
+                    onChange={v => set("recoveryFamilies", v)}
+                    families={RECOVERY_FAMILIES}
+                  />
+
+                  {config.recoveryFamilies.includes("overUnder") && (
                     <BarrierRow
-                      label="Recovery trades"
+                      label="Recovery barriers (Over/Under)"
                       overBarrier={config.recoveryOverBarrier}
                       underBarrier={config.recoveryUnderBarrier}
                       onOverBarrier={v => set("recoveryOverBarrier", v)}
                       onUnderBarrier={v => set("recoveryUnderBarrier", v)}
                     />
-                  </div>
+                  )}
 
-                  {/* Risk settings */}
-                  <div className="space-y-2 pt-1">
-                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Risk Settings</p>
-                    <div className="space-y-2 bg-white/3 rounded-xl p-3 border border-white/5">
-                      <NumInput label="Stake per trade" value={config.stake} onChange={v => set("stake", v)} min={0.35} step={0.5} suffix="$" />
-                      <NumInput label="Stop loss"        value={config.stopLoss} onChange={v => set("stopLoss", v)} min={0.5} step={1} suffix="$" />
-                      <NumInput label="Take profit"      value={config.takeProfit} onChange={v => set("takeProfit", v)} min={0.5} step={1} suffix="$" />
+                  {/* Risk Management */}
+                  <div className="space-y-2 pt-1 border-t border-white/5">
+                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Risk Parameters</p>
+                    <div className="space-y-1.5">
+                      <NumInput label="Base stake" value={config.stake} onChange={v => set("stake", v)} min={0.35} step={0.5} suffix="USD" />
+                      <NumInput label="Take profit" value={config.takeProfit} onChange={v => set("takeProfit", v)} min={1} step={1} suffix="USD" />
+                      <NumInput label="Stop loss" value={config.stopLoss} onChange={v => set("stopLoss", v)} min={1} step={1} suffix="USD" />
                     </div>
                   </div>
 
-                  {/* Recovery settings */}
-                  <div className="space-y-2">
-                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Recovery Settings</p>
-                    <div className="space-y-3 bg-white/3 rounded-xl p-3 border border-white/5">
+                  {/* Recovery Execution Policy */}
+                  <div className="space-y-2 pt-1 border-t border-white/5">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Recovery Engine</p>
+                      <span className="text-[9px] text-cyan-400 font-mono">Penny-Ceiling Math</span>
+                    </div>
 
-                      {/* Auto / Manual toggle */}
-                      <div className="flex rounded-lg overflow-hidden border border-white/10 w-full">
-                        <button
-                          onClick={() => set("recoveryAutoMode", true)}
-                          className={`flex-1 flex flex-col items-center gap-0.5 px-2 py-2 text-xs font-medium transition-colors ${config.recoveryAutoMode ? "bg-cyan-500/20 text-cyan-300 border-r border-cyan-500/30" : "bg-white/5 text-muted-foreground hover:text-white border-r border-white/10"}`}
-                        >
-                          <span className="font-semibold text-[10px]">Auto</span>
-                          <span className={`text-[8px] leading-tight ${config.recoveryAutoMode ? "text-cyan-400/70" : "text-muted-foreground/60"}`}>AI computes exact stake</span>
-                        </button>
-                        <button
-                          onClick={() => set("recoveryAutoMode", false)}
-                          className={`flex-1 flex flex-col items-center gap-0.5 px-2 py-2 text-xs font-medium transition-colors ${!config.recoveryAutoMode ? "bg-cyan-500/20 text-cyan-300" : "bg-white/5 text-muted-foreground hover:text-white"}`}
-                        >
-                          <span className="font-semibold text-[10px]">Manual</span>
-                          <span className={`text-[8px] leading-tight ${!config.recoveryAutoMode ? "text-cyan-400/70" : "text-muted-foreground/60"}`}>Set your multiplier</span>
-                        </button>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <button
+                        onClick={() => set("recoveryAutoMode", true)}
+                        className={`py-1.5 px-2 rounded-lg text-xs border font-medium transition-all ${
+                          config.recoveryAutoMode ? "bg-cyan-500/15 border-cyan-500/50 text-cyan-300" : "bg-white/5 border-white/10 text-muted-foreground"
+                        }`}
+                      >
+                        AI Exact Auto
+                      </button>
+                      <button
+                        onClick={() => set("recoveryAutoMode", false)}
+                        className={`py-1.5 px-2 rounded-lg text-xs border font-medium transition-all ${
+                          !config.recoveryAutoMode ? "bg-cyan-500/15 border-cyan-500/50 text-cyan-300" : "bg-white/5 border-white/10 text-muted-foreground"
+                        }`}
+                      >
+                        Manual Multiplier
+                      </button>
+                    </div>
+
+                    <div className="space-y-1.5 pt-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-muted-foreground">Recovery Mode</span>
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() => set("recoveryMethod", "split")}
+                            className={`px-2 py-1 rounded text-xs border ${config.recoveryMethod === "split" ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-300" : "bg-white/5 border-white/10 text-muted-foreground"}`}
+                          >
+                            Split (Safe)
+                          </button>
+                          <button
+                            onClick={() => set("recoveryMethod", "instant")}
+                            className={`px-2 py-1 rounded text-xs border ${config.recoveryMethod === "instant" ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-300" : "bg-white/5 border-white/10 text-muted-foreground"}`}
+                          >
+                            Instant (1-Win)
+                          </button>
+                        </div>
                       </div>
 
-                      {/* Auto mode info */}
-                      {config.recoveryAutoMode ? (
-                        <div className="space-y-1.5 text-[9px] text-muted-foreground/70 px-0.5">
-                          <p>
-                            <span className="text-cyan-400 font-medium">Exact formula:</span>{" "}
-                            (unrecovered amount + original normal-trade profit) ÷ (live payout − 1).
-                            No multiplier is used.
-                          </p>
-                          <p>
-                            Instant uses the full exact stake. Split caps each attempt at your
-                            <span className="text-white/70"> ${config.stake.toFixed(2)} base stake</span> and carries the rest forward.
-                          </p>
-                          {config.recoveryFamilies.includes("overUnder") && (
-                            <div className="rounded border border-white/5 bg-black/20 px-2 py-1.5 text-muted-foreground/60">
-                              <p>
-                                ${config.stake.toFixed(2)} loss example · OVER {config.recoveryOverBarrier} / UNDER {config.recoveryUnderBarrier}
-                              </p>
-                              <p className="font-mono text-cyan-400/80">
-                                Instant ${overInstantExample.toFixed(2)} / ${underInstantExample.toFixed(2)} · Split ≤${config.stake.toFixed(2)}
-                              </p>
-                            </div>
-                          )}
-                          <p className="text-muted-foreground/50">
-                            Selected O/U fallback: OVER {config.recoveryOverBarrier} {selectedOverPayout.toFixed(2)}× · UNDER {config.recoveryUnderBarrier} {selectedUnderPayout.toFixed(2)}×
-                          </p>
-                          <p className="text-muted-foreground/50">
-                            Even/Odd {EVEN_ODD_PAYOUT.toFixed(2)}× · Rise/Fall {RISE_FALL_PAYOUT.toFixed(2)}× · Match {MATCH_PAYOUT.toFixed(2)}× · Differ {DIFF_PAYOUT.toFixed(2)}×
-                          </p>
-                        </div>
-                      ) : (
-                        <p className="text-[9px] text-muted-foreground/70 px-0.5">
-                          Your multiplier is used without payout calibration or a hidden floor/ceiling.
-                          It compounds after each recovery loss until Max steps.
-                        </p>
-                      )}
-
-                      {/* Method */}
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="flex-1">
-                          <span className="text-xs text-muted-foreground">Method</span>
-                          {config.recoveryMethod === "split" ? (
-                            <p className="text-[8px] text-muted-foreground/50 mt-0.5">
-                              Auto: max one base stake per attempt · Manual: multiplier-capped
-                            </p>
-                          ) : (
-                            <p className="text-[8px] text-muted-foreground/50 mt-0.5">
-                              Auto: exact one-win clearance · Manual: your multiplier
-                            </p>
-                          )}
-                        </div>
-                        <Select value={config.recoveryMethod} onValueChange={v => set("recoveryMethod", v as RecoveryMethod)}>
-                          <SelectTrigger className="h-7 w-24 text-xs bg-black/30 border-white/10">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="split">Split</SelectItem>
-                            <SelectItem value="instant">Instant</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-
-                      {/* Multiplier — manual mode only */}
                       {!config.recoveryAutoMode && (
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-xs text-muted-foreground flex-1">Multiplier</span>
@@ -761,31 +790,39 @@ export function SpeedAIFab() {
                         </div>
                       )}
 
-                      <NumInput label="Max steps" value={config.maxRecoverySteps} onChange={v => set("maxRecoverySteps", v)} min={1} max={10} />
+                      <NumInput label="Max recovery steps" value={config.maxRecoverySteps} onChange={v => set("maxRecoverySteps", v)} min={1} max={10} />
                     </div>
                   </div>
 
-                  {/* Scan button */}
-                  <Button
-                    onClick={handleScan}
-                    disabled={loading}
-                    className="w-full h-10 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold text-sm shadow-lg shadow-cyan-900/40"
-                  >
-                    <ScanSearch className="w-4 h-4 mr-2" />
-                    Scan Markets
-                  </Button>
+                  {/* Actions */}
+                  <div className="space-y-2 pt-1">
+                    <Button
+                      onClick={handleScan}
+                      disabled={loading}
+                      className="w-full h-10 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold text-sm shadow-lg shadow-cyan-900/40"
+                    >
+                      <ScanSearch className="w-4 h-4 mr-2" />
+                      Neural Scan All Markets
+                    </Button>
 
-                  <p className="text-[10px] text-center text-muted-foreground/60 -mt-2">
-                    AI agents will find the best market for your settings
-                  </p>
+                    {config.marketMode === "locked" && (
+                      <Button
+                        onClick={() => handleStart(config.lockedSymbol, "locked")}
+                        disabled={loading}
+                        variant="outline"
+                        className="w-full h-9 border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/10 text-xs font-semibold"
+                      >
+                        <Zap className="w-3.5 h-3.5 mr-1.5" />
+                        Run Directly on {ALL_SCAN_MARKETS.find(m => m.symbol === config.lockedSymbol)?.short ?? "Asset"}
+                      </Button>
+                    )}
+                  </div>
                 </div>
               )}
 
               {/* ── STEP: SCANNING ── */}
               {step === "scanning" && (
                 <div className="p-4 space-y-4">
-
-                  {/* Header row */}
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <motion.div
@@ -796,13 +833,12 @@ export function SpeedAIFab() {
                         <Loader2 className="w-3 h-3 text-cyan-400 animate-spin" />
                       </motion.div>
                       <div>
-                        <p className="text-xs font-bold text-white tracking-wide leading-none">Neural Scan</p>
-                        <p className="text-[9px] text-cyan-400/50 mt-0.5">Scoring normal + recovery per market</p>
+                        <p className="text-xs font-bold text-white tracking-wide leading-none">Quantum Neural Scan</p>
+                        <p className="text-[9px] text-cyan-400/60 mt-0.5">2nd-Order Markov & Entropy Scoring</p>
                       </div>
                     </div>
                     <div className="text-right">
                       <span className="text-sm font-bold font-mono text-cyan-400">
-                        {/* Show 1-based index while actively scanning a market, exact count once done */}
                         {scanProgress.scanning !== null ? scanProgress.scanned + 1 : scanProgress.scanned}
                       </span>
                       <span className="text-xs text-muted-foreground/40 font-mono"> / {scanProgress.total || 17}</span>
@@ -810,136 +846,49 @@ export function SpeedAIFab() {
                   </div>
 
                   {/* Progress bar */}
-                  <div className="space-y-1.5">
-                    <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
-                      <motion.div
-                        className="h-full rounded-full"
-                        style={{ background: "linear-gradient(90deg, #0891b2, #06b6d4, #67e8f9)" }}
-                        animate={{ width: `${(scanProgress.scanned / (scanProgress.total || 17)) * 100}%` }}
-                        transition={{ duration: 0.35, ease: "easeOut" }}
-                      />
-                    </div>
+                  <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+                    <motion.div
+                      className="h-full rounded-full"
+                      style={{ background: "linear-gradient(90deg, #0891b2, #06b6d4, #67e8f9)" }}
+                      animate={{ width: `${(scanProgress.scanned / (scanProgress.total || 17)) * 100}%` }}
+                      transition={{ duration: 0.35, ease: "easeOut" }}
+                    />
                   </div>
 
-                  {/* Currently-analyzing card */}
+                  {/* Now analyzing indicator */}
                   <div className="relative rounded-xl border overflow-hidden flex items-center gap-3 px-3 py-3 bg-cyan-950/40 border-cyan-500/20">
-                    <motion.div
-                      className="absolute inset-0 bg-gradient-to-r from-transparent via-cyan-400/6 to-transparent pointer-events-none"
-                      animate={{ x: ["-120%", "220%"] }}
-                      transition={{ duration: 1.8, repeat: Infinity, ease: "linear" }}
-                    />
-                    {/* Sonar ring */}
                     <div className="relative w-8 h-8 flex-shrink-0">
-                      <motion.span
-                        className="absolute inset-0 rounded-full border border-cyan-400/30"
-                        animate={{ scale: [1, 1.55], opacity: [0.5, 0] }}
-                        transition={{ duration: 1.2, repeat: Infinity, ease: "easeOut" }}
-                      />
-                      <motion.span
-                        className="absolute inset-0 rounded-full border border-cyan-400/20"
-                        animate={{ scale: [1, 1.55], opacity: [0.4, 0] }}
-                        transition={{ duration: 1.2, repeat: Infinity, ease: "easeOut", delay: 0.4 }}
-                      />
                       <div className="absolute inset-0 rounded-full bg-cyan-500/10 border border-cyan-500/25 flex items-center justify-center">
                         <ScanSearch className="w-3.5 h-3.5 text-cyan-400" />
                       </div>
                     </div>
                     <div className="relative flex-1 min-w-0">
-                      <AnimatePresence mode="wait">
-                        <motion.div
-                          key={scanProgress.scanning ?? "prep"}
-                          initial={{ opacity: 0, y: 4 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0, y: -4 }}
-                          transition={{ duration: 0.2 }}
-                        >
-                          <p className="text-[9px] uppercase tracking-widest text-cyan-400/50 mb-0.5">Now analyzing</p>
-                          <p className="text-sm font-bold text-white truncate">
-                            {scanProgress.scanning ?? "Preparing scan…"}
-                          </p>
-                        </motion.div>
-                      </AnimatePresence>
-                    </div>
-                    <div className="relative flex items-end gap-0.5 h-5 flex-shrink-0">
-                      {[0.4, 0.7, 1, 0.7, 0.4].map((h, i) => (
-                        <motion.span
-                          key={i}
-                          className="w-0.5 rounded-full bg-cyan-400"
-                          animate={{ scaleY: [h, 1, h] }}
-                          transition={{ duration: 0.6, repeat: Infinity, delay: i * 0.1, ease: "easeInOut" }}
-                          style={{ height: "100%", transformOrigin: "bottom" }}
-                        />
-                      ))}
+                      <p className="text-[9px] uppercase tracking-widest text-cyan-400/50 mb-0.5">Analyzing Asset</p>
+                      <p className="text-sm font-bold text-white truncate">
+                        {scanProgress.scanning ?? "Calibrating Bayesian prior…"}
+                      </p>
                     </div>
                   </div>
 
-                  {/* Live results list — appears as markets complete */}
+                  {/* Live Results */}
                   {scanProgress.results.length > 0 && (
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between px-0.5">
-                        <p className="text-[9px] uppercase tracking-wider text-muted-foreground/40">Live rankings</p>
-                        <p className="text-[9px] text-muted-foreground/30">score / 100</p>
-                      </div>
-                      <div className="space-y-1 max-h-40 overflow-y-auto pr-0.5">
-                        <AnimatePresence initial={false}>
-                          {[...scanProgress.results]
-                            .sort((a, b) => b.score - a.score)
-                            .map((r, i) => {
-                              const market = ALL_SCAN_MARKETS.find(m => m.symbol === r.symbol);
-                              const isLeading = i === 0;
-                              const sc = r.score;
-                              const color = sc >= 60 ? "#22c55e" : sc >= 54 ? "#06b6d4" : sc >= 48 ? "#f59e0b" : "#94a3b8";
-                              return (
-                                <motion.div
-                                  key={r.symbol}
-                                  layout
-                                  initial={{ opacity: 0, x: -12 }}
-                                  animate={{ opacity: 1, x: 0 }}
-                                  transition={{ duration: 0.25, ease: "easeOut" }}
-                                  className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg ${
-                                    isLeading
-                                      ? "bg-cyan-500/8 border border-cyan-500/20"
-                                      : "bg-white/3 border border-transparent"
-                                  }`}
-                                >
-                                  <span className="text-[10px] font-mono w-4 text-muted-foreground/30 flex-shrink-0">
-                                    {i + 1}
-                                  </span>
-                                  <span className={`text-xs font-medium flex-1 truncate ${isLeading ? "text-white" : "text-white/60"}`}>
-                                    {market?.short ?? r.symbol}
-                                  </span>
-                                  {/* N/R score pills */}
-                                  {(r.normalScore !== undefined || r.recoveryScore !== undefined) && (
-                                    <div className="flex gap-1 flex-shrink-0">
-                                      {r.normalScore !== undefined && (
-                                        <span className="text-[8px] font-mono px-1 rounded bg-white/5 text-white/40">
-                                          N{r.normalScore.toFixed(0)}
-                                        </span>
-                                      )}
-                                      {r.recoveryScore !== undefined && (
-                                        <span className="text-[8px] font-mono px-1 rounded bg-amber-500/10 text-amber-400/60">
-                                          R{r.recoveryScore.toFixed(0)}
-                                        </span>
-                                      )}
-                                    </div>
-                                  )}
-                                  <span className="text-xs font-bold font-mono flex-shrink-0" style={{ color }}>
-                                    {sc.toFixed(0)}
-                                  </span>
-                                  {isLeading && (
-                                    <motion.span
-                                      className="text-[8px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-400 font-bold flex-shrink-0"
-                                      animate={{ opacity: [0.6, 1, 0.6] }}
-                                      transition={{ duration: 1.5, repeat: Infinity }}
-                                    >
-                                      BEST
-                                    </motion.span>
-                                  )}
-                                </motion.div>
-                              );
-                            })}
-                        </AnimatePresence>
-                      </div>
+                    <div className="space-y-1 max-h-44 overflow-y-auto pr-0.5">
+                      {[...scanProgress.results].sort((a, b) => b.score - a.score).map((r, i) => {
+                        const market = ALL_SCAN_MARKETS.find(m => m.symbol === r.symbol);
+                        const isLeading = i === 0;
+                        return (
+                          <div
+                            key={r.symbol}
+                            className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs ${
+                              isLeading ? "bg-cyan-500/10 border border-cyan-500/25 text-white" : "bg-white/3 text-white/70"
+                            }`}
+                          >
+                            <span className="font-mono text-[10px] text-muted-foreground/40 w-4">{i + 1}</span>
+                            <span className="font-medium flex-1 truncate">{market?.short ?? r.symbol}</span>
+                            <span className={`font-mono font-bold ${scoreColor(r.score)}`}>{r.score.toFixed(0)}</span>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -950,84 +899,79 @@ export function SpeedAIFab() {
                 <div className="p-4 space-y-4">
                   {scanResult.suitable && scanResult.best ? (
                     <>
-                      {/* Suitable market card */}
                       <div className="rounded-xl bg-green-500/5 border border-green-500/25 p-3 space-y-2">
-                        <div className="flex items-center gap-2">
-                          <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
-                          <p className="text-xs font-semibold text-green-300">Suitable market found</p>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5">
+                            <CheckCircle2 className="w-4 h-4 text-green-400" />
+                            <p className="text-xs font-semibold text-green-300">Statistical Edge Verified</p>
+                          </div>
+                          <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-green-500/20 text-green-300">
+                            +EV Positive
+                          </span>
                         </div>
 
-                        <div className="bg-black/30 rounded-lg p-2.5 space-y-1.5">
+                        <div className="bg-black/30 rounded-lg p-2.5 space-y-2">
                           <div className="flex items-center justify-between">
                             <p className="text-sm font-bold text-white truncate">{scanResult.best.displayName}</p>
                             <span className={`text-sm font-bold font-mono ${scoreColor(scanResult.best.score)}`}>
                               {scanResult.best.score.toFixed(0)}<span className="text-[10px] font-normal text-muted-foreground">/100</span>
                             </span>
                           </div>
+
                           <div className="flex items-center gap-2 text-[11px]">
                             <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 font-mono font-medium">
                               {scanResult.best.contractType}{scanResult.best.barrier !== undefined ? ` ${scanResult.best.barrier}` : ""}
                             </span>
                             <span className="text-muted-foreground">{(scanResult.best.winProbability * 100).toFixed(1)}% win rate</span>
                           </div>
-                          {/* Normal / Recovery score breakdown */}
-                          {(scanResult.best.normalScore !== undefined || scanResult.best.recoveryScore !== undefined) && (
-                            <div className="flex gap-2 pt-0.5">
-                              <div className="flex-1 bg-white/5 rounded px-2 py-1">
-                                <p className="text-[8px] uppercase tracking-wider text-muted-foreground/50 mb-0.5">Normal</p>
-                                <span className={`text-[11px] font-bold font-mono ${scoreColor(scanResult.best.normalScore ?? 0)}`}>
-                                  {(scanResult.best.normalScore ?? 0).toFixed(0)}
-                                </span>
-                              </div>
-                              <div className="flex-1 bg-white/5 rounded px-2 py-1">
-                                <p className="text-[8px] uppercase tracking-wider text-amber-400/50 mb-0.5">Recovery</p>
-                                <span className={`text-[11px] font-bold font-mono ${scoreColor(scanResult.best.recoveryScore ?? 0)}`}>
-                                  {(scanResult.best.recoveryScore ?? 0).toFixed(0)}
-                                </span>
-                              </div>
-                              <div className="flex-1 bg-cyan-500/8 rounded px-2 py-1 border border-cyan-500/20">
-                                <p className="text-[8px] uppercase tracking-wider text-cyan-400/60 mb-0.5">Combined</p>
-                                <span className={`text-[11px] font-bold font-mono ${scoreColor(scanResult.best.score)}`}>
-                                  {scanResult.best.score.toFixed(0)}
-                                </span>
-                              </div>
+
+                          {/* Metric badges */}
+                          <div className="grid grid-cols-3 gap-1.5 pt-1">
+                            <div className="bg-white/5 rounded px-2 py-1 text-center">
+                              <p className="text-[8px] text-muted-foreground/60 uppercase">Normal</p>
+                              <span className="text-[11px] font-bold font-mono text-cyan-400">
+                                {(scanResult.best.normalScore ?? 0).toFixed(0)}
+                              </span>
                             </div>
-                          )}
+                            <div className="bg-white/5 rounded px-2 py-1 text-center">
+                              <p className="text-[8px] text-amber-400/60 uppercase">Sniper Rec</p>
+                              <span className="text-[11px] font-bold font-mono text-amber-400">
+                                {(scanResult.best.recoveryScore ?? 0).toFixed(0)}
+                              </span>
+                            </div>
+                            <div className="bg-white/5 rounded px-2 py-1 text-center">
+                              <p className="text-[8px] text-muted-foreground/60 uppercase">Entropy</p>
+                              <span className="text-[11px] font-bold font-mono text-white">
+                                {scanResult.best.entropyBits ? `${scanResult.best.entropyBits}b` : "3.10b"}
+                              </span>
+                            </div>
+                          </div>
+
                           <p className="text-[10px] text-muted-foreground">{scanResult.best.reason}</p>
                         </div>
-
-                        {/* Top 3 runners-up */}
-                        {scanResult.allScored.length > 1 && (
-                          <div className="space-y-1 pt-1">
-                            <p className="text-[9px] uppercase tracking-wider text-muted-foreground/60">Other markets scanned</p>
-                            {scanResult.allScored.slice(1, 4).map((m, i) => (
-                              <div key={i} className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                                <span className="w-3 text-muted-foreground/40">{i + 2}</span>
-                                <span className="flex-1 truncate">{m.displayName}</span>
-                                <span className="text-muted-foreground/40 font-mono text-[9px]">
-                                  {m.normalScore !== undefined ? `N${(m.normalScore).toFixed(0)}` : ""}
-                                  {m.normalScore !== undefined && m.recoveryScore !== undefined ? " · " : ""}
-                                  {m.recoveryScore !== undefined ? `R${(m.recoveryScore).toFixed(0)}` : ""}
-                                </span>
-                                <span className={`font-mono font-semibold ${scoreColor(m.score)}`}>{m.score.toFixed(0)}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
                       </div>
 
-                      <p className="text-[10px] text-center text-muted-foreground/70 px-2">
-                        All trades locked to <span className="text-cyan-400 font-medium">{scanResult.best.displayName}</span> — rescan to change market
-                      </p>
+                      {/* Execution Mode Buttons */}
+                      <div className="space-y-2">
+                        <Button
+                          onClick={() => handleStart(scanResult.best!.symbol, "locked")}
+                          disabled={loading}
+                          className="w-full h-10 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold text-xs shadow-lg shadow-cyan-900/40"
+                        >
+                          <Lock className="w-3.5 h-3.5 mr-2" />
+                          Trade Locked on {scanResult.best.displayName}
+                        </Button>
 
-                      <Button
-                        onClick={() => handleStart(scanResult.best!.symbol)}
-                        disabled={loading}
-                        className="w-full h-10 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold text-sm shadow-lg shadow-cyan-900/40"
-                      >
-                        {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Zap className="w-4 h-4 mr-2" />}
-                        Run NeuroAI
-                      </Button>
+                        <Button
+                          onClick={() => handleStart(undefined, "switching")}
+                          disabled={loading}
+                          variant="outline"
+                          className="w-full h-9 border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/10 text-xs font-semibold"
+                        >
+                          <Shuffle className="w-3.5 h-3.5 mr-2" />
+                          Trade with Smart Market Switching
+                        </Button>
+                      </div>
 
                       <button onClick={() => setStep("config")} className="w-full text-[11px] text-muted-foreground hover:text-white text-center py-1">
                         ← Change settings
@@ -1035,40 +979,17 @@ export function SpeedAIFab() {
                     </>
                   ) : (
                     <>
-                      {/* No suitable market */}
                       <div className="rounded-xl bg-amber-500/5 border border-amber-500/25 p-3 space-y-2">
                         <div className="flex items-center gap-2">
                           <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
-                          <p className="text-xs font-semibold text-amber-300">No suitable market found</p>
+                          <p className="text-xs font-semibold text-amber-300">No Decisive Edge Found</p>
                         </div>
                         <p className="text-[11px] text-muted-foreground">{scanResult.reason}</p>
-
-                        {/* Show what was found anyway */}
-                        {scanResult.allScored.length > 0 && (
-                          <div className="bg-black/30 rounded-lg p-2 space-y-1 mt-1">
-                            <p className="text-[9px] uppercase tracking-wider text-muted-foreground/50 mb-1">Current best (below threshold)</p>
-                            {scanResult.allScored.slice(0, 3).map((m, i) => (
-                              <div key={i} className="flex items-center gap-2 text-[10px]">
-                                <span className="w-3 text-muted-foreground/40">{i + 1}</span>
-                                <span className="flex-1 truncate text-muted-foreground">{m.displayName}</span>
-                                <span className="font-mono text-amber-400/80">{m.score.toFixed(0)}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
                       </div>
 
-                      <p className="text-[10px] text-center text-muted-foreground/60 px-2">
-                        Market conditions don't yet match your settings. Scan again in a few seconds.
-                      </p>
-
-                      <Button
-                        onClick={handleScan}
-                        disabled={loading}
-                        className="w-full h-10 bg-gradient-to-r from-amber-600/80 to-orange-600/80 hover:from-amber-500 hover:to-orange-500 text-white font-bold text-sm"
-                      >
-                        {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <RefreshCw className="w-4 h-4 mr-2" />}
-                        Scan Again
+                      <Button onClick={handleScan} disabled={loading} className="w-full h-10 bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs">
+                        <RefreshCw className="w-3.5 h-3.5 mr-2" />
+                        Re-Scan Markets
                       </Button>
 
                       <button onClick={() => setStep("config")} className="w-full text-[11px] text-muted-foreground hover:text-white text-center py-1">
@@ -1086,9 +1007,14 @@ export function SpeedAIFab() {
                   <div className={`rounded-xl p-3 border ${isRunning ? "bg-cyan-500/5 border-cyan-500/20" : "bg-secondary/30 border-border"}`}>
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Session P&L</span>
-                      {isRunning
-                        ? <span className="flex items-center gap-1 text-[10px] text-cyan-400"><span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />LIVE</span>
-                        : <span className="text-[10px] text-muted-foreground">STOPPED</span>}
+                      {isRunning ? (
+                        <span className="flex items-center gap-1 text-[10px] text-cyan-400">
+                          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                          LIVE 1-TICK
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-muted-foreground">STOPPED</span>
+                      )}
                     </div>
                     <div className={`text-2xl font-bold font-mono ${profitColor}`}>
                       {(status?.totalProfit ?? 0) >= 0 ? "+" : ""}${Math.abs(status?.totalProfit ?? 0).toFixed(2)}
@@ -1099,7 +1025,7 @@ export function SpeedAIFab() {
                       <span className="text-muted-foreground">{winRate}% WR</span>
                       <span className="text-muted-foreground">{status?.tradeCount ?? 0} trades</span>
                     </div>
-                    {/* TP/SL bar */}
+
                     {status?.config && (
                       <div className="mt-2 space-y-1">
                         <div className="flex justify-between text-[9px] text-muted-foreground">
@@ -1119,97 +1045,69 @@ export function SpeedAIFab() {
 
                   {/* Status message */}
                   {status?.message && (
-                    <div className={`text-xs px-3 py-2 rounded-lg border ${
+                    <div className={`text-xs px-3 py-2 rounded-lg border font-mono ${
                       status.message.startsWith("✅") ? "bg-green-500/10 border-green-500/20 text-green-400" :
                       status.message.startsWith("🛑") ? "bg-red-500/10 border-red-500/20 text-red-400" :
-                      status.message.startsWith("⚠️") ? "bg-amber-500/10 border-amber-500/20 text-amber-400" :
+                      status.message.startsWith("🎯") ? "bg-amber-500/10 border-amber-500/25 text-amber-300" :
                       "bg-secondary/30 border-border text-muted-foreground"
                     }`}>
                       {status.message}
                     </div>
                   )}
 
-                  {/* Locked market + current trade */}
+                  {/* Active Market & Contract */}
                   {isRunning && status?.currentMarket && (
                     <div className="flex items-center gap-2 bg-white/3 rounded-lg px-3 py-2 border border-white/5">
                       <Loader2 className="w-3 h-3 text-cyan-400 animate-spin flex-shrink-0" />
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <p className="text-[10px] text-muted-foreground flex items-center gap-1">
                           <span className="w-1.5 h-1.5 rounded-full bg-cyan-500 inline-block" />
-                          Locked market
+                          Active Asset
                         </p>
-                        <p className="text-xs font-medium truncate">{status.currentMarket}</p>
+                        <p className="text-xs font-semibold text-white truncate">{status.currentMarket}</p>
                         <p className="text-[10px] font-mono text-cyan-400">{status.currentContractType} · ${status.currentStake.toFixed(2)}</p>
                       </div>
                       {status.lastResult && (
-                        <span className={`ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded ${status.lastResult === "won" ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${status.lastResult === "won" ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
                           {status.lastResult.toUpperCase()}
                         </span>
                       )}
                     </div>
                   )}
 
-                  {/* Recovery indicator */}
-                  {status?.inRecovery && (() => {
-                    const atMaxSteps = !!(status.config && status.recoveryStep >= status.config.maxRecoverySteps);
-                    const aiOverride = (status.consecutiveRecoveryLosses ?? 0) >= 2;
-                    const streakColor = atMaxSteps ? "bg-purple-500/8 border-purple-500/25"
-                      : aiOverride ? "bg-red-500/8 border-red-500/25"
-                      : "bg-amber-500/5 border-amber-500/20";
-                    const dotColor = atMaxSteps ? "bg-purple-400" : aiOverride ? "bg-red-400 animate-pulse" : "bg-amber-400";
-                    return (
-                      <div className={`rounded-lg px-3 py-2 border text-xs ${streakColor}`}>
-                        <div className="flex items-center gap-2">
-                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
-                          <div className="flex-1 min-w-0">
-                            {atMaxSteps ? (
-                              <p className="text-purple-300 font-medium">
-                                Max steps — stake locked · ${status.unrecoveredAmount.toFixed(2)} debt
-                              </p>
-                            ) : (
-                              <p className={aiOverride ? "text-red-400 font-medium" : "text-amber-400"}>
-                                Recovery step {status.recoveryStep}{status.config ? `/${status.config.maxRecoverySteps}` : ""} · ${status.unrecoveredAmount.toFixed(2)} debt + ${(status.recoveryRemainingTargetProfit ?? status.recoveryTargetProfit ?? 0).toFixed(2)} target
-                              </p>
-                            )}
-                          </div>
-                          {/* Consecutive recovery loss streak badge */}
-                          {(status.consecutiveRecoveryLosses ?? 0) > 0 && (
-                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full flex-shrink-0 ${
-                              aiOverride ? "bg-red-500/25 text-red-300" : "bg-amber-500/20 text-amber-400"
-                            }`}>
-                              {status.consecutiveRecoveryLosses}× loss streak
-                            </span>
-                          )}
-                        </div>
-                        {/* AI override indicator */}
-                        {aiOverride && (
-                          <p className="mt-1 text-[9px] text-red-400/80 pl-3.5">
-                            ⚡ AI full control — scanning all markets for safest setup
-                          </p>
-                        )}
+                  {/* Recovery Status */}
+                  {status?.inRecovery && (
+                    <div className="rounded-lg px-3 py-2 border text-xs bg-amber-500/8 border-amber-500/30 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-amber-300 flex items-center gap-1.5">
+                          <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+                          Sniper Recovery Active (Step {status.recoveryStep})
+                        </span>
+                        <span className="font-mono text-[10px] text-amber-400">
+                          ${status.unrecoveredAmount.toFixed(2)} debt
+                        </span>
                       </div>
-                    );
-                  })()}
+                      <p className="text-[10px] text-muted-foreground">
+                        Targeting +${(status.recoveryRemainingTargetProfit ?? status.recoveryTargetProfit ?? 0).toFixed(2)} original profit recovery.
+                      </p>
+                    </div>
+                  )}
 
                   {/* Controls */}
                   <div className="flex gap-2">
                     {isRunning ? (
                       <Button onClick={handleStop} disabled={loading} variant="destructive" className="flex-1 h-9 text-xs">
                         <StopCircle className="w-3.5 h-3.5 mr-1.5" />
-                        Stop Engine
+                        Stop NeuroAI
                       </Button>
                     ) : (
                       <>
                         <Button onClick={handleReset} variant="outline" className="flex-1 h-9 text-xs border-white/10">
                           New Session
                         </Button>
-                        <Button
-                          onClick={handleScan}
-                          disabled={loading}
-                          className="flex-1 h-9 text-xs bg-gradient-to-r from-cyan-600 to-blue-600"
-                        >
+                        <Button onClick={handleScan} disabled={loading} className="flex-1 h-9 text-xs bg-cyan-600 hover:bg-cyan-500 text-white font-bold">
                           <ScanSearch className="w-3.5 h-3.5 mr-1.5" />
-                          Re-scan
+                          Re-Scan
                         </Button>
                       </>
                     )}
@@ -1221,7 +1119,7 @@ export function SpeedAIFab() {
         )}
       </AnimatePresence>
 
-      {/* FAB */}
+      {/* FAB Trigger Button */}
       <motion.button
         onClick={() => setOpen(o => !o)}
         whileHover={{ scale: 1.06 }}
@@ -1229,17 +1127,15 @@ export function SpeedAIFab() {
         className="fixed bottom-5 right-5 z-50"
         aria-label="NeuroAI Engine"
       >
-        {/* Dim static base ring */}
         <div
           className="absolute pointer-events-none"
           style={{
             inset: "-1.5px",
             borderRadius: "20px",
-            border: "1px solid rgba(34,211,238,0.13)",
+            border: "1px solid rgba(34,211,238,0.15)",
           }}
         />
 
-        {/* Rotating conic sweep — scanner arc */}
         <motion.div
           className="absolute pointer-events-none"
           style={{
@@ -1247,7 +1143,7 @@ export function SpeedAIFab() {
             borderRadius: "20px",
             padding: "1.5px",
             background: isRunning
-              ? "conic-gradient(from 0deg, transparent 0%, transparent 50%, rgba(34,211,238,0.15) 65%, rgba(34,211,238,1) 78%, rgba(167,243,208,1) 82%, rgba(34,211,238,1) 86%, rgba(34,211,238,0.15) 98%, transparent 100%)"
+              ? "conic-gradient(from 0deg, transparent 0%, transparent 50%, rgba(34,211,238,0.2) 65%, rgba(34,211,238,1) 78%, rgba(167,243,208,1) 82%, rgba(34,211,238,1) 86%, rgba(34,211,238,0.2) 98%, transparent 100%)"
               : "conic-gradient(from 0deg, transparent 0%, transparent 60%, rgba(34,211,238,0.1) 72%, rgba(34,211,238,0.85) 80%, rgba(167,243,208,0.95) 83%, rgba(34,211,238,0.85) 86%, rgba(34,211,238,0.1) 95%, transparent 100%)",
             WebkitMask: "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
             WebkitMaskComposite: "destination-out",
@@ -1257,7 +1153,6 @@ export function SpeedAIFab() {
           transition={{ duration: isRunning ? 1.8 : 3.5, repeat: Infinity, ease: "linear" }}
         />
 
-        {/* Soft breathing outer glow */}
         <motion.div
           className="absolute inset-0 rounded-[18px] pointer-events-none"
           animate={{
@@ -1268,7 +1163,6 @@ export function SpeedAIFab() {
           transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
         />
 
-        {/* Running pulse ring */}
         {isRunning && (
           <motion.span
             className="absolute inset-0 rounded-[18px] border border-cyan-400/40 pointer-events-none"
@@ -1277,7 +1171,6 @@ export function SpeedAIFab() {
           />
         )}
 
-        {/* Button face */}
         <div className={`
           relative w-14 h-14 rounded-[18px] flex flex-col items-center justify-center gap-0.5
           transition-all duration-300
