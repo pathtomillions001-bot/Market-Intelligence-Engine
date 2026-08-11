@@ -2,14 +2,14 @@
  * NeuroAI FAB Engine (SpeedAI Engine v4 — Institutional Quantum Edition)
  *
  * Ultra-fast 1-tick algorithmic trading engine with:
- *  1. 2nd-Order Bayesian Markov Tensor Transitions with Laplace Dirichlet prior
- *  2. Geometric Run-Length Hazard Rate & Fatigue Inflection Point Detection
- *  3. Shannon Information Entropy (H(X)) Noise Gating & Structural Clustering
- *  4. Discrete Lag-1 Autocorrelation (ρ₁) & Micro-Tick Acceleration (Kinematics)
- *  5. Net Expected Value (+EV) Micro-Gating
- *  6. Sniper Recovery Protocol with 4-Window Concurrence (15t / 30t / 60t / 100t)
- *  7. Multi-Loss Anti-Pattern Memory & Exponential Decay Penalisers
- *  8. Pre-Warmed Proposal Quote Caching (Zero-Lag Execution Path)
+ *  1. Contract Analysis Profiles & Barrier-Aware Precision Scoring
+ *  2. 2nd-Order Bayesian Markov Tensor Transitions with Laplace Dirichlet prior
+ *  3. Geometric Run-Length Hazard Rate & Fatigue Inflection Point Detection
+ *  4. Shannon Information Entropy (H(X)) Noise Gating & Structural Clustering
+ *  5. Micro-Tick Kinematics & Discrete Lag-1 Autocorrelation (ρ₁)
+ *  6. Net Expected Value (+EV) Micro-Gating with Full Submission Re-Validation
+ *  7. Sniper Recovery Protocol with Per-Attempt Fresh Analysis & Loser Rotation
+ *  8. Multi-Loss Anti-Pattern Memory & Exponential Decay Penalisers
  *  9. Strict User Contract Sovereignty (Zero deviation from user contract family)
  * 10. Explicit User Market Mode: Locked Single Asset vs Smart Strategy Switching
  */
@@ -21,6 +21,7 @@ import {
   waitForContractResult,
   getCachedToken,
   getLiveBalance,
+  type TickEvent,
 } from "./deriv";
 import { broadcastSSE } from "./sse";
 import { db, accountsTable, settingsTable } from "@workspace/db";
@@ -144,6 +145,21 @@ export interface SpeedAIStatus {
   expectedValue?: number;
 }
 
+export type ContractProfileTier = "RARE_EVENT" | "LOW_PROB" | "MID_PROB" | "HIGH_PROB";
+
+export interface ContractProfile {
+  profile: ContractProfileTier;
+  theoretical: number;
+  minWindowShort: number; // shortest allowed scoring window in ticks
+  edgeDenominator: number; // for (winP - theoretical) / edgeDenominator
+  requiredScore: number;
+  requiredEv: number;
+  markovWeight: number;
+  empiricalWeight: number;
+  momentumWeight: number;
+  timingWeight: number;
+}
+
 // ── Session state ─────────────────────────────────────────────────────────────
 
 let session: {
@@ -190,11 +206,114 @@ let session: {
   lastEv: 0,
 };
 
+// ── Fresh Ticks Tracker ───────────────────────────────────────────────────────
+
+const totalDigitsReceived = new Map<string, number>();
+const totalPricesReceived = new Map<string, number>();
+
+tickManager.on("tick", (e: TickEvent) => {
+  totalPricesReceived.set(e.symbol, (totalPricesReceived.get(e.symbol) ?? 0) + 1);
+  if (e.lastDigit >= 0) {
+    totalDigitsReceived.set(e.symbol, (totalDigitsReceived.get(e.symbol) ?? 0) + 1);
+  }
+});
+
+const lastTradeClosedDigitCount = new Map<string, number>();
+const lastTradeClosedPriceCount = new Map<string, number>();
+let lastTradeClosedAt = 0;
+
+async function waitForFreshBuffer(symbol: string, isDigitContract: boolean): Promise<boolean> {
+  const targetFresh = isDigitContract ? 40 : 20;
+  const startDigits = lastTradeClosedDigitCount.get(symbol) ?? 0;
+  const startPrices = lastTradeClosedPriceCount.get(symbol) ?? 0;
+
+  while (session.running && !session.stopRequested) {
+    const currentDigits = totalDigitsReceived.get(symbol) ?? 0;
+    const currentPrices = totalPricesReceived.get(symbol) ?? 0;
+    const freshCount = isDigitContract
+      ? (currentDigits - startDigits)
+      : (currentPrices - startPrices);
+
+    if (freshCount >= targetFresh) {
+      return true;
+    }
+
+    session.message = "Analysing fresh window…";
+    broadcast();
+    await sleep(250);
+  }
+  return false;
+}
+
+// ── Contract Analysis Profiles ────────────────────────────────────────────────
+
+export function getContractProfile(
+  contractType: SpeedContractType,
+  barrier?: number,
+): ContractProfile {
+  const theoretical = theoreticalWinRate(contractType, barrier);
+
+  if (theoretical <= 0.20) {
+    // RARE_EVENT: theoretical <= 0.20 (MATCH, OVER 7-8, UNDER 1-2)
+    return {
+      profile: "RARE_EVENT",
+      theoretical,
+      minWindowShort: 50,
+      edgeDenominator: 0.08,
+      requiredScore: 64,
+      requiredEv: 0.045,
+      markovWeight: 0.50,
+      empiricalWeight: 0.20,
+      momentumWeight: 0.10,
+      timingWeight: 0.20,
+    };
+  } else if (theoretical <= 0.40) {
+    // LOW_PROB: 0.20 < theoretical <= 0.40 (OVER 5-6, UNDER 3-4)
+    return {
+      profile: "LOW_PROB",
+      theoretical,
+      minWindowShort: 25,
+      edgeDenominator: 0.12,
+      requiredScore: 62,
+      requiredEv: 0.030,
+      markovWeight: 0.40,
+      empiricalWeight: 0.30,
+      momentumWeight: 0.15,
+      timingWeight: 0.15,
+    };
+  } else if (theoretical < 0.70) {
+    // MID_PROB: 0.40 < theoretical < 0.70 (OVER 3-4, UNDER 5-6, EVEN, ODD, CALL, PUT)
+    return {
+      profile: "MID_PROB",
+      theoretical,
+      minWindowShort: 15,
+      edgeDenominator: 0.15,
+      requiredScore: 60,
+      requiredEv: 0.020,
+      markovWeight: 0.35,
+      empiricalWeight: 0.30,
+      momentumWeight: 0.20,
+      timingWeight: 0.15,
+    };
+  } else {
+    // HIGH_PROB: theoretical >= 0.70 (OVER 1-2, UNDER 7-8, DIGITDIFF)
+    return {
+      profile: "HIGH_PROB",
+      theoretical,
+      minWindowShort: 15,
+      edgeDenominator: 0.12,
+      requiredScore: 60,
+      requiredEv: 0.018,
+      markovWeight: 0.20,
+      empiricalWeight: 0.25,
+      momentumWeight: 0.20,
+      timingWeight: 0.35,
+    };
+  }
+}
+
 // ── Mathematical & Statistical Subsystems ─────────────────────────────────────
 
-/**
- * Digit frequency histogram (0–9) over a tick buffer.
- */
 function digitFrequency(digits: number[]): number[] {
   const counts = Array(10).fill(0);
   for (const d of digits) if (d >= 0 && d <= 9) counts[d]++;
@@ -202,10 +321,6 @@ function digitFrequency(digits: number[]): number[] {
   return counts.map(c => c / n);
 }
 
-/**
- * 1st-Order Laplace-Smoothed Markov Chain Transitions.
- * P(D_t = 0..9 | D_{t-1} = last)
- */
 function markovNextProb(digits: number[]): number[] {
   if (digits.length < 2) return Array(10).fill(0.1);
   const last = digits[digits.length - 1];
@@ -219,10 +334,6 @@ function markovNextProb(digits: number[]): number[] {
   return row.map(v => (v + 1) / (total + 10));
 }
 
-/**
- * 2nd-Order Bayesian Markov Transitions.
- * P(D_t = 0..9 | D_{t-1} = d_{n-1}, D_{t-2} = d_{n-2})
- */
 function markov2ndOrderNextProb(digits: number[]): { probs: number[]; sampleCount: number } {
   if (digits.length < 3) return { probs: Array(10).fill(0.1), sampleCount: 0 };
   const prev1 = digits[digits.length - 2];
@@ -247,31 +358,19 @@ function markov2ndOrderNextProb(digits: number[]): { probs: number[]; sampleCoun
   return { probs, sampleCount: total };
 }
 
-/**
- * Bayesian Combined Markov Posterior (1st + 2nd Order Synthesis)
- */
 function bayesianMarkovProb(digits: number[]): number[] {
   const p1 = markovNextProb(digits);
   const p2Data = markov2ndOrderNextProb(digits);
-  // Dynamic credibility weighting: 2nd-order weight scales with pair sample size
   const w2 = Math.min(0.60, p2Data.sampleCount * 0.15);
   const w1 = 1 - w2;
   return p1.map((val, idx) => val * w1 + p2Data.probs[idx] * w2);
 }
 
-/**
- * Specific Bayesian Markov Transition to Target Digit (for MATCH / DIFF)
- */
 function bayesianMarkovToTarget(digits: number[], targetDigit: number): number {
   const probs = bayesianMarkovProb(digits);
   return probs[targetDigit] ?? 0.1;
 }
 
-/**
- * Shannon Information Entropy Filter (Noise Gating & Structural Asymmetry)
- * Evaluates whether digits are behaving as pure chaotic white noise (H ≈ 3.32 bits)
- * or showing structured clustering / statistical bias (H ≤ 3.12 bits).
- */
 export interface ShannonEntropyResult {
   bits: number;
   ratio: number;
@@ -295,16 +394,16 @@ export function computeShannonEntropy(digits: number[], window = 50): ShannonEnt
       h -= p * Math.log2(p);
     }
   }
-  const maxH = Math.log2(10); // ~3.321928 bits
+  const maxH = Math.log2(10);
   const ratio = h / maxH;
   const isWhiteNoise = h >= ENTROPY_WHITE_NOISE_LIMIT;
   const isStructured = h <= 3.12;
 
   let bonus = 0;
   if (isWhiteNoise) {
-    bonus = -12; // Penalise chaotic white noise
+    bonus = -12;
   } else if (isStructured) {
-    bonus = Math.min(15, Math.round((3.15 - h) * 50)); // Reward structured patterns
+    bonus = Math.min(15, Math.round((3.15 - h) * 50));
   } else {
     bonus = Math.round((3.22 - h) * 20);
   }
@@ -318,9 +417,6 @@ export function computeShannonEntropy(digits: number[], window = 50): ShannonEnt
   };
 }
 
-/**
- * Streak Against Length: count consecutive unbroken ticks against condition
- */
 function streakAgainstLength(
   digits: number[],
   contractType: SpeedContractType,
@@ -345,9 +441,6 @@ function streakAgainstLength(
   return count;
 }
 
-/**
- * Geometric Run-Length Hazard Rate & Streak Fatigue Analysis
- */
 function calculateStreakFatigue(
   digits: number[],
   contractType: SpeedContractType,
@@ -356,7 +449,6 @@ function calculateStreakFatigue(
   const k = streakAgainstLength(digits, contractType, barrier);
   if (k === 0) return { streakAgainst: 0, fatigueScore: 0, hazardBonus: 0, isInflection: false };
 
-  // Calculate empirical streak lengths in buffer
   let histStreak = 0;
   const streakLengths: number[] = [];
   for (let i = 0; i < digits.length; i++) {
@@ -389,9 +481,6 @@ function calculateStreakFatigue(
   return { streakAgainst: k, fatigueScore, hazardBonus, isInflection };
 }
 
-/**
- * Tick gap analysis: ticks since specific digit appeared
- */
 function digitGapSinceLast(digits: number[], targetDigit: number): number {
   for (let i = digits.length - 1; i >= 0; i--) {
     if (digits[i] === targetDigit) return digits.length - 1 - i;
@@ -399,9 +488,13 @@ function digitGapSinceLast(digits: number[], targetDigit: number): number {
   return digits.length;
 }
 
-/**
- * Discrete Lag-1 Autocorrelation (ρ₁) & Micro-Tick Kinematics (for Rise/Fall)
- */
+function digitGapSinceLastSet(digits: number[], targetSet: number[]): number {
+  for (let i = digits.length - 1; i >= 0; i--) {
+    if (targetSet.includes(digits[i])) return digits.length - 1 - i;
+  }
+  return digits.length;
+}
+
 function computePriceKinematics(
   prices: number[],
   direction: "CALL" | "PUT",
@@ -447,7 +540,7 @@ function computePriceKinematics(
     if (consecutiveAdverse >= 2) bonus = 12;
     else bonus = -5;
   } else {
-    bonus = -8; // Chop / Dead zone penalty
+    bonus = -8;
   }
 
   return {
@@ -460,9 +553,6 @@ function computePriceKinematics(
   };
 }
 
-/**
- * Short-term hit rate within window
- */
 function momentumRate(
   digits: number[],
   contractType: SpeedContractType,
@@ -486,9 +576,6 @@ function momentumRate(
   return hits / recent.length;
 }
 
-/**
- * Entry timing score (0–100) based on recent sub-ticks
- */
 function entryTimingScore(
   digits: number[],
   prices: number[],
@@ -523,9 +610,6 @@ function entryTimingScore(
   return ([20, 50, 80, 100][against]) ?? 50;
 }
 
-/**
- * Theoretical baseline win rate
- */
 function theoreticalWinRate(contractType: SpeedContractType, barrier: number | undefined): number {
   switch (contractType) {
     case "DIGITOVER":  return barrier !== undefined ? (9 - barrier) / 10 : 0.5;
@@ -540,25 +624,19 @@ function theoreticalWinRate(contractType: SpeedContractType, barrier: number | u
   }
 }
 
-/**
- * Pick optimal barrier for DIGITMATCH
- */
 function pickBestMatchBarrier(digits: number[]): number {
   const bayes = bayesianMarkovProb(digits);
   const freq30 = digitFrequency(digits.slice(-30));
   const hotScore = bayes.map((m, i) => {
     const gap = digitGapSinceLast(digits, i);
-    const gapBonus = gap >= 3 && gap <= 9 ? 0.15
-                   : gap >= 10 && gap <= 18 ? 0.05
+    const gapBonus = gap >= 4 && gap <= 9 ? 0.15
+                   : gap >= 3 && gap <= 12 ? 0.05
                    : gap < 3 ? -0.10 : -0.04;
     return m * 0.55 + (freq30[i] ?? 0) * 0.25 + gapBonus;
   });
   return hotScore.indexOf(Math.max(...hotScore));
 }
 
-/**
- * Pick top N candidates for DIGITMATCH in Sniper Recovery
- */
 function pickTopMatchBarriers(digits: number[], topN = 3): number[] {
   if (digits.length < 15) return [pickBestMatchBarrier(digits)];
   const bayes = bayesianMarkovProb(digits);
@@ -576,9 +654,6 @@ function pickTopMatchBarriers(digits: number[], topN = 3): number[] {
     .map(s => s.digit);
 }
 
-/**
- * Pick optimal barrier for DIGITDIFF (Cold Dormancy Index)
- */
 function pickBestDiffBarrier(digits: number[]): number {
   const bayes = bayesianMarkovProb(digits);
   const freq50 = digitFrequency(digits.slice(-50));
@@ -590,21 +665,14 @@ function pickBestDiffBarrier(digits: number[]): number {
   return coldScore.indexOf(Math.min(...coldScore));
 }
 
-/**
- * Extract OVER and UNDER barriers from the barriers array
- */
 function extractBarriers(barriers: number[]): { overBarrier: number; underBarrier: number } {
   const overBarrier  = barriers.length > 0 ? barriers[0] : 1;
   const underBarrier = barriers.length > 1 ? barriers[1] : 8;
   return { overBarrier, underBarrier };
 }
 
-// ── Quantum Scorer (PrecisionAI v4) ──────────────────────────────────────────
+// ── Quantum Scorer (PrecisionAI v4 — Profile-Aware) ──────────────────────────
 
-/**
- * PrecisionAI v4 Quantum Market Scorer
- * Integrates 2nd-Order Bayesian Markov + Shannon Entropy + Geometric Hazard Fatigue + Kinematics + EV Gating
- */
 function precisionScore(
   symbol: string,
   displayName: string,
@@ -612,19 +680,24 @@ function precisionScore(
   barrier: number | undefined,
   digits: number[],
   prices: number[],
-  minDigitSamples = 25,
+  minDigitSamples?: number,
 ): MarketScore | null {
-  if (contractType.startsWith("DIGIT") && digits.length < minDigitSamples) return null;
+  const profile = getContractProfile(contractType, barrier);
+  const requiredMinSamples = minDigitSamples ?? profile.minWindowShort;
+
+  if (contractType.startsWith("DIGIT") && digits.length < requiredMinSamples) return null;
   if ((contractType === "CALL" || contractType === "PUT") && prices.length < 15) return null;
 
-  const winLen        = Math.min(50, digits.length);
-  const freq50        = digitFrequency(digits.slice(-winLen));
-  const bayesMarkov   = bayesianMarkovProb(digits);
-  const momentum      = momentumRate(digits, contractType, barrier, 15);
-  const timing        = entryTimingScore(digits, prices, contractType, barrier);
-  const mom30         = momentumRate(digits, contractType, barrier, Math.min(30, digits.length));
-  const stabilityRaw  = Math.max(0, 1 - Math.abs(mom30 - momentum) / 0.30);
-  const entropy       = computeShannonEntropy(digits, 50);
+  const empiricalWinLen = profile.profile === "RARE_EVENT" ? Math.min(100, digits.length) : Math.min(50, digits.length);
+  const freqWin = digitFrequency(digits.slice(-empiricalWinLen));
+  const bayesMarkov = bayesianMarkovProb(digits);
+  const p2Data = markov2ndOrderNextProb(digits);
+
+  const momentum = momentumRate(digits, contractType, barrier, 15);
+  const timing = entryTimingScore(digits, prices, contractType, barrier);
+  const mom30 = momentumRate(digits, contractType, barrier, Math.min(30, digits.length));
+  const stabilityRaw = Math.max(0, 1 - Math.abs(mom30 - momentum) / 0.30);
+  const entropy = computeShannonEntropy(digits, 50);
 
   let empirical: number;
   let markovWin: number;
@@ -634,113 +707,144 @@ function precisionScore(
   switch (contractType) {
     case "DIGITOVER": {
       if (barrier === undefined) return null;
-      empirical = freq50.slice(barrier + 1).reduce((a, b) => a + b, 0);
+      empirical = freqWin.slice(barrier + 1).reduce((a, b) => a + b, 0);
       markovWin = bayesMarkov.slice(barrier + 1).reduce((a, b) => a + b, 0);
-      payout    = OVER_PAYOUTS[barrier] ?? OVER_PAYOUTS[4];
+      payout = OVER_PAYOUTS[barrier] ?? OVER_PAYOUTS[4];
       const fatigue = calculateStreakFatigue(digits, "DIGITOVER", barrier);
       signalBonus = fatigue.hazardBonus;
+
+      if (profile.profile === "RARE_EVENT") {
+        const targetSet = barrier === 7 ? [8, 9] : [9];
+        const gap = digitGapSinceLastSet(digits, targetSet);
+        if (gap >= 3 && gap <= 8) signalBonus += 12;
+        else if (gap < 2) signalBonus -= 15;
+        else if (gap > 12) signalBonus -= 10;
+
+        if (p2Data.sampleCount < 3) signalBonus -= 15;
+        if (markovWin < 1.3 * profile.theoretical) signalBonus -= 20;
+      }
       break;
     }
+
     case "DIGITUNDER": {
       if (barrier === undefined) return null;
-      empirical = freq50.slice(0, barrier).reduce((a, b) => a + b, 0);
+      empirical = freqWin.slice(0, barrier).reduce((a, b) => a + b, 0);
       markovWin = bayesMarkov.slice(0, barrier).reduce((a, b) => a + b, 0);
-      payout    = UNDER_PAYOUTS[barrier] ?? UNDER_PAYOUTS[5];
+      payout = UNDER_PAYOUTS[barrier] ?? UNDER_PAYOUTS[5];
       const fatigue = calculateStreakFatigue(digits, "DIGITUNDER", barrier);
       signalBonus = fatigue.hazardBonus;
+
+      if (profile.profile === "RARE_EVENT") {
+        const targetSet = barrier === 1 ? [0] : [0, 1];
+        const gap = digitGapSinceLastSet(digits, targetSet);
+        if (gap >= 3 && gap <= 8) signalBonus += 12;
+        else if (gap < 2) signalBonus -= 15;
+        else if (gap > 12) signalBonus -= 10;
+
+        if (p2Data.sampleCount < 3) signalBonus -= 15;
+        if (markovWin < 1.3 * profile.theoretical) signalBonus -= 20;
+      }
       break;
     }
+
     case "DIGITEVEN": {
-      empirical = [0, 2, 4, 6, 8].reduce((s, d) => s + (freq50[d] ?? 0), 0);
+      empirical = [0, 2, 4, 6, 8].reduce((s, d) => s + (freqWin[d] ?? 0), 0);
       markovWin = [0, 2, 4, 6, 8].reduce((s, d) => s + (bayesMarkov[d] ?? 0), 0);
-      payout    = EVEN_ODD_PAYOUT;
+      payout = EVEN_ODD_PAYOUT;
       const fatigue = calculateStreakFatigue(digits, "DIGITEVEN", undefined);
       signalBonus = fatigue.hazardBonus;
       break;
     }
+
     case "DIGITODD": {
-      empirical = [1, 3, 5, 7, 9].reduce((s, d) => s + (freq50[d] ?? 0), 0);
+      empirical = [1, 3, 5, 7, 9].reduce((s, d) => s + (freqWin[d] ?? 0), 0);
       markovWin = [1, 3, 5, 7, 9].reduce((s, d) => s + (bayesMarkov[d] ?? 0), 0);
-      payout    = EVEN_ODD_PAYOUT;
+      payout = EVEN_ODD_PAYOUT;
       const fatigue = calculateStreakFatigue(digits, "DIGITODD", undefined);
       signalBonus = fatigue.hazardBonus;
       break;
     }
+
     case "DIGITMATCH": {
       if (barrier === undefined) return null;
-      empirical = freq50[barrier] ?? 0.1;
+      empirical = freqWin[barrier] ?? 0.1;
       markovWin = bayesianMarkovToTarget(digits, barrier);
-      payout    = MATCH_PAYOUT;
+      payout = MATCH_PAYOUT;
+
       const matchGap = digitGapSinceLast(digits, barrier);
-      signalBonus = matchGap >= 3 && matchGap <= 9 ? 12
-                  : matchGap >= 10 && matchGap <= 18 ? 4
-                  : matchGap < 3 ? -10 : -5;
+      if (matchGap >= 4 && matchGap <= 9) signalBonus += 14;
+      else if (matchGap < 2) signalBonus -= 18;
+      else if (matchGap > 12) signalBonus -= 12;
+      else signalBonus -= 5;
+
+      if (p2Data.sampleCount < 3) signalBonus -= 15;
+      if (markovWin < 0.13) signalBonus -= 25;
       break;
     }
+
     case "DIGITDIFF": {
       if (barrier === undefined) return null;
-      empirical = 1 - (freq50[barrier] ?? 0.1);
+      empirical = 1 - (freqWin[barrier] ?? 0.1);
       markovWin = 1 - bayesianMarkovToTarget(digits, barrier);
-      payout    = DIFF_PAYOUT;
+      payout = DIFF_PAYOUT;
+
       const diffGap = digitGapSinceLast(digits, barrier);
-      signalBonus = diffGap >= 10 ? 12 : diffGap >= 6 ? 6 : diffGap <= 1 ? -12 : -4;
+      if (diffGap >= 10) signalBonus += 12;
+      else if (diffGap >= 6) signalBonus += 6;
+      else if (diffGap <= 1) signalBonus -= 15;
+      else signalBonus -= 4;
       break;
     }
+
     case "CALL": {
       let ups = 0;
       for (let i = 1; i < prices.length; i++) if (prices[i] > prices[i - 1]) ups++;
       empirical = ups / Math.max(1, prices.length - 1);
       markovWin = empirical;
-      payout    = RISE_FALL_PAYOUT;
-      const kinematics = computePriceKinematics(prices, "CALL", 15);
-      signalBonus = kinematics.signalBonus;
+      payout = RISE_FALL_PAYOUT;
+
+      const k15 = computePriceKinematics(prices, "CALL", 15);
+      const k30 = computePriceKinematics(prices, "CALL", 30);
+      const k60 = computePriceKinematics(prices, "CALL", 60);
+
+      signalBonus = k15.signalBonus;
+      if (k60.velocity < 0 && k60.isPersistent) signalBonus -= 15;
+      if (k15.velocity > 0 && k30.velocity > 0 && k60.velocity > 0) signalBonus += 6;
       break;
     }
+
     case "PUT": {
       let downs = 0;
       for (let i = 1; i < prices.length; i++) if (prices[i] < prices[i - 1]) downs++;
       empirical = downs / Math.max(1, prices.length - 1);
       markovWin = empirical;
-      payout    = RISE_FALL_PAYOUT;
-      const kinematics = computePriceKinematics(prices, "PUT", 15);
-      signalBonus = kinematics.signalBonus;
+      payout = RISE_FALL_PAYOUT;
+
+      const k15 = computePriceKinematics(prices, "PUT", 15);
+      const k30 = computePriceKinematics(prices, "PUT", 30);
+      const k60 = computePriceKinematics(prices, "PUT", 60);
+
+      signalBonus = k15.signalBonus;
+      if (k60.velocity > 0 && k60.isPersistent) signalBonus -= 15;
+      if (k15.velocity < 0 && k30.velocity < 0 && k60.velocity < 0) signalBonus += 6;
       break;
     }
+
     default: return null;
   }
 
-  // ── Bayesian Synthesis of Win Probability ─────────────────────────────────
-  let winP: number;
-  switch (contractType) {
-    case "DIGITOVER":
-    case "DIGITUNDER":
-      winP = empirical * 0.35 + markovWin * 0.40 + momentum * 0.25;
-      break;
-    case "DIGITEVEN":
-    case "DIGITODD":
-      winP = empirical * 0.35 + momentum * 0.35 + markovWin * 0.30;
-      break;
-    case "DIGITMATCH":
-      winP = markovWin * 0.60 + empirical * 0.25 + momentum * 0.15;
-      break;
-    case "DIGITDIFF":
-      winP = empirical * 0.40 + markovWin * 0.45 + momentum * 0.15;
-      break;
-    case "CALL":
-    case "PUT":
-      winP = momentum * 0.50 + empirical * 0.30 + markovWin * 0.20;
-      break;
-    default:
-      winP = empirical * 0.50 + markovWin * 0.25 + momentum * 0.25;
-  }
+  const timingRatio = timing / 100;
+  const winP =
+    markovWin * profile.markovWeight +
+    empirical * profile.empiricalWeight +
+    momentum * profile.momentumWeight +
+    timingRatio * profile.timingWeight;
 
-  const theoretical    = theoreticalWinRate(contractType, barrier);
-  const edgeNorm       = Math.max(-1, Math.min(1, (winP - theoretical) / 0.15));
-  const timingBonus    = (timing - 50) * 0.20;       // ±10 pts
-  const stabilityBonus = (stabilityRaw - 0.5) * 10;  // ±5 pts
-  const entropyBonus   = entropy.bonus;              // ±15 pts
+  const edgeNorm = Math.max(-1, Math.min(1, (winP - profile.theoretical) / profile.edgeDenominator));
+  const timingBonus = (timing - 50) * 0.20;
+  const stabilityBonus = (stabilityRaw - 0.5) * 10;
+  const entropyBonus = entropy.bonus;
 
-  // Calculate Net Expected Value
   const ev = winP * (payout - 1) - (1 - winP);
   const evBonus = ev >= 0.05 ? 8 : ev >= MIN_NORMAL_EV ? 3 : ev < 0 ? -12 : 0;
 
@@ -752,9 +856,7 @@ function precisionScore(
     `${(winP * 100).toFixed(1)}% win-p`,
     `EV ${ev >= 0 ? "+" : ""}${(ev * 100).toFixed(1)}%`,
     `H ${entropy.bits}b`,
-    `timing ${timing.toFixed(0)}`,
-    signalBonus !== 0 ? `sig${signalBonus >= 0 ? "+" : ""}${signalBonus}` : "",
-  ].filter(Boolean).join(" · ");
+  ].join(" · ");
 
   return {
     symbol,
@@ -772,7 +874,7 @@ function precisionScore(
 }
 
 /**
- * Green-Light Sub-Tick Entry Validator
+ * Green-Light Barrier-Aware Sub-Tick Entry Validator
  */
 function isGreenLight(
   digits: number[],
@@ -780,56 +882,128 @@ function isGreenLight(
   contractType: SpeedContractType,
   barrier: number | undefined,
 ): boolean {
+  if (digits.length < 10 && contractType.startsWith("DIGIT")) return false;
+  if (prices.length < 5 && (contractType === "CALL" || contractType === "PUT")) return false;
+
   switch (contractType) {
     case "DIGITOVER": {
-      if (barrier === undefined) return true;
+      if (barrier === undefined) return false;
       const last5 = digits.slice(-5);
       const reversalCount = last5.filter(d => d <= barrier).length;
-      const streak = streakAgainstLength(digits, "DIGITOVER", barrier);
-      const highMomentum = momentumRate(digits, "DIGITOVER", barrier, 10) >= 0.65;
-      return reversalCount >= 2 || streak >= 2 || highMomentum;
+      const streakAgainst = streakAgainstLength(digits, "DIGITOVER", barrier);
+
+      if (barrier === 8) {
+        const gap = digitGapSinceLast(digits, 9);
+        const post = bayesianMarkovToTarget(digits, 9);
+        const lastDigit = digits[digits.length - 1];
+        return gap >= 4 && gap <= 9 && post >= 0.13 && lastDigit !== 9;
+      } else if (barrier === 7) {
+        const gap = digitGapSinceLastSet(digits, [8, 9]);
+        const post = bayesianMarkovToTarget(digits, 8) + bayesianMarkovToTarget(digits, 9);
+        return gap >= 3 && gap <= 8 && post >= 0.26;
+      } else if (barrier === 5 || barrier === 6) {
+        const targetSet = Array.from({ length: 9 - barrier }, (_, i) => barrier + 1 + i);
+        const post = targetSet.reduce((s, d) => s + bayesianMarkovToTarget(digits, d), 0);
+        return streakAgainst >= 3 || (reversalCount >= 3 && post > 0.45);
+      } else if (barrier === 3 || barrier === 4) {
+        const mom10 = momentumRate(digits, "DIGITOVER", barrier, 10);
+        const mom20 = momentumRate(digits, "DIGITOVER", barrier, Math.min(20, digits.length));
+        return streakAgainst >= 2 || (reversalCount >= 2 && mom10 > mom20);
+      } else {
+        return reversalCount >= 2 || streakAgainst >= 2;
+      }
     }
+
     case "DIGITUNDER": {
-      if (barrier === undefined) return true;
+      if (barrier === undefined) return false;
       const last5 = digits.slice(-5);
       const reversalCount = last5.filter(d => d >= barrier).length;
-      const streak = streakAgainstLength(digits, "DIGITUNDER", barrier);
-      const highMomentum = momentumRate(digits, "DIGITUNDER", barrier, 10) >= 0.65;
-      return reversalCount >= 2 || streak >= 2 || highMomentum;
+      const streakAgainst = streakAgainstLength(digits, "DIGITUNDER", barrier);
+
+      if (barrier === 1) {
+        const gap = digitGapSinceLast(digits, 0);
+        const post = bayesianMarkovToTarget(digits, 0);
+        const lastDigit = digits[digits.length - 1];
+        return gap >= 4 && gap <= 9 && post >= 0.13 && lastDigit !== 0;
+      } else if (barrier === 2) {
+        const gap = digitGapSinceLastSet(digits, [0, 1]);
+        const post = bayesianMarkovToTarget(digits, 0) + bayesianMarkovToTarget(digits, 1);
+        return gap >= 3 && gap <= 8 && post >= 0.26;
+      } else if (barrier === 3 || barrier === 4) {
+        const targetSet = Array.from({ length: barrier }, (_, i) => i);
+        const post = targetSet.reduce((s, d) => s + bayesianMarkovToTarget(digits, d), 0);
+        return streakAgainst >= 3 || (reversalCount >= 3 && post > 0.45);
+      } else if (barrier === 5 || barrier === 6) {
+        const mom10 = momentumRate(digits, "DIGITUNDER", barrier, 10);
+        const mom20 = momentumRate(digits, "DIGITUNDER", barrier, Math.min(20, digits.length));
+        return streakAgainst >= 2 || (reversalCount >= 2 && mom10 > mom20);
+      } else {
+        return reversalCount >= 2 || streakAgainst >= 2;
+      }
     }
+
     case "DIGITEVEN": {
       const oddStreak = streakAgainstLength(digits, "DIGITEVEN", undefined);
-      const highFreq  = momentumRate(digits, "DIGITEVEN", undefined, 10) >= 0.60;
-      return oddStreak >= 1 || highFreq;
+      const mom10 = momentumRate(digits, "DIGITEVEN", undefined, 10);
+      const bayes = bayesianMarkovProb(digits);
+      const evenPost = [0, 2, 4, 6, 8].reduce((s, d) => s + (bayes[d] ?? 0), 0);
+      return oddStreak >= 2 || (mom10 >= 0.58 && evenPost > 0.55);
     }
+
     case "DIGITODD": {
       const evenStreak = streakAgainstLength(digits, "DIGITODD", undefined);
-      const highFreq   = momentumRate(digits, "DIGITODD", undefined, 10) >= 0.60;
-      return evenStreak >= 1 || highFreq;
+      const mom10 = momentumRate(digits, "DIGITODD", undefined, 10);
+      const bayes = bayesianMarkovProb(digits);
+      const oddPost = [1, 3, 5, 7, 9].reduce((s, d) => s + (bayes[d] ?? 0), 0);
+      return evenStreak >= 2 || (mom10 >= 0.58 && oddPost > 0.55);
     }
+
     case "CALL": {
-      if (prices.length < 3) return true;
-      const k = computePriceKinematics(prices, "CALL", 12);
-      const lastUp = prices[prices.length - 1] > prices[prices.length - 2];
-      return (lastUp && k.isPersistent) || (k.isMeanReverting && k.signalBonus > 0);
+      if (prices.length < 15) return false;
+      const k15 = computePriceKinematics(prices, "CALL", 15);
+      const k30 = computePriceKinematics(prices, "CALL", 30);
+      const k60 = computePriceKinematics(prices, "CALL", 60);
+
+      if (k60.velocity < 0 && k60.isPersistent) return false;
+
+      const bothUp = k15.velocity > 0 && k30.velocity > 0;
+      const bothPersistent = k15.isPersistent && k30.isPersistent;
+      const meanRevOk = (k15.isMeanReverting || k30.isMeanReverting) && k30.lag1Autocorr < -0.20 && k15.signalBonus > 0;
+
+      return (bothUp && (bothPersistent || k15.signalBonus > 0)) || meanRevOk;
     }
+
     case "PUT": {
-      if (prices.length < 3) return true;
-      const k = computePriceKinematics(prices, "PUT", 12);
-      const lastDown = prices[prices.length - 1] < prices[prices.length - 2];
-      return (lastDown && k.isPersistent) || (k.isMeanReverting && k.signalBonus > 0);
+      if (prices.length < 15) return false;
+      const k15 = computePriceKinematics(prices, "PUT", 15);
+      const k30 = computePriceKinematics(prices, "PUT", 30);
+      const k60 = computePriceKinematics(prices, "PUT", 60);
+
+      if (k60.velocity > 0 && k60.isPersistent) return false;
+
+      const bothDown = k15.velocity < 0 && k30.velocity < 0;
+      const bothPersistent = k15.isPersistent && k30.isPersistent;
+      const meanRevOk = (k15.isMeanReverting || k30.isMeanReverting) && k30.lag1Autocorr < -0.20 && k15.signalBonus > 0;
+
+      return (bothDown && (bothPersistent || k15.signalBonus > 0)) || meanRevOk;
     }
+
     case "DIGITMATCH": {
-      if (barrier === undefined) return true;
+      if (barrier === undefined) return false;
       const gap = digitGapSinceLast(digits, barrier);
-      const bayesProb = bayesianMarkovToTarget(digits, barrier);
-      return (gap >= 3 && gap <= 10) || bayesProb >= 0.15;
+      const post = bayesianMarkovToTarget(digits, barrier);
+      const lastDigit = digits[digits.length - 1];
+      return gap >= 4 && gap <= 9 && post >= 0.13 && lastDigit !== barrier;
     }
+
     case "DIGITDIFF": {
-      if (barrier === undefined) return true;
-      return digitGapSinceLast(digits, barrier) >= 5;
+      if (barrier === undefined) return false;
+      const gap = digitGapSinceLast(digits, barrier);
+      const post = bayesianMarkovToTarget(digits, barrier);
+      return gap >= 5 && post < 0.10;
     }
-    default: return true;
+
+    default: return false;
   }
 }
 
@@ -850,7 +1024,6 @@ function deepSniperBonus(
       const mean = d.reduce((a, b) => a + b, 0) / d.length;
       const variance = d.reduce((s, v) => s + (v - mean) ** 2, 0) / d.length;
       const z = (mean - 4.5) / (Math.sqrt(variance / d.length) || 0.1);
-      // Extreme negative Z = digits running low = OVER sniper edge
       const zB = z < -1.85 ? 14 : z < -1.4 ? 8 : z < -1.0 ? 4 : z > 1.5 ? -12 : z > 1.0 ? -6 : 0;
       const d20 = digits.slice(-20);
       const aboveRate = d20.length > 0 ? d20.filter(v => v > barrier).length / d20.length : 0;
@@ -925,38 +1098,31 @@ function recoveryGateRequirements(
   contractType: SpeedContractType,
   barrier: number | undefined,
 ): { requiredScore: number; requiredEv: number } {
-  const theoretical = theoreticalWinRate(contractType, barrier);
-
-  if (theoretical >= 0.70) {
-    return { requiredScore: 60, requiredEv: 0.018 };
-  }
-  if (theoretical <= 0.30) {
-    return { requiredScore: 62, requiredEv: 0.035 };
-  }
-  return { requiredScore: 60, requiredEv: 0.020 };
+  const profile = getContractProfile(contractType, barrier);
+  return {
+    requiredScore: Math.min(68, profile.requiredScore),
+    requiredEv: Math.min(0.06, profile.requiredEv),
+  };
 }
 
 /**
- * FastRecoveryGate v4 (Sniper Protocol)
- * 4-Window Analysis (15t, 30t, 60t, 100t) with Window Concurrence + Anti-Pattern Decaying Penalty
+ * FastRecoveryGate v4 (Sniper Protocol — Fresh Analysis per Attempt)
  */
 function fastRecoveryGate(
   symbol: string,
   displayName: string,
   contractTypes: SpeedContractType[],
   barriers: number[],
-  _consecutiveLosses: number,
+  consecutiveLosses: number,
   recentRecoveryTrades: RecoveryTradeRecord[],
+  excludedPair?: { contractType: SpeedContractType; barrier?: number } | null,
+  nudgeActive = false,
 ): { winner: MarketScore; greenLight: boolean } | null {
   const { overBarrier, underBarrier } = extractBarriers(barriers);
 
   const digits100 = tickManager.getDigits(symbol, 100);
   const prices50  = tickManager.getTicks(symbol, 50);
   if (digits100.length < 25) return null;
-
-  const digits60 = digits100.slice(-60);
-  const digits30 = digits100.slice(-30);
-  const digits15 = digits100.slice(-15);
 
   // Anti-pattern decaying penalty map
   const penaltyMap = new Map<string, number>();
@@ -972,56 +1138,78 @@ function fastRecoveryGate(
     }
   }
 
-  // Expand candidates: MATCH gets top-3 barriers
+  // Expand candidates
   const expandedEntries: Array<{ ct: SpeedContractType; barrier: number | undefined }> = [];
   for (const ct of contractTypes) {
     if      (ct === "DIGITOVER")  { expandedEntries.push({ ct, barrier: overBarrier }); }
     else if (ct === "DIGITUNDER") { expandedEntries.push({ ct, barrier: underBarrier }); }
     else if (ct === "DIGITMATCH") {
-      for (const b of pickTopMatchBarriers(digits60, 3)) {
+      for (const b of pickTopMatchBarriers(digits100.slice(-60), 3)) {
         expandedEntries.push({ ct, barrier: b });
       }
     }
-    else if (ct === "DIGITDIFF")  { expandedEntries.push({ ct, barrier: pickBestDiffBarrier(digits60) }); }
+    else if (ct === "DIGITDIFF")  { expandedEntries.push({ ct, barrier: pickBestDiffBarrier(digits100.slice(-60)) }); }
     else                          { expandedEntries.push({ ct, barrier: undefined }); }
   }
 
   const candidates: (MarketScore & { greenLight: boolean })[] = [];
 
   for (const { ct, barrier } of expandedEntries) {
-    const r100 = precisionScore(symbol, displayName, ct, barrier, digits100, prices50);
-    const r60  = precisionScore(symbol, displayName, ct, barrier, digits60,  prices50);
-    const r30  = precisionScore(symbol, displayName, ct, barrier, digits30,  prices50);
-    const r15  = digits15.length >= 15
-      ? precisionScore(symbol, displayName, ct, barrier, digits15, prices50, 15)
-      : null;
-    if (!r60 || !r30 || !r15) continue;
+    // Single-attempt loser rotation check
+    const isExcludedPair =
+      excludedPair &&
+      excludedPair.contractType === ct &&
+      excludedPair.barrier === barrier;
 
-    const s100 = r100?.score ?? r60.score;
-    const s60  = r60.score;
-    const s30  = r30.score;
-    const s15  = r15.score;
+    if (isExcludedPair && expandedEntries.length > 1) {
+      continue;
+    }
 
-    // Moderate window concurrence: immediate and macro windows should align,
-    // while every active window must independently show a usable edge.
-    if (Math.abs(s15 - s60) > 25) continue;
-    if (s15 < 58 || s30 < 58 || s60 < 58) continue;
+    const profile = getContractProfile(ct, barrier);
+    const minWin = profile.minWindowShort;
 
-    // 4-Window Weighted Blend: Immediate(20%) + Short(30%) + Mid(35%) + Macro(15%)
-    const baseScore = Math.round((s15 * 0.20 + s30 * 0.30 + s60 * 0.35 + s100 * 0.15) * 10) / 10;
-    const sBonus    = deepSniperBonus(ct, barrier, digits60, prices50);
-    const penalty   = penaltyMap.get(`${ct}_${barrier ?? ""}`) ?? 0;
+    const digitsWindow = tickManager.getDigits(symbol, Math.max(minWin, 60));
+    if (digitsWindow.length < minWin && ct.startsWith("DIGIT")) continue;
 
-    const adjustedScore = baseScore + sBonus - penalty;
-    const { requiredScore, requiredEv } = recoveryGateRequirements(ct, barrier);
-    if (adjustedScore < requiredScore || r60.expectedValue < requiredEv) continue;
+    const rScored = precisionScore(symbol, displayName, ct, barrier, digitsWindow, prices50);
+    if (!rScored) continue;
 
-    const gl = isGreenLight(digits60, prices50, ct, barrier);
+    const entropy = computeShannonEntropy(digitsWindow, 50);
+    if (entropy.isWhiteNoise) continue;
+
+    // On 2nd consecutive recovery loss, require entropy.isStructured
+    if (consecutiveLosses >= 2 && !entropy.isStructured) continue;
+
+    let reqScore = profile.requiredScore;
+    let reqEv = profile.requiredEv;
+
+    // If only one pair configured and it was lost, apply +2 score, +0.005 EV penalty
+    if (isExcludedPair && expandedEntries.length <= 1) {
+      reqScore += 2;
+      reqEv += 0.005;
+    }
+
+    // Apply 7-cycle nudge if active
+    if (nudgeActive && !isExcludedPair) {
+      reqScore = Math.max(profile.requiredScore, reqScore - 2);
+      reqEv = Math.max(profile.requiredEv, reqEv - 0.003);
+    }
+
+    reqScore = Math.min(68, reqScore);
+    reqEv = Math.min(0.06, reqEv);
+
+    const penalty = penaltyMap.get(`${ct}_${barrier ?? ""}`) ?? 0;
+    const sBonus = deepSniperBonus(ct, barrier, digitsWindow, prices50);
+    const adjustedScore = rScored.score + sBonus - penalty;
+
+    if (adjustedScore < reqScore || rScored.expectedValue < reqEv) continue;
+
+    const gl = isGreenLight(digitsWindow, prices50, ct, barrier);
     candidates.push({
-      ...r60,
+      ...rScored,
       barrier,
       score: adjustedScore,
-      reason: `${r60.reason} | 4W ${s15.toFixed(0)}/${s30.toFixed(0)}/${s60.toFixed(0)}/${s100.toFixed(0)} d${sBonus >= 0 ? "+" : ""}${sBonus}${penalty > 0 ? ` p-${penalty}` : ""}`,
+      reason: rScored.reason,
       greenLight: gl,
     });
   }
@@ -1058,9 +1246,55 @@ async function waitForGreenLight(
   return false;
 }
 
+/**
+ * Re-validate trade parameters immediately prior to order submission
+ */
+function revalidateAtSubmission(
+  symbol: string,
+  contractType: SpeedContractType,
+  barrier: number | undefined,
+  scored: MarketScore,
+): { valid: boolean; reason?: string } {
+  const digits = tickManager.getDigits(symbol, 100);
+  const prices = tickManager.getTicks(symbol, 50);
+  const profile = getContractProfile(contractType, barrier);
+
+  const freshScored = precisionScore(symbol, scored.displayName, contractType, barrier, digits, prices);
+  if (!freshScored) return { valid: false, reason: "Timing shifted — re-analysing…" };
+
+  if (freshScored.score < profile.requiredScore || freshScored.expectedValue < profile.requiredEv) {
+    return { valid: false, reason: "Timing shifted — re-analysing…" };
+  }
+
+  if (!isGreenLight(digits, prices, contractType, barrier)) {
+    return { valid: false, reason: "Market structure changed — re-analysing…" };
+  }
+
+  const entropy = computeShannonEntropy(digits, 50);
+  if (entropy.isWhiteNoise) {
+    return { valid: false, reason: "Market structure changed — re-analysing…" };
+  }
+
+  if (profile.profile === "RARE_EVENT") {
+    if (contractType === "DIGITMATCH" && barrier !== undefined) {
+      const gap = digitGapSinceLast(digits, barrier);
+      if (gap < 2) return { valid: false, reason: "Timing shifted — re-analysing…" };
+    } else if (contractType === "DIGITOVER" && barrier !== undefined && barrier >= 7) {
+      const targetSet = barrier === 7 ? [8, 9] : [9];
+      const gap = digitGapSinceLastSet(digits, targetSet);
+      if (gap < 2) return { valid: false, reason: "Timing shifted — re-analysing…" };
+    } else if (contractType === "DIGITUNDER" && barrier !== undefined && barrier <= 2) {
+      const targetSet = barrier === 1 ? [0] : [0, 1];
+      const gap = digitGapSinceLastSet(digits, targetSet);
+      if (gap < 2) return { valid: false, reason: "Timing shifted — re-analysing…" };
+    }
+  }
+
+  return { valid: true };
+}
+
 // ── Manual Assist Evaluation (for manual trading) ─────────────────────────────
-// Uses same Quantum scorer but simplified to Ready/Wait for the user's exact
-// contract + barrier + duration. Hides technical metrics from the UI layer.
+
 export function evaluateManualAssist(
   symbol: string,
   contractType: SpeedContractType,
@@ -1071,72 +1305,43 @@ export function evaluateManualAssist(
   const prices = tickManager.getTicks(symbol, 50);
   const displayName = DERIV_MARKETS.find(m => m.symbol === symbol)?.displayName ?? symbol;
 
-  if (contractType.startsWith("DIGIT") && digits.length < 25) {
-    return { ready: false, score: 0, winProbability: 0, expectedValue: -1, reason: "Collecting digit data…", greenLight: false, entropyBits: 3.32 };
+  const profile = getContractProfile(contractType, barrier);
+  if (contractType.startsWith("DIGIT") && digits.length < profile.minWindowShort) {
+    return { ready: false, score: 0, winProbability: 0, expectedValue: -1, reason: "Waiting for accurate setup…", greenLight: false, entropyBits: 3.32 };
   }
   if ((contractType === "CALL" || contractType === "PUT") && prices.length < 15) {
-    return { ready: false, score: 0, winProbability: 0, expectedValue: -1, reason: "Collecting price data…", greenLight: false, entropyBits: 3.32 };
+    return { ready: false, score: 0, winProbability: 0, expectedValue: -1, reason: "Waiting for accurate setup…", greenLight: false, entropyBits: 3.32 };
   }
 
   const scored = precisionScore(symbol, displayName, contractType, barrier, digits, prices);
   if (!scored) {
-    return { ready: false, score: 0, winProbability: 0, expectedValue: -1, reason: "Insufficient data for this contract", greenLight: false, entropyBits: 3.32 };
+    return { ready: false, score: 0, winProbability: 0, expectedValue: -1, reason: "Waiting for accurate setup…", greenLight: false, entropyBits: 3.32 };
   }
 
   const greenLight = isGreenLight(digits, prices, contractType, barrier);
   const entropy = computeShannonEntropy(digits, 50);
 
-  // Duration-aware thresholds: 1 tick is noisiest, require higher quality
-  let requiredScore = 56;
-  let requiredEv = 0.015;
+  let requiredScore = profile.requiredScore;
+  let requiredEv = profile.requiredEv;
   if (duration === 1) {
-    requiredScore = 62;
-    requiredEv = 0.02;
-  } else if (duration >= 2 && duration <= 3) {
-    requiredScore = 58;
-    requiredEv = 0.015;
-  } else if (duration >= 4 && duration <= 6) {
-    requiredScore = 54;
-    requiredEv = 0.012;
-  } else if (duration >= 7) {
-    requiredScore = 52;
-    requiredEv = 0.01;
+    requiredScore = Math.max(requiredScore, 62);
+    requiredEv = Math.max(requiredEv, 0.02);
   }
 
-  // White noise entropy gate: if digits are pure noise, force wait regardless of score
   if (entropy.isWhiteNoise) {
-    return { ready: false, score: scored.score, winProbability: scored.winProbability, expectedValue: scored.expectedValue, reason: "Market is choppy — waiting for clearer structure", greenLight, entropyBits: entropy.bits };
+    return { ready: false, score: scored.score, winProbability: scored.winProbability, expectedValue: scored.expectedValue, reason: "Waiting for accurate setup…", greenLight, entropyBits: entropy.bits };
   }
 
-  // Green light is critical for 1-tick, important for others but not absolute
   const greenOk = duration === 1 ? greenLight : (greenLight || scored.score >= 68);
-
   const ready = scored.score >= requiredScore && scored.expectedValue >= requiredEv && greenOk && !entropy.isWhiteNoise;
 
-  let reason: string;
-  if (!ready) {
-    if (scored.score < requiredScore) {
-      reason = `AI quality ${scored.score.toFixed(0)}/100 not yet optimal for ${duration} ticks — holding…`;
-    } else if (scored.expectedValue < requiredEv) {
-      reason = "No positive edge detected — waiting for better entry…";
-    } else if (!greenOk) {
-      reason = duration === 1 ? "Waiting for green-light tick — extreme precision needed for 1 tick…" : "Timing not yet optimal — hold for better entry…";
-    } else {
-      reason = "AI is analyzing timing — hold for better entry…";
-    }
-  } else {
-    reason = `Good timing — AI confirms ${contractType}${barrier !== undefined ? ` ${barrier}` : ""} for ${duration} ticks.`;
-  }
+  const reason = ready ? "Good timing — AI confirms setup." : "Waiting for accurate setup…";
 
   return { ready, score: scored.score, winProbability: scored.winProbability, expectedValue: scored.expectedValue, reason, greenLight, entropyBits: entropy.bits };
 }
 
-
 // ── Market Strategy Analysis ──────────────────────────────────────────────────
 
-/**
- * Score all markets for the given contract types and barriers (Three-window blend).
- */
 export async function analyzeMarketsForStrategy(
   contractTypes: SpeedContractType[],
   barriers: number[],
@@ -1147,52 +1352,38 @@ export async function analyzeMarketsForStrategy(
   for (const market of DERIV_MARKETS) {
     if (!market.digitEnabled && contractTypes.some(ct => ct.startsWith("DIGIT"))) continue;
 
-    const digits100 = tickManager.getDigits(market.symbol, 100);
-    const digits60  = digits100.slice(-60);
-    const digits30  = digits100.slice(-30);
-    const prices    = tickManager.getTicks(market.symbol, 50);
+    const digits = tickManager.getDigits(market.symbol, 100);
+    const prices = tickManager.getTicks(market.symbol, 50);
 
     for (const ct of contractTypes) {
       let barrier: number | undefined;
       if      (ct === "DIGITOVER")  barrier = overBarrier;
       else if (ct === "DIGITUNDER") barrier = underBarrier;
       else if (ct === "DIGITMATCH") {
-        if (digits60.length < 25) continue;
-        barrier = pickBestMatchBarrier(digits60);
+        if (digits.length < 25) continue;
+        barrier = pickBestMatchBarrier(digits);
       }
       else if (ct === "DIGITDIFF") {
-        if (digits60.length < 25) continue;
-        barrier = pickBestDiffBarrier(digits60);
+        if (digits.length < 25) continue;
+        barrier = pickBestDiffBarrier(digits);
       }
 
-      const r100 = precisionScore(market.symbol, market.displayName, ct, barrier, digits100, prices);
-      const r60  = precisionScore(market.symbol, market.displayName, ct, barrier, digits60,  prices);
-      const r30  = precisionScore(market.symbol, market.displayName, ct, barrier, digits30,  prices);
-      if (!r60) continue;
-
-      const combinedScore = Math.round(
-        ((r30?.score ?? r60.score) * 0.25 + r60.score * 0.50 + (r100?.score ?? r60.score) * 0.25) * 10,
-      ) / 10;
-      scored.push({ ...r60, score: combinedScore });
+      const rScored = precisionScore(market.symbol, market.displayName, ct, barrier, digits, prices);
+      if (rScored) scored.push(rScored);
     }
   }
 
   return scored.sort((a, b) => b.score - a.score);
 }
 
-/**
- * Score a single locked market across strategy contract types.
- */
 export async function scoreSingleMarket(
   symbol: string,
   displayName: string,
   contractTypes: SpeedContractType[],
   barriers: number[],
 ): Promise<MarketScore | null> {
-  const digits100 = tickManager.getDigits(symbol, 100);
-  const digits60  = digits100.slice(-60);
-  const digits30  = digits100.slice(-30);
-  const prices    = tickManager.getTicks(symbol, 50);
+  const digits = tickManager.getDigits(symbol, 100);
+  const prices = tickManager.getTicks(symbol, 50);
   const { overBarrier, underBarrier } = extractBarriers(barriers);
   const scored: MarketScore[] = [];
 
@@ -1200,26 +1391,16 @@ export async function scoreSingleMarket(
     let barrier: number | undefined;
     if      (ct === "DIGITOVER")  barrier = overBarrier;
     else if (ct === "DIGITUNDER") barrier = underBarrier;
-    else if (ct === "DIGITMATCH") barrier = pickBestMatchBarrier(digits60);
-    else if (ct === "DIGITDIFF")  barrier = pickBestDiffBarrier(digits60);
+    else if (ct === "DIGITMATCH") barrier = pickBestMatchBarrier(digits);
+    else if (ct === "DIGITDIFF")  barrier = pickBestDiffBarrier(digits);
 
-    const r100 = precisionScore(symbol, displayName, ct, barrier, digits100, prices);
-    const r60  = precisionScore(symbol, displayName, ct, barrier, digits60,  prices);
-    const r30  = precisionScore(symbol, displayName, ct, barrier, digits30,  prices);
-    if (!r60) continue;
-
-    const combinedScore = Math.round(
-      ((r30?.score ?? r60.score) * 0.25 + r60.score * 0.50 + (r100?.score ?? r60.score) * 0.25) * 10,
-    ) / 10;
-    scored.push({ ...r60, score: combinedScore });
+    const rScored = precisionScore(symbol, displayName, ct, barrier, digits, prices);
+    if (rScored) scored.push(rScored);
   }
 
   return scored.sort((a, b) => b.score - a.score)[0] ?? null;
 }
 
-/**
- * Comprehensive Market Scan: scores all 17 markets for normal and recovery modes.
- */
 export async function scanBestMarket(config: SpeedAIConfig): Promise<ScanResult> {
   const candidatesBySymbol = new Map<string, MarketScore>();
   const total = DERIV_MARKETS.length;
@@ -1277,8 +1458,8 @@ export async function scanBestMarket(config: SpeedAIConfig): Promise<ScanResult>
   const best     = allScored[0];
   const suitable = best.score >= SUITABLE_SCORE_THRESHOLD;
   const reason   = suitable
-    ? `${best.displayName} shows high statistical edge (score ${best.score.toFixed(0)}/100, H=${best.entropyBits}b)`
-    : `No market shows decisive edge yet — best was ${best.displayName} at ${best.score.toFixed(0)}/100`;
+    ? `${best.displayName} shows high statistical edge`
+    : `No market shows decisive edge yet — best was ${best.displayName}`;
 
   return { suitable, best, allScored, reason };
 }
@@ -1331,8 +1512,6 @@ function recordRecoveryOutcome(
       const profitAvailableForTarget = Math.max(0, recovered - debtRecovered);
       const remainingDebt = Math.max(0, rec.unrecoveredAmount - debtRecovered);
       const remainingTarget = Math.max(0, rec.remainingTargetProfit - profitAvailableForTarget);
-      // Recovery complete when debt is cleared — user expects normal next even if small target remains.
-      // Keep tolerance lenient for floating point and live payout variance.
       if (remainingDebt <= 0.01) {
         return {
           inRecovery: false,
@@ -1357,7 +1536,6 @@ function recordRecoveryOutcome(
     return rec;
   }
 
-  // Loss
   if (!rec.inRecovery) {
     return {
       inRecovery: true,
@@ -1456,7 +1634,7 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
     },
     topMarkets:   [],
     stopRequested: false,
-    message: "Initializing Quantum Analysis Engine…",
+    message: "Analysing fresh window…",
     lastEntropyBits: 3.32,
     lastEv: 0,
   };
@@ -1497,398 +1675,361 @@ async function runLoop(config: SpeedAIConfig) {
 
   if (isLocked && config.lockedSymbol && !lockedDerivsMarket) {
     session.running = false;
-    session.message = `⚠️ Market ${config.lockedSymbol} not found — session aborted`;
+    session.message = `Market ${config.lockedSymbol} not found — session aborted`;
     broadcast();
     return;
   }
 
-  let avgExecLatencyMs = 800;
-  let preAnalyzedScored: MarketScore[] | null = null;
   let consecutiveErrors = 0;
-  let lastTradeMs = Date.now();
-  let awaitFreshRecoveryWindow = false;
+  let noTradeCycles = 0;
+  let lastLostRecoveryPair: { contractType: SpeedContractType; barrier?: number } | null = null;
 
   while (session.running && !session.stopRequested) {
     try {
-    // ── Stability: ensure tick stream is alive ───────────────────────────────
-    const health = tickManager.getTickHealth();
-    if (health.liveSymbols === 0 && !health.usingSimulated) {
-      session.message = "Stabilizing tick feed — syncing markets…";
-      broadcast();
-      await sleep(1200);
-      continue;
-    }
-
-    // ── Mode: Normal vs Recovery ──────────────────────────────────────────────
-    const inRecovery    = session.recovery.inRecovery;
-    const contractTypes = inRecovery ? config.recoveryContractTypes : config.normalContractTypes;
-    const barriers      = inRecovery ? config.recoveryBarriers      : config.normalBarriers;
-
-    const usesDigitRecovery = contractTypes.some(ct => ct.startsWith("DIGIT"));
-
-    if (awaitFreshRecoveryWindow && inRecovery && usesDigitRecovery) {
-      const cooldownMs = 1200;
-      if (Date.now() - lastTradeMs < cooldownMs) {
-        session.message = "Stabilizing after recovery loss…";
+      const health = tickManager.getTickHealth();
+      if (health.liveSymbols === 0 && !health.usingSimulated) {
+        session.message = "Stabilizing tick feed — syncing markets…";
         broadcast();
-        await sleep(250);
+        await sleep(1200);
         continue;
       }
 
-      const freshDigits = lockedDerivsMarket
-        ? tickManager.getDigits(lockedDerivsMarket.symbol, 100)
-        : DERIV_MARKETS
-            .filter(m => m.digitEnabled)
-            .map(m => tickManager.getDigits(m.symbol, 100))
-            .find(d => d.length >= 40);
+      const inRecovery    = session.recovery.inRecovery;
+      const contractTypes = inRecovery ? config.recoveryContractTypes : config.normalContractTypes;
+      const barriers      = inRecovery ? config.recoveryBarriers      : config.normalBarriers;
+      const isDigitContract = contractTypes.some(ct => ct.startsWith("DIGIT"));
 
-      if (!freshDigits || freshDigits.length < 40) {
-        session.message = "Building fresh recovery window (40+ ticks)…";
-        broadcast();
-        await sleep(300);
-        continue;
+      // Target market for analysis
+      const targetSymbol = lockedDerivsMarket ? lockedDerivsMarket.symbol : (session.topMarkets[0]?.symbol ?? "R_100");
+
+      // Wait for fresh buffer (40 digits or 20 prices since last trade close)
+      if (lastTradeClosedAt > 0) {
+        await waitForFreshBuffer(targetSymbol, isDigitContract);
       }
-      awaitFreshRecoveryWindow = false;
-    }
 
-    let best: MarketScore | undefined;
+      const nudgeActive = noTradeCycles >= 6;
 
-    if (lockedDerivsMarket) {
-      const cached = preAnalyzedScored?.find(m => m.symbol === lockedDerivsMarket.symbol);
-      preAnalyzedScored = null;
+      let best: MarketScore | undefined;
 
-      if (cached) {
-        best = cached;
-      } else {
-        const result = await scoreSingleMarket(lockedDerivsMarket.symbol, lockedDerivsMarket.displayName, contractTypes, barriers);
-        if (!result) {
-          session.message = "Waiting for tick data on locked market…";
+      // Always score fresh LIVE on every loop iteration (NO preAnalyzedScored)
+      if (lockedDerivsMarket) {
+        best = (await scoreSingleMarket(lockedDerivsMarket.symbol, lockedDerivsMarket.displayName, contractTypes, barriers)) ?? undefined;
+        if (!best) {
+          session.message = "Waiting for accurate setup…";
           broadcast();
-          await sleep(1500);
+          await sleep(1000);
           continue;
         }
-        best = result;
-      }
-      session.topMarkets = [best];
-    } else {
-      // Smart Market Switching Mode (strictly within user's configured contractTypes & barriers)
-      if (preAnalyzedScored && preAnalyzedScored.length > 0) {
-        const scored      = preAnalyzedScored;
-        preAnalyzedScored = null;
-        session.topMarkets = scored;
-
-        if (scored[0].score < MIN_TRADE_SCORE) {
-          session.message = `Scanning markets (best ${scored[0].displayName} ${scored[0].score}/100) — waiting for edge…`;
-          broadcast();
-          preAnalyzedScored = null;
-          await sleep(1500);
-          continue;
-        }
-        best = scored[0];
+        session.topMarkets = [best];
       } else {
-        session.message = inRecovery ? "🎯 Sniper Scanning Recovery Markets…" : "Scanning Strategy Markets…";
+        session.message = "Analysing fresh window…";
         broadcast();
         const scored = await analyzeMarketsForStrategy(contractTypes, barriers);
         session.topMarkets = scored;
 
         if (scored.length === 0) {
-          session.message = "Waiting for tick data stream…";
+          session.message = "Waiting for accurate setup…";
           broadcast();
-          await sleep(2000);
+          await sleep(1000);
           continue;
         }
-        if (scored[0].score < MIN_TRADE_SCORE) {
-          session.message = `Awaiting high-probability setup (best ${scored[0].displayName} ${scored[0].score}/100)…`;
-          broadcast();
-          await sleep(1500);
-          continue;
-        }
-        best = scored[0];
-      }
-    }
 
-    session.lastEntropyBits = best.entropyBits;
-    session.lastEv = Math.round(best.expectedValue * 1000) / 10;
-
-    // ── Gating: Recovery Sniper vs Normal Trade ──────────────────────────────
-    if (inRecovery) {
-      const consLosses  = session.recovery.consecutiveRecoveryLosses;
-      const maxAttempts = 4;
-      let candidate: { winner: MarketScore; greenLight: boolean } | null = null;
-
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        candidate = fastRecoveryGate(
-          best.symbol, best.displayName,
-          config.recoveryContractTypes, barriers, consLosses,
-          session.recovery.recentRecoveryTrades,
-        );
-        if (candidate) break;
-
-        session.message = `🎯 Sniper Recovery Analysis (Attempt ${attempt + 1})…`;
-        broadcast();
-        preAnalyzedScored = null;
-        await sleep(750);
-        if (!session.running || session.stopRequested) break;
-      }
-
-      if (!candidate) {
-        const { overBarrier: recOver, underBarrier: recUnder } = extractBarriers(barriers);
-        session.message = `🎯 Recovery analysis — over${recOver}/under${recUnder} edge ${Math.round(best.score)}/100, waiting for accurate setup…`;
-        broadcast();
-        preAnalyzedScored = null;
-        await sleep(1800);
-        continue;
-      }
-
-      // Mandatory, moderate green-light timing gate. No weak fallback: if the
-      // exact recovery barrier does not align, retry on the next cycle.
-      if (!candidate.greenLight) {
-        const glAchieved = await waitForGreenLight(
-          best.symbol, candidate.winner.contractType, candidate.winner.barrier,
-        );
-        if (!session.running || session.stopRequested) break;
-        if (!glAchieved) {
-          const { overBarrier: recOver, underBarrier: recUnder } = extractBarriers(barriers);
-          session.message = `Waiting for timed entry on over${recOver}/under${recUnder}…`;
-          broadcast();
-          preAnalyzedScored = null;
-          continue;
-        }
-        const refreshed = fastRecoveryGate(
-          best.symbol, best.displayName,
-          config.recoveryContractTypes, barriers, consLosses,
-          session.recovery.recentRecoveryTrades,
-        );
-        if (refreshed && refreshed.greenLight) {
-          candidate = refreshed;
+        // Apply 3+ consecutive recovery loss market rotation in switching mode
+        if (inRecovery && session.recovery.consecutiveRecoveryLosses >= 3 && scored.length > 1) {
+          const previousMarket = session.currentMarket;
+          const alternative = scored.find(m => m.displayName !== previousMarket);
+          best = alternative ?? scored[0];
         } else {
-          const { overBarrier: recOver, underBarrier: recUnder } = extractBarriers(barriers);
-          session.message = `Waiting for timed entry on over${recOver}/under${recUnder}…`;
+          best = scored[0];
+        }
+      }
+
+      session.lastEntropyBits = best.entropyBits;
+      session.lastEv = Math.round(best.expectedValue * 1000) / 10;
+
+      // ── Gating: Recovery Sniper vs Normal Mode ──────────────────────────────
+      if (inRecovery) {
+        const consLosses  = session.recovery.consecutiveRecoveryLosses;
+        const maxAttempts = 4;
+        let candidate: { winner: MarketScore; greenLight: boolean } | null = null;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          candidate = fastRecoveryGate(
+            best.symbol, best.displayName,
+            config.recoveryContractTypes, barriers, consLosses,
+            session.recovery.recentRecoveryTrades,
+            lastLostRecoveryPair,
+            nudgeActive,
+          );
+          if (candidate) break;
+
+          session.message = "Waiting for accurate setup…";
           broadcast();
-          preAnalyzedScored = null;
+          await sleep(750);
+          if (!session.running || session.stopRequested) break;
+        }
+
+        // Single attempt loser rotation: clear excluded pair after attempts
+        lastLostRecoveryPair = null;
+
+        if (!candidate) {
+          noTradeCycles++;
+          session.message = "Waiting for accurate setup…";
+          broadcast();
+          await sleep(1200);
+          continue;
+        }
+
+        if (!candidate.greenLight) {
+          const glAchieved = await waitForGreenLight(
+            best.symbol, candidate.winner.contractType, candidate.winner.barrier,
+          );
+          if (!session.running || session.stopRequested) break;
+          if (!glAchieved) {
+            noTradeCycles++;
+            session.message = "Waiting for accurate setup…";
+            broadcast();
+            continue;
+          }
+
+          // Re-evaluate fastRecoveryGate on fresh read after green light
+          const refreshed = fastRecoveryGate(
+            best.symbol, best.displayName,
+            config.recoveryContractTypes, barriers, consLosses,
+            session.recovery.recentRecoveryTrades,
+            null,
+            nudgeActive,
+          );
+          if (refreshed && refreshed.greenLight) {
+            candidate = refreshed;
+          } else {
+            noTradeCycles++;
+            session.message = "Waiting for accurate setup…";
+            broadcast();
+            continue;
+          }
+        }
+
+        best = {
+          ...best,
+          contractType:   candidate.winner.contractType,
+          barrier:        candidate.winner.barrier,
+          payout:         candidate.winner.payout,
+          winProbability: candidate.winner.winProbability,
+          score:          candidate.winner.score,
+          expectedValue:  candidate.winner.expectedValue,
+          reason:         candidate.winner.reason,
+        };
+
+      } else {
+        // Normal Mode Gating
+        const profile = getContractProfile(best.contractType, best.barrier);
+        const normalDigits = tickManager.getDigits(best.symbol, 60);
+        const normalPrices = tickManager.getTicks(best.symbol, 50);
+        const entropy = computeShannonEntropy(normalDigits, 50);
+        let gl = isGreenLight(normalDigits, normalPrices, best.contractType, best.barrier);
+
+        let reqScore = profile.requiredScore;
+        let reqEv = profile.requiredEv;
+        if (nudgeActive) {
+          reqScore = Math.max(profile.requiredScore, reqScore - 2);
+          reqEv = Math.max(profile.requiredEv, reqEv - 0.003);
+        }
+
+        if (!gl) {
+          gl = await waitForGreenLight(best.symbol, best.contractType, best.barrier);
+          if (!session.running || session.stopRequested) break;
+        }
+
+        const passesNormal = best.score >= reqScore && best.expectedValue >= reqEv && gl && !entropy.isWhiteNoise;
+
+        if (!passesNormal) {
+          noTradeCycles++;
+          session.message = "Waiting for accurate setup…";
+          broadcast();
+          await sleep(1200);
           continue;
         }
       }
 
-      best = {
-        ...best,
-        contractType:   candidate.winner.contractType,
-        barrier:        candidate.winner.barrier,
-        payout:         candidate.winner.payout,
-        winProbability: candidate.winner.winProbability,
-        score:          candidate.winner.score,
-        expectedValue:  candidate.winner.expectedValue,
-        reason:         candidate.winner.reason,
-      };
+      // Reset nudge counter when a setup qualifies
+      noTradeCycles = 0;
 
-    } else {
-      // ── Normal Mode Entry Gating ───────────────────────────────────────────
-      const normalDigits = tickManager.getDigits(best.symbol, 60);
-      const normalPrices = tickManager.getTicks(best.symbol, 50);
-      const gl = isGreenLight(normalDigits, normalPrices, best.contractType, best.barrier);
-
-      if (!gl && best.score < 72) {
-        session.message = `⏳ Awaiting optimal entry setup on ${best.displayName}…`;
+      // Strict user contract sovereignty
+      const allowedContracts = inRecovery ? config.recoveryContractTypes : config.normalContractTypes;
+      if (!allowedContracts.includes(best.contractType)) {
+        logger.warn({ got: best.contractType, allowed: allowedContracts, mode: inRecovery ? "recovery" : "normal" }, "Discarding trade outside configured contract family");
+        session.message = "Waiting for accurate setup…";
         broadcast();
-        preAnalyzedScored = null;
-        for (let retry = 0; retry < 3; retry++) {
-          await sleep(350);
-          if (!session.running || session.stopRequested) break;
-          const rDigits = tickManager.getDigits(best.symbol, 60);
-          const rPrices = tickManager.getTicks(best.symbol, 50);
-          if (isGreenLight(rDigits, rPrices, best.contractType, best.barrier)) break;
-        }
-      }
-    }
-
-    // Strict user contract sovereignty: never silently fire a wrong digit/contract.
-    const allowedContracts = inRecovery ? config.recoveryContractTypes : config.normalContractTypes;
-    if (!allowedContracts.includes(best.contractType)) {
-      logger.warn({ got: best.contractType, allowed: allowedContracts, mode: inRecovery ? "recovery" : "normal" }, "Discarding trade outside configured contract family");
-      session.message = "Waiting for configured contract setup…";
-      broadcast();
-      preAnalyzedScored = null;
-      await sleep(750);
-      continue;
-    }
-    const { overBarrier: expectedOver, underBarrier: expectedUnder } = extractBarriers(barriers);
-    if (best.contractType === "DIGITOVER" && best.barrier !== expectedOver) {
-      logger.warn({ expected: expectedOver, got: best.barrier, mode: inRecovery ? "recovery" : "normal" }, "Discarding DIGITOVER with wrong barrier");
-      session.message = `Waiting for configured over${expectedOver} setup…`;
-      broadcast();
-      preAnalyzedScored = null;
-      await sleep(750);
-      continue;
-    }
-    if (best.contractType === "DIGITUNDER" && best.barrier !== expectedUnder) {
-      logger.warn({ expected: expectedUnder, got: best.barrier, mode: inRecovery ? "recovery" : "normal" }, "Discarding DIGITUNDER with wrong barrier");
-      session.message = `Waiting for configured under${expectedUnder} setup…`;
-      broadcast();
-      preAnalyzedScored = null;
-      await sleep(750);
-      continue;
-    }
-
-    // ── Pre-Warmed Proposal Quoting & Exact Sizing ─────────────────────────────
-    const payoutQuote = await resolveRecoveryPayout({
-      symbol: best.symbol,
-      contractType: best.contractType,
-      barrier: best.barrier,
-      duration: 1,
-      durationUnit: "t",
-      currency,
-    });
-    best = { ...best, payout: payoutQuote.payoutMultiplier };
-
-    const stake = computeRecoveryStake(session.recovery, best.payout, config, maxStake, availableBalance);
-
-    session.currentMarket       = best.displayName;
-    session.currentContractType = best.contractType + (best.barrier !== undefined ? ` ${best.barrier}` : "");
-    session.currentStake        = stake;
-    session.message = inRecovery
-      ? `🎯 [Sniper R${session.recovery.recoveryStep}] ${best.contractType}${best.barrier !== undefined ? ` ${best.barrier}` : ""} on ${best.displayName}`
-      : `⚡ Trading ${best.contractType}${best.barrier !== undefined ? ` ${best.barrier}` : ""} on ${best.displayName}`;
-    broadcast();
-
-    // ── Execute Trade ──────────────────────────────────────────────────────────
-    const execStart = Date.now();
-    let won: boolean;
-    let profit: number;
-
-    if (isLive) {
-      try {
-        logger.info({
-          symbol:       best.symbol,
-          contractType: best.contractType,
-          barrier:      best.barrier,
-          stake:        Math.round(stake * 100) / 100,
-          inRecovery,
-          step:         session.recovery.recoveryStep,
-        }, inRecovery ? "NeuroAI executing sniper recovery trade" : "NeuroAI executing normal trade");
-
-        const liveResult = await executeLiveTrade(token!, {
-          symbol:       best.symbol,
-          contractType: best.contractType,
-          stake:        Math.round(stake * 100) / 100,
-          duration:     1,
-          durationUnit: "t",
-          currency,
-          barrier:      best.barrier,
-        });
-        const result = await waitForContractResult(token!, liveResult.contractId, 30_000);
-        won    = result.won;
-        profit = result.profit;
-      } catch (err) {
-        logger.warn({ err, symbol: best.symbol }, "NeuroAI live trade execution error — retrying");
-        session.message = `Trade retry: ${err instanceof Error ? err.message : String(err)}`;
-        broadcast();
-        await sleep(1500);
+        await sleep(750);
         continue;
       }
-    } else {
-      won    = Math.random() < best.winProbability;
-      profit = won ? stake * (best.payout - 1) : -stake;
-    }
+      const { overBarrier: expectedOver, underBarrier: expectedUnder } = extractBarriers(barriers);
+      if (best.contractType === "DIGITOVER" && best.barrier !== expectedOver) {
+        logger.warn({ expected: expectedOver, got: best.barrier, mode: inRecovery ? "recovery" : "normal" }, "Discarding DIGITOVER with wrong barrier");
+        session.message = "Waiting for accurate setup…";
+        broadcast();
+        await sleep(750);
+        continue;
+      }
+      if (best.contractType === "DIGITUNDER" && best.barrier !== expectedUnder) {
+        logger.warn({ expected: expectedUnder, got: best.barrier, mode: inRecovery ? "recovery" : "normal" }, "Discarding DIGITUNDER with wrong barrier");
+        session.message = "Waiting for accurate setup…";
+        broadcast();
+        await sleep(750);
+        continue;
+      }
 
-    const execLatencyMs = Date.now() - execStart;
-    avgExecLatencyMs    = Math.round(avgExecLatencyMs * 0.7 + execLatencyMs * 0.3);
+      // Full Gate Re-Validation at Submission
+      const revalidation = revalidateAtSubmission(best.symbol, best.contractType, best.barrier, best);
+      if (!revalidation.valid) {
+        session.message = revalidation.reason ?? "Timing shifted — re-analysing…";
+        broadcast();
+        await sleep(300);
+        continue;
+      }
 
-    // ── Record Outcome & Settle Recovery State ────────────────────────────────
-    session.tradeCount++;
-    session.totalProfit = Math.round((session.totalProfit + profit) * 100) / 100;
-    if (won) {
-      session.winCount++;
-      session.lastResult = "won";
-    } else {
-      session.lossCount++;
-      session.lastResult = "lost";
-    }
+      // Pre-Warmed Proposal Quoting & EV re-check
+      const payoutQuote = await resolveRecoveryPayout({
+        symbol: best.symbol,
+        contractType: best.contractType,
+        barrier: best.barrier,
+        duration: 1,
+        durationUnit: "t",
+        currency,
+      });
+      best = { ...best, payout: payoutQuote.payoutMultiplier };
 
-    session.recovery = recordRecoveryOutcome(
-      session.recovery, won, profit, stake, config.maxRecoverySteps, best.payout,
-      inRecovery ? best.contractType : undefined,
-      inRecovery ? best.barrier      : undefined,
-    );
+      const freshEv = best.winProbability * (payoutQuote.payoutMultiplier - 1) - (1 - best.winProbability);
+      const profile = getContractProfile(best.contractType, best.barrier);
+      if (freshEv < best.expectedValue - 0.03 || freshEv < profile.requiredEv) {
+        session.message = "Timing shifted — re-analysing…";
+        broadcast();
+        await sleep(300);
+        continue;
+      }
 
-    if (!isLive && Number.isFinite(availableBalance)) {
-      availableBalance = Math.max(0, availableBalance + profit);
-    }
+      const stake = computeRecoveryStake(session.recovery, best.payout, config, maxStake, availableBalance);
 
-    if (isLive) {
-      try {
-        const newBal = await getLiveBalance(token!);
-        if (newBal !== null && accounts.length > 0) {
-          availableBalance = newBal;
-          await db.update(accountsTable)
-            .set({ balance: String(newBal), updatedAt: new Date() })
-            .where(eq(accountsTable.id, accounts[0].id));
+      session.currentMarket       = best.displayName;
+      session.currentContractType = best.contractType + (best.barrier !== undefined ? ` ${best.barrier}` : "");
+      session.currentStake        = stake;
+      session.message = inRecovery
+        ? `🎯 [Sniper R${session.recovery.recoveryStep}] ${best.contractType}${best.barrier !== undefined ? ` ${best.barrier}` : ""} on ${best.displayName}`
+        : `⚡ Trading ${best.contractType}${best.barrier !== undefined ? ` ${best.barrier}` : ""} on ${best.displayName}`;
+      broadcast();
+
+      // Execute Trade
+      let won: boolean;
+      let profit: number;
+
+      if (isLive) {
+        try {
+          logger.info({
+            symbol:       best.symbol,
+            contractType: best.contractType,
+            barrier:      best.barrier,
+            stake:        Math.round(stake * 100) / 100,
+            inRecovery,
+            step:         session.recovery.recoveryStep,
+          }, inRecovery ? "NeuroAI executing sniper recovery trade" : "NeuroAI executing normal trade");
+
+          const liveResult = await executeLiveTrade(token!, {
+            symbol:       best.symbol,
+            contractType: best.contractType,
+            stake:        Math.round(stake * 100) / 100,
+            duration:     1,
+            durationUnit: "t",
+            currency,
+            barrier:      best.barrier,
+          });
+          const result = await waitForContractResult(token!, liveResult.contractId, 30_000);
+          won    = result.won;
+          profit = result.profit;
+        } catch (err) {
+          logger.warn({ err, symbol: best.symbol }, "NeuroAI live trade execution error — retrying");
+          session.message = "Timing shifted — re-analysing…";
+          broadcast();
+          await sleep(1200);
+          continue;
         }
-      } catch { /* best-effort */ }
-    }
+      } else {
+        won    = Math.random() < best.winProbability;
+        profit = won ? stake * (best.payout - 1) : -stake;
+      }
 
-    broadcast();
+      // Track completion timestamp and tick count at close
+      lastTradeClosedAt = Date.now();
+      lastTradeClosedDigitCount.set(best.symbol, totalDigitsReceived.get(best.symbol) ?? 0);
+      lastTradeClosedPriceCount.set(best.symbol, totalPricesReceived.get(best.symbol) ?? 0);
 
-    // ── TP / SL Boundary Checks ───────────────────────────────────────────────
-    if (session.totalProfit >= config.takeProfit) {
-      session.running = false;
-      session.message = `✅ Take profit target $${config.takeProfit.toFixed(2)} reached! Session complete.`;
+      // Record Outcome & Settle Recovery State
+      session.tradeCount++;
+      session.totalProfit = Math.round((session.totalProfit + profit) * 100) / 100;
+      if (won) {
+        session.winCount++;
+        session.lastResult = "won";
+      } else {
+        session.lossCount++;
+        session.lastResult = "lost";
+      }
+
+      session.recovery = recordRecoveryOutcome(
+        session.recovery, won, profit, stake, config.maxRecoverySteps, best.payout,
+        inRecovery ? best.contractType : undefined,
+        inRecovery ? best.barrier      : undefined,
+      );
+
+      // Single-attempt loser rotation or cooldown setting
+      if (!won && inRecovery) {
+        lastLostRecoveryPair = { contractType: best.contractType, barrier: best.barrier };
+      } else {
+        lastLostRecoveryPair = null;
+      }
+
+      if (!isLive && Number.isFinite(availableBalance)) {
+        availableBalance = Math.max(0, availableBalance + profit);
+      }
+
+      if (isLive) {
+        try {
+          const newBal = await getLiveBalance(token!);
+          if (newBal !== null && accounts.length > 0) {
+            availableBalance = newBal;
+            await db.update(accountsTable)
+              .set({ balance: String(newBal), updatedAt: new Date() })
+              .where(eq(accountsTable.id, accounts[0].id));
+          }
+        } catch { /* best-effort */ }
+      }
+
       broadcast();
-      logger.info({ profit: session.totalProfit }, "NeuroAI take profit reached");
-      return;
-    }
-    if (session.totalProfit <= -config.stopLoss) {
-      session.running = false;
-      session.message = `🛑 Stop loss limit $${config.stopLoss.toFixed(2)} hit. Session stopped safely.`;
+
+      // Boundary Checks
+      if (session.totalProfit >= config.takeProfit) {
+        session.running = false;
+        session.message = `✅ Take profit target $${config.takeProfit.toFixed(2)} reached! Session complete.`;
+        broadcast();
+        logger.info({ profit: session.totalProfit }, "NeuroAI take profit reached");
+        return;
+      }
+      if (session.totalProfit <= -config.stopLoss) {
+        session.running = false;
+        session.message = `🛑 Stop loss limit $${config.stopLoss.toFixed(2)} hit. Session stopped safely.`;
+        broadcast();
+        logger.info({ profit: session.totalProfit }, "NeuroAI stop loss triggered");
+        return;
+      }
+
+      session.message = "Stabilizing after trade…";
       broadcast();
-      logger.info({ profit: session.totalProfit }, "NeuroAI stop loss triggered");
-      return;
-    }
-    if (session.recovery.inRecovery && session.recovery.recoveryStep >= config.maxRecoverySteps) {
-      session.message = `⚡ Max recovery step reached (${config.maxRecoverySteps}) — maintaining stake limit`;
-      broadcast();
-    }
+      await sleep(won ? 800 : 1500);
+      consecutiveErrors = 0;
 
-    // ── Parallel Pre-Analysis During Post-Trade Settling ──────────────────────
-    const nextInRecovery    = session.recovery.inRecovery;
-    const nextContractTypes = nextInRecovery ? config.recoveryContractTypes : config.normalContractTypes;
-    const nextBarriers      = nextInRecovery ? config.recoveryBarriers      : config.normalBarriers;
-
-    // Moderate stabilization after execution: accuracy/timing > raw speed.
-    const pauseMs = won ? 900 : 1600;
-    if (!won && (inRecovery || nextInRecovery)) {
-      awaitFreshRecoveryWindow = true;
-    }
-
-    const preAnalyzePromise = lockedDerivsMarket
-      ? scoreSingleMarket(lockedDerivsMarket.symbol, lockedDerivsMarket.displayName, nextContractTypes, nextBarriers)
-          .then(r => r ? [r] : [])
-      : analyzeMarketsForStrategy(nextContractTypes, nextBarriers);
-
-    await sleep(pauseMs);
-    if (!session.running || session.stopRequested) break;
-
-    try {
-      const result = await Promise.race([
-        preAnalyzePromise,
-        new Promise<MarketScore[]>((_, reject) => setTimeout(() => reject(new Error("pre-analysis timeout")), 4000))
-      ]);
-      preAnalyzedScored = result.length > 0 ? result : null;
-    } catch (e) {
-      logger.warn({ e }, "Pre-analysis timeout or error — will rescan");
-      preAnalyzedScored = null;
-    }
-
-    // Throttle: prevent hammering on rapid losses
-    const now = Date.now();
-    const sinceLast = now - lastTradeMs;
-    lastTradeMs = now;
-    consecutiveErrors = 0;
     } catch (err) {
       consecutiveErrors++;
       logger.error({ err, consecutiveErrors }, "NeuroAI runLoop stability catch");
-      session.message = consecutiveErrors > 3
-        ? `Engine stabilizing… retry ${consecutiveErrors}/5`
-        : "Stabilizing engine — retrying…";
+      session.message = "Stabilizing after trade…";
       broadcast();
       await sleep(Math.min(2000, 500 * consecutiveErrors));
       if (consecutiveErrors >= 5) {
