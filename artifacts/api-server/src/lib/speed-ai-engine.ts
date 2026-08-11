@@ -1040,6 +1040,80 @@ async function waitForGreenLight(
   return false;
 }
 
+// ── Manual Assist Evaluation (for manual trading) ─────────────────────────────
+// Uses same Quantum scorer but simplified to Ready/Wait for the user's exact
+// contract + barrier + duration. Hides technical metrics from the UI layer.
+export function evaluateManualAssist(
+  symbol: string,
+  contractType: SpeedContractType,
+  barrier: number | undefined,
+  duration: number,
+): { ready: boolean; score: number; winProbability: number; expectedValue: number; reason: string; greenLight: boolean; entropyBits: number } {
+  const digits = tickManager.getDigits(symbol, 100);
+  const prices = tickManager.getTicks(symbol, 50);
+  const displayName = DERIV_MARKETS.find(m => m.symbol === symbol)?.displayName ?? symbol;
+
+  if (contractType.startsWith("DIGIT") && digits.length < 25) {
+    return { ready: false, score: 0, winProbability: 0, expectedValue: -1, reason: "Collecting digit data…", greenLight: false, entropyBits: 3.32 };
+  }
+  if ((contractType === "CALL" || contractType === "PUT") && prices.length < 15) {
+    return { ready: false, score: 0, winProbability: 0, expectedValue: -1, reason: "Collecting price data…", greenLight: false, entropyBits: 3.32 };
+  }
+
+  const scored = precisionScore(symbol, displayName, contractType, barrier, digits, prices);
+  if (!scored) {
+    return { ready: false, score: 0, winProbability: 0, expectedValue: -1, reason: "Insufficient data for this contract", greenLight: false, entropyBits: 3.32 };
+  }
+
+  const greenLight = isGreenLight(digits, prices, contractType, barrier);
+  const entropy = computeShannonEntropy(digits, 50);
+
+  // Duration-aware thresholds: 1 tick is noisiest, require higher quality
+  let requiredScore = 56;
+  let requiredEv = 0.015;
+  if (duration === 1) {
+    requiredScore = 62;
+    requiredEv = 0.02;
+  } else if (duration >= 2 && duration <= 3) {
+    requiredScore = 58;
+    requiredEv = 0.015;
+  } else if (duration >= 4 && duration <= 6) {
+    requiredScore = 54;
+    requiredEv = 0.012;
+  } else if (duration >= 7) {
+    requiredScore = 52;
+    requiredEv = 0.01;
+  }
+
+  // White noise entropy gate: if digits are pure noise, force wait regardless of score
+  if (entropy.isWhiteNoise) {
+    return { ready: false, score: scored.score, winProbability: scored.winProbability, expectedValue: scored.expectedValue, reason: "Market is choppy — waiting for clearer structure", greenLight, entropyBits: entropy.bits };
+  }
+
+  // Green light is critical for 1-tick, important for others but not absolute
+  const greenOk = duration === 1 ? greenLight : (greenLight || scored.score >= 68);
+
+  const ready = scored.score >= requiredScore && scored.expectedValue >= requiredEv && greenOk && !entropy.isWhiteNoise;
+
+  let reason: string;
+  if (!ready) {
+    if (scored.score < requiredScore) {
+      reason = `AI quality ${scored.score.toFixed(0)}/100 not yet optimal for ${duration} ticks — holding…`;
+    } else if (scored.expectedValue < requiredEv) {
+      reason = "No positive edge detected — waiting for better entry…";
+    } else if (!greenOk) {
+      reason = duration === 1 ? "Waiting for green-light tick — extreme precision needed for 1 tick…" : "Timing not yet optimal — hold for better entry…";
+    } else {
+      reason = "AI is analyzing timing — hold for better entry…";
+    }
+  } else {
+    reason = `Good timing — AI confirms ${contractType}${barrier !== undefined ? ` ${barrier}` : ""} for ${duration} ticks.`;
+  }
+
+  return { ready, score: scored.score, winProbability: scored.winProbability, expectedValue: scored.expectedValue, reason, greenLight, entropyBits: entropy.bits };
+}
+
+
 // ── Market Strategy Analysis ──────────────────────────────────────────────────
 
 /**
@@ -1239,7 +1313,9 @@ function recordRecoveryOutcome(
       const profitAvailableForTarget = Math.max(0, recovered - debtRecovered);
       const remainingDebt = Math.max(0, rec.unrecoveredAmount - debtRecovered);
       const remainingTarget = Math.max(0, rec.remainingTargetProfit - profitAvailableForTarget);
-      if (remainingDebt + remainingTarget <= 0.005) {
+      // Recovery complete when debt is cleared — user expects normal next even if small target remains.
+      // Keep tolerance lenient for floating point and live payout variance.
+      if (remainingDebt <= 0.01) {
         return {
           inRecovery: false,
           recoveryStep: 0,
@@ -1410,8 +1486,20 @@ async function runLoop(config: SpeedAIConfig) {
 
   let avgExecLatencyMs = 800;
   let preAnalyzedScored: MarketScore[] | null = null;
+  let consecutiveErrors = 0;
+  let lastTradeMs = Date.now();
 
   while (session.running && !session.stopRequested) {
+    try {
+    // ── Stability: ensure tick stream is alive ───────────────────────────────
+    const health = tickManager.getTickHealth();
+    if (health.liveSymbols === 0 && !health.usingSimulated) {
+      session.message = "Stabilizing tick feed — syncing markets…";
+      broadcast();
+      await sleep(1200);
+      continue;
+    }
+
     // ── Mode: Normal vs Recovery ──────────────────────────────────────────────
     const inRecovery    = session.recovery.inRecovery;
     const contractTypes = inRecovery ? config.recoveryContractTypes : config.normalContractTypes;
@@ -1601,10 +1689,25 @@ async function runLoop(config: SpeedAIConfig) {
 
     if (isLive) {
       try {
-        if (!inRecovery) {
-          const { overBarrier: cfgOver, underBarrier: cfgUnder } = extractBarriers(barriers);
-          if (best.contractType === "DIGITOVER"  && best.barrier !== cfgOver)  best = { ...best, barrier: cfgOver };
-          if (best.contractType === "DIGITUNDER" && best.barrier !== cfgUnder) best = { ...best, barrier: cfgUnder };
+        // Strict User Contract Sovereignty — clamp barrier to exactly user configured digits
+        const { overBarrier: cfgOver, underBarrier: cfgUnder } = extractBarriers(barriers);
+        if (best.contractType === "DIGITOVER"  && best.barrier !== cfgOver) {
+          logger.warn({ expected: cfgOver, got: best.barrier, mode: inRecovery ? "recovery" : "normal" }, "Clamping DIGITOVER barrier to user config");
+          best = { ...best, barrier: cfgOver };
+        }
+        if (best.contractType === "DIGITUNDER" && best.barrier !== cfgUnder) {
+          logger.warn({ expected: cfgUnder, got: best.barrier, mode: inRecovery ? "recovery" : "normal" }, "Clamping DIGITUNDER barrier to user config");
+          best = { ...best, barrier: cfgUnder };
+        }
+        // Enforce contract family lock: if best contract not in allowed set, force to first allowed
+        const allowed = inRecovery ? config.recoveryContractTypes : config.normalContractTypes;
+        if (!allowed.includes(best.contractType as SpeedContractType)) {
+          logger.warn({ got: best.contractType, allowed, mode: inRecovery ? "recovery" : "normal" }, "Contract not in user family — forcing to allowed");
+          const fallbackCt = allowed[0];
+          let fb: number | undefined;
+          if (fallbackCt === "DIGITOVER") fb = cfgOver;
+          else if (fallbackCt === "DIGITUNDER") fb = cfgUnder;
+          best = { ...best, contractType: fallbackCt, barrier: fb };
         }
 
         logger.info({
@@ -1715,10 +1818,37 @@ async function runLoop(config: SpeedAIConfig) {
     if (!session.running || session.stopRequested) break;
 
     try {
-      const result = await preAnalyzePromise;
+      const result = await Promise.race([
+        preAnalyzePromise,
+        new Promise<MarketScore[]>((_, reject) => setTimeout(() => reject(new Error("pre-analysis timeout")), 4000))
+      ]);
       preAnalyzedScored = result.length > 0 ? result : null;
-    } catch {
+    } catch (e) {
+      logger.warn({ e }, "Pre-analysis timeout or error — will rescan");
       preAnalyzedScored = null;
+    }
+
+    // Throttle: prevent hammering on rapid losses
+    const now = Date.now();
+    const sinceLast = now - lastTradeMs;
+    lastTradeMs = now;
+    consecutiveErrors = 0;
+    } catch (err) {
+      consecutiveErrors++;
+      logger.error({ err, consecutiveErrors }, "NeuroAI runLoop stability catch");
+      session.message = consecutiveErrors > 3
+        ? `Engine stabilizing… retry ${consecutiveErrors}/5`
+        : "Stabilizing engine — retrying…";
+      broadcast();
+      await sleep(Math.min(2000, 500 * consecutiveErrors));
+      if (consecutiveErrors >= 5) {
+        session.running = false;
+        session.message = "Engine paused for stability check — please restart";
+        broadcast();
+        logger.error("NeuroAI halted after 5 consecutive errors");
+        return;
+      }
+      continue;
     }
   }
 
