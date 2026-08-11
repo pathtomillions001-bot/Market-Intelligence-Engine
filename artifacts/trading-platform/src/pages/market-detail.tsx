@@ -7,8 +7,9 @@ import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { toast } from "sonner";
-import { ArrowLeft, TrendingUp, TrendingDown, AlertTriangle, Wifi, WifiOff, Activity, ArrowUp, ArrowDown } from "lucide-react";
+import { ArrowLeft, TrendingUp, TrendingDown, AlertTriangle, Wifi, WifiOff, Activity, ArrowUp, ArrowDown, Brain, Zap, Layers, Copy, ShieldCheck } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useQueryClient } from "@tanstack/react-query";
@@ -474,6 +475,10 @@ export default function MarketDetail() {
   const [liveTrendStats, setLiveTrendStats] = useState<any | null>(null);
   const [lastLiveDigit, setLastLiveDigit] = useState<number | null>(null);
   const [dialogCountdown, setDialogCountdown] = useState<number | null>(null);
+  const [bulkEnabled, setBulkEnabled] = useState(false);
+  const [bulkCount, setBulkCount] = useState(3);
+  const [neuroAssist, setNeuroAssist] = useState(false);
+  const [bulkExecuting, setBulkExecuting] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const lastTickTimeRef = useRef<number>(Date.now());
 
@@ -597,13 +602,106 @@ export default function MarketDetail() {
     setTradeDialog(true);
   }
 
-  function handleExecuteTrade() {
+  // ── NeuroAI assist timing helper (simple Ready/Wait, hides technical metrics) ──
+  // Uses same engine as NeuroAI Quantum FAB (coordinator recommendation) but
+  // simplified to a single Ready/Wait signal. Honors user's tick duration.
+  function getNeuroAssistStatus(): { state: "ready" | "wait"; label: string; detail: string } | null {
+    if (!neuroAssist) return null;
+    const shouldTrade = (rec as any)?.shouldTrade ?? false;
+    const winProb = (rec as any)?.winProbability ?? 50;
+    const conf = (rec as any)?.calibratedConfidence ?? (rec as any)?.confidence ?? 50;
+    const recommendedDuration = (rec as any)?.recommendedDuration ?? 5;
+    const durationDiff = Math.abs(tradeDuration - recommendedDuration);
+    if (durationDiff > 3) {
+      return { state: "wait", label: "Calibrating…", detail: `Adjusting for your ` + tradeDuration + ` ticks — waiting for optimal window.` };
+    }
+    if (!shouldTrade || winProb < 56 || conf < 52) {
+      return { state: "wait", label: "Waiting for optimal moment", detail: "AI is analyzing timing — hold for better entry." };
+    }
+    return { state: "ready", label: "Good timing — Ready", detail: `AI confirms timing for ` + tradeDuration + ` ticks.` };
+  }
+
+  async function handleExecuteTrade() {
     if (!symbol || !stake) return;
+    const assist = getNeuroAssistStatus();
+    // When NeuroAI assist is ON, enforce well-filtered precision for bulk trades
+    if (neuroAssist && assist?.state === "wait" && bulkEnabled && bulkCount > 1) {
+      toast.error("AI suggests waiting — bulk trades require precise timing. Try single trade or wait for Ready signal.");
+      return;
+    }
+
+    const singleStake = Number(stake);
+    if (bulkEnabled && bulkCount > 1) {
+      const count = Math.min(10, Math.max(2, Math.floor(bulkCount)));
+      const totalStake = singleStake * count;
+      if (totalStake > 0 && singleStake <= 0) {
+        toast.error("Stake must be greater than 0");
+        return;
+      }
+      setBulkExecuting(true);
+      toast.info(`Executing ` + count + `× ` + (tradeContract || "trade") + ` @ $` + singleStake.toFixed(2) + ` — total $` + totalStake.toFixed(2));
+      try {
+        const promises = Array.from({ length: count }, () => {
+          return new Promise<any>((resolve, reject) => {
+            const payload = {
+              symbol,
+              contractType: tradeContract || (tradeDir === "up" ? "CALL" : "PUT"),
+              direction: tradeDir,
+              stake: singleStake,
+              duration: tradeDuration,
+              durationUnit: "t" as const,
+              barrier: tradeBarrier,
+            };
+            const mut: any = executeTrade as any;
+            if (mut.mutateAsync) {
+              mut.mutateAsync({ data: payload }).then(resolve).catch(reject);
+            } else {
+              fetch("/api/trades", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+              }).then(r => r.json().then(j => r.ok ? resolve(j) : reject(j))).catch(reject);
+            }
+          });
+        });
+
+        const results: any[] = await Promise.allSettled(promises).then(settled =>
+          settled.map(s => s.status === "fulfilled" ? s.value : null).filter(Boolean)
+        );
+
+        const wonCount = results.filter(r => r.status === "won").length;
+        const totalProfit = results.reduce((sum, r) => sum + Number(r.profit ?? 0), 0);
+        const first = results[0];
+        if (results.length === 0) {
+          toast.error("Bulk trades failed to execute");
+        } else if (results.length === 1) {
+          toast.success(`Trade ` + (first.status === "won" ? "WON 🎉" : "LOST") + ` — ` + (first.status === "won" ? "+" : "") + `$` + Number(first.profit ?? 0).toFixed(2));
+        } else {
+          if (wonCount === results.length) {
+            toast.success(`Bulk complete: ` + wonCount + `/` + results.length + ` WON 🎉 — +$` + totalProfit.toFixed(2));
+          } else if (wonCount === 0) {
+            toast.error(`Bulk complete: 0/` + results.length + ` won — $` + totalProfit.toFixed(2));
+          } else {
+            toast.success(`Bulk complete: ` + wonCount + `/` + results.length + ` won — $` + totalProfit.toFixed(2));
+          }
+        }
+        setTradeDialog(false);
+        queryClient.invalidateQueries();
+        refetch();
+      } catch (err: any) {
+        toast.error(err?.error || "Bulk trade failed");
+      } finally {
+        setBulkExecuting(false);
+      }
+      return;
+    }
+
+    // Single trade path
     executeTrade.mutate({
-      data: { symbol, contractType: tradeContract || (tradeDir === "up" ? "RISE" : "FALL"), direction: tradeDir, stake: Number(stake), duration: tradeDuration, durationUnit: "t", barrier: tradeBarrier }
+      data: { symbol, contractType: tradeContract || (tradeDir === "up" ? "RISE" : "FALL"), direction: tradeDir, stake: singleStake, duration: tradeDuration, durationUnit: "t", barrier: tradeBarrier }
     }, {
       onSuccess: (result: any) => {
-        toast.success(`Trade ${result.status === "won" ? "WON 🎉" : "LOST"} — ${result.status === "won" ? "+" : ""}$${Number(result.profit ?? 0).toFixed(2)}`);
+        toast.success(`Trade ` + (result.status === "won" ? "WON 🎉" : "LOST") + ` — ` + (result.status === "won" ? "+" : "") + `$` + Number(result.profit ?? 0).toFixed(2));
         setTradeDialog(false);
         queryClient.invalidateQueries();
         refetch();
@@ -1002,11 +1100,16 @@ export default function MarketDetail() {
         </Card>
       )}
 
-      {/* Trade dialog */}
+      {/* Trade dialog — Manual execution with Bulk & NeuroAI Assist */}
       <Dialog open={tradeDialog} onOpenChange={setTradeDialog}>
-        <DialogContent className="bg-card border-border max-w-sm">
+        <DialogContent className="bg-card border-border max-w-sm max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Place Trade — {tradeContract}</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <span>Place Trade — {tradeContract}</span>
+              {tradeBarrier != null && (
+                <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 border border-violet-500/30">{tradeBarrier}</span>
+              )}
+            </DialogTitle>
           </DialogHeader>
           {isPaperMode && (
             <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-medium">
@@ -1014,55 +1117,165 @@ export default function MarketDetail() {
               <span><span className="font-bold">PAPER TRADE MODE</span> — trades are simulated, not sent to Deriv. Turn off in Settings to trade live.</span>
             </div>
           )}
-          <div className="space-y-3 py-2">
-            <div className="p-3 bg-secondary/30 rounded-lg flex justify-between items-start">
-              <div>
+          <div className="space-y-4 py-2">
+            {/* Market + Counter Row */}
+            <div className="p-3 bg-secondary/30 rounded-lg flex justify-between items-start gap-3">
+              <div className="min-w-0">
                 <div className="text-xs text-muted-foreground mb-0.5">Market</div>
-                <div className="font-medium">{market.displayName}</div>
+                <div className="font-medium truncate">{market.displayName}</div>
                 <div className="text-xs font-mono text-muted-foreground mt-0.5">Current: {currentPrice.toFixed(pipSize)}</div>
+                <div className="flex items-center gap-1.5 mt-1.5">
+                  <span className="px-2 py-0.5 rounded-md bg-primary/10 border border-primary/30 font-mono font-bold text-primary text-xs">
+                    {tradeContract.startsWith("DIGIT")
+                      ? (tradeBarrier != null ? `${tradeContract.replace("DIGIT", "")} ${tradeBarrier}` : tradeContract.replace("DIGIT", ""))
+                      : tradeContract === "CALL" ? "Rise (CALL)"
+                      : tradeContract === "PUT" ? "Fall (PUT)"
+                      : tradeContract}
+                  </span>
+                </div>
               </div>
               {dialogCountdown !== null && (
-                <div className={`text-right text-xs font-mono font-bold ${dialogCountdown <= 5 ? "text-red-400 animate-pulse" : dialogCountdown <= 10 ? "text-amber-400" : "text-muted-foreground"}`}>
-                  <div>{dialogCountdown}s</div>
-                  <div className="text-[9px] font-normal">to place</div>
+                <div className="flex flex-col items-center gap-1 shrink-0">
+                  <div className={`w-12 h-12 rounded-full flex flex-col items-center justify-center border-2 font-mono font-bold text-sm ${dialogCountdown <= 5 ? "border-red-500/50 bg-red-500/10 text-red-400 animate-pulse" : dialogCountdown <= 10 ? "border-amber-500/50 bg-amber-500/10 text-amber-400" : "border-primary/30 bg-primary/5 text-muted-foreground"}`}>
+                    <span className="leading-none">{dialogCountdown}</span>
+                    <span className="text-[8px] font-normal leading-none">SEC</span>
+                  </div>
+                  <span className="text-[9px] text-muted-foreground font-mono">to place</span>
                 </div>
               )}
             </div>
-            {/* Contract type badge */}
-            <div className="flex items-center gap-2 text-xs flex-wrap">
-              <span className="px-2 py-1 rounded-md bg-primary/10 border border-primary/30 font-mono font-bold text-primary">
-                {tradeContract.startsWith("DIGIT")
-                  ? (tradeBarrier != null ? `${tradeContract.replace("DIGIT", "")} ${tradeBarrier}` : tradeContract.replace("DIGIT", ""))
-                  : tradeContract === "CALL" ? "Rise (CALL)"
-                  : tradeContract === "PUT" ? "Fall (PUT)"
-                  : tradeContract}
-              </span>
-              {tradeBarrier != null && (
-                <span className="px-2 py-1 rounded-md bg-violet-500/10 border border-violet-500/30 font-mono text-violet-400 text-[10px]">Barrier: {tradeBarrier}</span>
+
+            {/* Stake + Duration */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="stake" className="text-xs">Stake (USD)</Label>
+                <Input id="stake" type="number" value={stake} min="0.35" step="0.5" onChange={(e) => setStake(e.target.value)} className="font-mono bg-secondary/50 h-8 text-sm" />
+                {bulkEnabled && bulkCount > 1 && stake && (
+                  <div className="text-[10px] font-mono text-muted-foreground">
+                    Total: <span className="text-amber-400 font-bold">${(Number(stake || 0) * bulkCount).toFixed(2)}</span> · {bulkCount}× ${Number(stake || 0).toFixed(2)}
+                  </div>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="ticks" className="text-xs">Duration (ticks)</Label>
+                <Input
+                  id="ticks"
+                  type="number"
+                  value={tradeDuration}
+                  min="1"
+                  max="15"
+                  step="1"
+                  onChange={(e) => setTradeDuration(Math.max(1, Math.min(15, Number(e.target.value))))}
+                  className="font-mono bg-secondary/50 h-8 text-sm"
+                />
+                <div className="text-[9px] text-muted-foreground">1 tick ≈ 1 sec</div>
+              </div>
+            </div>
+
+            {/* ── Bulk Trades — manual only ── */}
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-md bg-amber-500/15 border border-amber-500/30 flex items-center justify-center">
+                    <Layers className="w-3.5 h-3.5 text-amber-400" />
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold leading-none">Bulk Trades</p>
+                    <p className="text-[10px] text-muted-foreground leading-none mt-0.5">Execute multiple at once</p>
+                  </div>
+                </div>
+                <Switch checked={bulkEnabled} onCheckedChange={setBulkEnabled} />
+              </div>
+              {bulkEnabled && (
+                <div className="space-y-2.5 pt-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs text-muted-foreground">Number of trades</span>
+                    <div className="flex items-center gap-1.5">
+                      <Button variant="outline" size="sm" className="h-7 w-7 p-0 border-white/10" onClick={() => setBulkCount(c => Math.max(2, c - 1))}>−</Button>
+                      <div className="w-12 h-7 rounded-md bg-secondary/50 border border-white/10 flex items-center justify-center font-mono text-sm font-bold">
+                        {bulkCount}
+                      </div>
+                      <Button variant="outline" size="sm" className="h-7 w-7 p-0 border-white/10" onClick={() => setBulkCount(c => Math.min(10, c + 1))}>+</Button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-5 gap-1">
+                    {[2,3,5,7,10].map(n => (
+                      <button
+                        key={n}
+                        onClick={() => setBulkCount(n)}
+                        className={`h-6 rounded text-xs font-mono font-medium border ${bulkCount === n ? "bg-amber-500/20 border-amber-500/50 text-amber-300" : "bg-white/5 border-white/10 text-muted-foreground hover:border-white/20"}`}
+                      >
+                        {n}×
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-start gap-1.5 p-2 rounded-lg bg-amber-500/5 border border-amber-500/15">
+                    <AlertTriangle className="w-3 h-3 text-amber-400 mt-0.5 shrink-0" />
+                    <p className="text-[10px] leading-relaxed text-amber-300/80">
+                      Bulk over-exposes your account. Trades are filtered for precision — enable <span className="font-bold text-amber-300">NeuroAI Assist</span> for well-timed, synchronized entries.
+                    </p>
+                  </div>
+                </div>
               )}
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="stake">Stake (USD)</Label>
-              <Input id="stake" type="number" value={stake} min="0.35" step="0.5" onChange={(e) => setStake(e.target.value)} className="font-mono bg-secondary/50" />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="ticks">Duration (ticks)</Label>
-              <Input
-                id="ticks"
-                type="number"
-                value={tradeDuration}
-                min="1"
-                max="15"
-                step="1"
-                onChange={(e) => setTradeDuration(Math.max(1, Math.min(15, Number(e.target.value))))}
-                className="font-mono bg-secondary/50"
-              />
+
+            {/* ── NeuroAI Quantum Assist — uses same engine as FAB, hides technical metrics ── */}
+            <div className={`rounded-xl border p-3 space-y-3 ${neuroAssist ? "border-cyan-500/30 bg-cyan-500/5" : "border-white/10 bg-white/[0.03]"}`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className={`w-6 h-6 rounded-md border flex items-center justify-center ${neuroAssist ? "bg-cyan-500/15 border-cyan-500/30" : "bg-secondary/30 border-white/10"}`}>
+                    <Brain className={`w-3.5 h-3.5 ${neuroAssist ? "text-cyan-400" : "text-muted-foreground"}`} />
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold leading-none flex items-center gap-1.5">
+                      NeuroAI Quantum Assist
+                      <span className={`text-[8px] px-1 py-0.5 rounded font-mono ${neuroAssist ? "bg-cyan-500/20 text-cyan-300" : "bg-white/5 text-muted-foreground"}`}>{neuroAssist ? "ON" : "OFF"}</span>
+                    </p>
+                    <p className="text-[10px] text-muted-foreground leading-none mt-0.5">Smart timing & execution help</p>
+                  </div>
+                </div>
+                <Switch checked={neuroAssist} onCheckedChange={setNeuroAssist} />
+              </div>
+
+              {neuroAssist && (() => {
+                const assist = getNeuroAssistStatus();
+                if (!assist) return null;
+                const isReady = assist.state === "ready";
+                return (
+                  <div className={`rounded-lg p-2.5 border flex items-start gap-2.5 ${isReady ? "bg-green-500/10 border-green-500/20" : "bg-amber-500/10 border-amber-500/20"}`}>
+                    <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${isReady ? "bg-green-500/20" : "bg-amber-500/20 animate-pulse"}`}>
+                      {isReady ? <Zap className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5 text-amber-400" />}
+                    </div>
+                    <div className="min-w-0">
+                      <p className={`text-xs font-bold leading-none ${isReady ? "text-green-400" : "text-amber-400"}`}>{assist.label}</p>
+                      <p className="text-[10px] text-muted-foreground leading-relaxed mt-1">{assist.detail}</p>
+                      {!isReady && bulkEnabled && bulkCount > 1 && (
+                        <p className="text-[10px] font-medium text-amber-300 mt-1.5">Bulk trades are paused until timing is optimal.</p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {!neuroAssist && (
+                <p className="text-[10px] leading-relaxed text-muted-foreground/70">
+                  When off, you can execute trades freely. When on, NeuroAI uses the same engine as the FAB to advise timing — respecting your {tradeDuration}-tick duration — with simple Ready/Wait guidance (no technical charts).
+                </p>
+              )}
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setTradeDialog(false)}>Cancel</Button>
-            <Button onClick={handleExecuteTrade} disabled={executeTrade.isPending}>
-              {executeTrade.isPending ? "Executing…" : `Execute ${tradeContract}`}
+          <DialogFooter className="flex gap-2 sm:gap-2">
+            <Button variant="outline" onClick={() => setTradeDialog(false)} className="flex-1">Cancel</Button>
+            <Button
+              onClick={handleExecuteTrade}
+              disabled={executeTrade.isPending || bulkExecuting || (neuroAssist && getNeuroAssistStatus()?.state === "wait" && bulkEnabled && bulkCount > 1)}
+              className={`flex-1 font-bold ${bulkEnabled && bulkCount > 1 ? "bg-amber-600 hover:bg-amber-500 text-white" : "bg-primary hover:bg-primary/90"}`}
+            >
+              {bulkExecuting || executeTrade.isPending
+                ? (bulkEnabled && bulkCount > 1 ? `Executing ${bulkCount}×…` : "Executing…")
+                : bulkEnabled && bulkCount > 1
+                  ? (neuroAssist && getNeuroAssistStatus()?.state === "wait" ? "Waiting for AI…" : `Execute ${bulkCount}× ${tradeContract || "Trade"}`)
+                  : `Execute ${tradeContract || "Trade"}`}
             </Button>
           </DialogFooter>
         </DialogContent>

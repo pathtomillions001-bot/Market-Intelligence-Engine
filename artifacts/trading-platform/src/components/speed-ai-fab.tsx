@@ -592,7 +592,6 @@ export function SpeedAIFab() {
                       NeuroAI Quantum FAB
                       <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-normal">v4</span>
                     </h3>
-                    <p className="text-[10px] text-cyan-400/60 font-mono">2nd-Order Markov · Shannon Entropy</p>
                   </div>
                 </div>
                 <button onClick={() => setOpen(false)} className="text-muted-foreground hover:text-white p-1">
@@ -603,88 +602,6 @@ export function SpeedAIFab() {
               {/* ── STEP: CONFIG ── */}
               {step === "config" && (
                 <div className="p-4 space-y-4">
-                  {/* Preset Buttons */}
-                  <div className="space-y-1.5">
-                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Strategy Presets</p>
-                    <div className="grid grid-cols-3 gap-1">
-                      <button
-                        onClick={() => setConfig(p => ({ ...p, normalFamily: "overUnder", normalOverBarrier: 1, normalUnderBarrier: 8, recoveryFamilies: ["overUnder"], recoveryOverBarrier: 4, recoveryUnderBarrier: 5 }))}
-                        className="px-2 py-1.5 rounded-md bg-white/5 hover:bg-cyan-500/15 border border-white/10 text-[11px] font-medium text-left text-muted-foreground hover:text-cyan-300"
-                      >
-                        🛡️ 90% Over/Under
-                      </button>
-                      <button
-                        onClick={() => setConfig(p => ({ ...p, normalFamily: "differ", recoveryFamilies: ["match"] }))}
-                        className="px-2 py-1.5 rounded-md bg-white/5 hover:bg-cyan-500/15 border border-white/10 text-[11px] font-medium text-left text-muted-foreground hover:text-cyan-300"
-                      >
-                        ⚡ Differ / Match
-                      </button>
-                      <button
-                        onClick={() => setConfig(p => ({ ...p, normalFamily: "evenOdd", recoveryFamilies: ["evenOdd"] }))}
-                        className="px-2 py-1.5 rounded-md bg-white/5 hover:bg-cyan-500/15 border border-white/10 text-[11px] font-medium text-left text-muted-foreground hover:text-cyan-300"
-                      >
-                        📊 Parity Reversals
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Market Selection Mode */}
-                  <div className="space-y-2 p-2.5 rounded-xl bg-cyan-950/20 border border-cyan-500/20">
-                    <div className="flex items-center justify-between">
-                      <p className="text-[10px] uppercase tracking-wider text-cyan-300 font-semibold flex items-center gap-1.5">
-                        <Activity className="w-3.5 h-3.5 text-cyan-400" /> Market Execution Mode
-                      </p>
-                    </div>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      <button
-                        onClick={() => set("marketMode", "switching")}
-                        className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-left text-xs border transition-all ${
-                          config.marketMode === "switching"
-                            ? "bg-cyan-500/20 border-cyan-500/60 text-cyan-300 font-semibold"
-                            : "bg-white/5 border-white/10 text-muted-foreground hover:border-white/20"
-                        }`}
-                      >
-                        <Shuffle className="w-3.5 h-3.5 text-cyan-400" />
-                        <span>Smart Switching</span>
-                      </button>
-
-                      <button
-                        onClick={() => set("marketMode", "locked")}
-                        className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-left text-xs border transition-all ${
-                          config.marketMode === "locked"
-                            ? "bg-cyan-500/20 border-cyan-500/60 text-cyan-300 font-semibold"
-                            : "bg-white/5 border-white/10 text-muted-foreground hover:border-white/20"
-                        }`}
-                      >
-                        <Lock className="w-3.5 h-3.5 text-cyan-400" />
-                        <span>Locked Asset</span>
-                      </button>
-                    </div>
-
-                    {config.marketMode === "locked" && (
-                      <div className="pt-1.5">
-                        <p className="text-[10px] text-muted-foreground mb-1">Select Target Synthetic Asset</p>
-                        <Select value={config.lockedSymbol} onValueChange={v => set("lockedSymbol", v)}>
-                          <SelectTrigger className="h-8 text-xs bg-black/40 border-cyan-500/30">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {ALL_SCAN_MARKETS.map(m => (
-                              <SelectItem key={m.symbol} value={m.symbol}>
-                                {m.name} ({m.short})
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    )}
-                    <p className="text-[9px] text-muted-foreground/60">
-                      {config.marketMode === "switching"
-                        ? "AI dynamically rotates across top markets while strictly locking your contract family."
-                        : `Trades exclusively execute on ${ALL_SCAN_MARKETS.find(m => m.symbol === config.lockedSymbol)?.name ?? config.lockedSymbol}.`}
-                    </p>
-                  </div>
-
                   {/* Normal Strategy Selection */}
                   <FamilySelector
                     label="Normal Trade Strategy"
@@ -805,17 +722,6 @@ export function SpeedAIFab() {
                       Neural Scan All Markets
                     </Button>
 
-                    {config.marketMode === "locked" && (
-                      <Button
-                        onClick={() => handleStart(config.lockedSymbol, "locked")}
-                        disabled={loading}
-                        variant="outline"
-                        className="w-full h-9 border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/10 text-xs font-semibold"
-                      >
-                        <Zap className="w-3.5 h-3.5 mr-1.5" />
-                        Run Directly on {ALL_SCAN_MARKETS.find(m => m.symbol === config.lockedSymbol)?.short ?? "Asset"}
-                      </Button>
-                    )}
                   </div>
                 </div>
               )}
@@ -834,7 +740,7 @@ export function SpeedAIFab() {
                       </motion.div>
                       <div>
                         <p className="text-xs font-bold text-white tracking-wide leading-none">Quantum Neural Scan</p>
-                        <p className="text-[9px] text-cyan-400/60 mt-0.5">2nd-Order Markov & Entropy Scoring</p>
+                        <p className="text-[9px] text-cyan-400/60 mt-0.5">Neural Scoring Active</p>
                       </div>
                     </div>
                     <div className="text-right">
