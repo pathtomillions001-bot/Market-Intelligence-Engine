@@ -12,6 +12,7 @@ import { broadcastSSE } from "../lib/sse";
 import { getLocalTodayStart } from "../lib/tz";
 import { getFallbackPayout } from "../lib/payouts";
 import { resolveRecoveryPayout } from "../lib/recovery-payout";
+import { evaluateManualAssist } from "../lib/speed-ai-engine";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 
 const router = Router();
@@ -227,6 +228,46 @@ router.get("/", async (req, res): Promise<void> => {
     .offset(p.offset ?? 0);
 
   res.json(trades.map(formatTrade));
+});
+
+// ── Manual assist evaluation — NeuroAI Quantum timing for manual execution ──
+// Uses same Quantum engine as FAB but for user's exact contract/barrier/duration.
+// Returns simple Ready/Wait without exposing Markov/Shannon internals.
+router.post("/assist", async (req, res): Promise<void> => {
+  const { symbol, contractType, barrier, duration } = req.body as {
+    symbol?: string;
+    contractType?: string;
+    barrier?: number | null;
+    duration?: number;
+  };
+
+  if (!symbol || !contractType) {
+    res.status(400).json({ error: "symbol and contractType required" });
+    return;
+  }
+
+  const dur = typeof duration === "number" && duration >= 1 && duration <= 15 ? duration : 5;
+  // Validate contract type against known set
+  const allowed = ["DIGITOVER","DIGITUNDER","DIGITEVEN","DIGITODD","DIGITMATCH","DIGITDIFF","CALL","PUT","RISE","FALL"];
+  const ct = (contractType === "RISE" ? "CALL" : contractType === "FALL" ? "PUT" : contractType) as any;
+  if (!allowed.includes(ct)) {
+    res.status(400).json({ error: "Invalid contractType" });
+    return;
+  }
+
+  try {
+    const result = evaluateManualAssist(symbol, ct, barrier ?? undefined, dur);
+    // Hide technical metrics: only return ready/wait with simple reason
+    res.json({
+      ready: result.ready,
+      label: result.ready ? "Good timing — Ready" : result.greenLight ? "Waiting for optimal moment" : "Calibrating…",
+      detail: result.reason,
+      // Keep internal score hidden from UI, but return for debugging if needed (not displayed)
+      _debug: { score: Math.round(result.score), winProb: Math.round(result.winProbability*100), ev: result.expectedValue, greenLight: result.greenLight }
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Assist evaluation failed" });
+  }
 });
 
 // ── Manual trade execution ─────────────────────────────────────────────────────

@@ -479,6 +479,8 @@ export default function MarketDetail() {
   const [bulkCount, setBulkCount] = useState(3);
   const [neuroAssist, setNeuroAssist] = useState(false);
   const [bulkExecuting, setBulkExecuting] = useState(false);
+  const [assistStatus, setAssistStatus] = useState<{ ready: boolean; label: string; detail: string } | null>(null);
+  const [assistLoading, setAssistLoading] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const lastTickTimeRef = useRef<number>(Date.now());
 
@@ -564,6 +566,51 @@ export default function MarketDetail() {
     return () => clearInterval(iv);
   }, [tradeDialog]);
 
+  // ── NeuroAI Quantum Assist polling — MUST be before early return ──
+  useEffect(() => {
+    if (!tradeDialog || !neuroAssist || !symbol || !tradeContract) {
+      setAssistStatus(null);
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    async function fetchAssist() {
+      try {
+        setAssistLoading(true);
+        const res = await fetch("/api/trades/assist", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            symbol,
+            contractType: tradeContract,
+            barrier: tradeBarrier ?? null,
+            duration: tradeDuration,
+          }),
+        });
+        if (!res.ok) throw new Error("assist failed");
+        const data = await res.json();
+        if (!cancelled) {
+          setAssistStatus({ ready: !!data.ready, label: data.label, detail: data.detail });
+        }
+      } catch {
+        if (!cancelled) {
+          setAssistStatus(prev => prev ?? { ready: false, label: "Calibrating…", detail: "Syncing Quantum analysis…" });
+        }
+      } finally {
+        if (!cancelled) setAssistLoading(false);
+      }
+    }
+
+    fetchAssist();
+    timer = setInterval(fetchAssist, 1400);
+
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [tradeDialog, neuroAssist, symbol, tradeContract, tradeBarrier, tradeDuration]);
+
   if (isLoading || !market) {
     return (
       <div className="p-8 flex items-center gap-3 text-muted-foreground">
@@ -602,31 +649,27 @@ export default function MarketDetail() {
     setTradeDialog(true);
   }
 
-  // ── NeuroAI assist timing helper (simple Ready/Wait, hides technical metrics) ──
-  // Uses same engine as NeuroAI Quantum FAB (coordinator recommendation) but
-  // simplified to a single Ready/Wait signal. Honors user's tick duration.
+  // ── NeuroAI assist — server-evaluated via Quantum engine (same as FAB) ──
+  // Calls POST /api/trades/assist with exact contract/barrier/duration.
+  // Hides Markov/Shannon internals, returns simple Ready/Wait for user's ticks.
   function getNeuroAssistStatus(): { state: "ready" | "wait"; label: string; detail: string } | null {
     if (!neuroAssist) return null;
-    const shouldTrade = (rec as any)?.shouldTrade ?? false;
-    const winProb = (rec as any)?.winProbability ?? 50;
-    const conf = (rec as any)?.calibratedConfidence ?? (rec as any)?.confidence ?? 50;
-    const recommendedDuration = (rec as any)?.recommendedDuration ?? 5;
-    const durationDiff = Math.abs(tradeDuration - recommendedDuration);
-    if (durationDiff > 3) {
-      return { state: "wait", label: "Calibrating…", detail: `Adjusting for your ` + tradeDuration + ` ticks — waiting for optimal window.` };
-    }
-    if (!shouldTrade || winProb < 56 || conf < 52) {
-      return { state: "wait", label: "Waiting for optimal moment", detail: "AI is analyzing timing — hold for better entry." };
-    }
-    return { state: "ready", label: "Good timing — Ready", detail: `AI confirms timing for ` + tradeDuration + ` ticks.` };
+    if (!assistStatus) return { state: "wait", label: "Analyzing…", detail: "Quantum engine evaluating your " + tradeDuration + "-tick setup…" };
+    return { state: assistStatus.ready ? "ready" : "wait", label: assistStatus.label, detail: assistStatus.detail };
   }
 
   async function handleExecuteTrade() {
     if (!symbol || !stake) return;
     const assist = getNeuroAssistStatus();
-    // When NeuroAI assist is ON, enforce well-filtered precision for bulk trades
-    if (neuroAssist && assist?.state === "wait" && bulkEnabled && bulkCount > 1) {
-      toast.error("AI suggests waiting — bulk trades require precise timing. Try single trade or wait for Ready signal.");
+    // When NeuroAI assist is ON, enforce Quantum timing for ALL trades (single + bulk)
+    // This makes assist actually helpful — it evaluates your exact barrier + ticks.
+    if (neuroAssist && assist?.state === "wait") {
+      const isBulk = bulkEnabled && bulkCount > 1;
+      toast.error(
+        isBulk
+          ? "AI suggests waiting — bulk trades require precise timing. Wait for Ready signal."
+          : `AI suggests waiting — ${assist.detail} Adjust ticks or wait for Ready.`
+      );
       return;
     }
 
@@ -1268,14 +1311,16 @@ export default function MarketDetail() {
             <Button variant="outline" onClick={() => setTradeDialog(false)} className="flex-1">Cancel</Button>
             <Button
               onClick={handleExecuteTrade}
-              disabled={executeTrade.isPending || bulkExecuting || (neuroAssist && getNeuroAssistStatus()?.state === "wait" && bulkEnabled && bulkCount > 1)}
+              disabled={executeTrade.isPending || bulkExecuting || (neuroAssist && getNeuroAssistStatus()?.state === "wait")}
               className={`flex-1 font-bold ${bulkEnabled && bulkCount > 1 ? "bg-amber-600 hover:bg-amber-500 text-white" : "bg-primary hover:bg-primary/90"}`}
             >
               {bulkExecuting || executeTrade.isPending
                 ? (bulkEnabled && bulkCount > 1 ? `Executing ${bulkCount}×…` : "Executing…")
-                : bulkEnabled && bulkCount > 1
-                  ? (neuroAssist && getNeuroAssistStatus()?.state === "wait" ? "Waiting for AI…" : `Execute ${bulkCount}× ${tradeContract || "Trade"}`)
-                  : `Execute ${tradeContract || "Trade"}`}
+                : neuroAssist && getNeuroAssistStatus()?.state === "wait"
+                  ? "Waiting for AI…"
+                  : bulkEnabled && bulkCount > 1
+                    ? `Execute ${bulkCount}× ${tradeContract || "Trade"}`
+                    : `Execute ${tradeContract || "Trade"}`}
             </Button>
           </DialogFooter>
         </DialogContent>
